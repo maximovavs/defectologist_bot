@@ -1,0 +1,60 @@
+version: 1
+channel:
+  locale: "ru-RU"
+  timezone: "Asia/Nicosia"
+  disclaimer: "Информация носит образовательный характер и не заменяет консультацию специалиста."
+  hashtags: ["#логопед", "#речь", "#билингвизм", "#дети"]
+
+publishing:
+  # Default posting window for scheduled posts (local tz)
+  window:
+    hour: 10
+    minute: 30
+
+rubrics:
+  - id: tip_of_day
+    title: "Совет логопеда дня"
+    cadence: "DAILY"
+    sources: ["logopediya_news", "logorina_news"]
+    format: "parent_friendly"
+    media: ["image_card"]
+
+  - id: play_and_speak
+    title: "Играем и говорим"
+    cadence: "WEEKLY"
+    byweekday: ["TU", "SA"]
+    sources: ["logorina_news", "logopedy_ru_articles"]
+    format: "exercise_steps"
+    media: ["image_card"]
+
+  - id: myth_fact
+    title: "Миф / Факт"
+    cadence: "WEEKLY"
+    byweekday: ["WE"]
+    sources: ["asha_multilingual_public", "nih_pmc_bilingual_science"]
+    format: "myth_fact"
+    media: ["image_card"]
+
+  - id: bilingual_corner
+    title: "Русский за границей"
+    cadence: "WEEKLY"
+    byweekday: ["TH"]
+    sources: ["asha_multilingual_public", "nih_pmc_bilingual_science", "logoportal_articles"]
+    format: "bilingual_parents"
+    media: ["image_card"]
+
+  - id: method_piggybank
+    title: "Методическая копилка"
+    cadence: "WEEKLY"
+    byweekday: ["SU"]
+    sources: ["logomag_lib", "logoportal_articles", "logopedy_ru_articles"]
+    format: "pro_friendly"
+    media: ["image_card"]
+
+  - id: age_norms
+    title: "Возрастная норма"
+    cadence: "WEEKLY"
+    byweekday: ["FR"]
+    sources: ["logopediya_news", "logoportal_articles"]
+    format: "age_norms"
+    media: ["image_card"]

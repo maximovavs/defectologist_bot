@@ -1,2 +1,31 @@
-# defectologist_bot
-Bot → verified sources → regular columns → auto-publishing → transparent links to original sources. The channel can operate without the participation of a speech therapist, and if desired, a specialist can be involved on a case-by-case basis (comments, paid consultations).
+# Logoped Channel Bot (v1)
+
+Автопостинг рубрик в Telegram-канал без участия автора. Данные берутся из заданных источников,
+в постах всегда указывается ссылка на первоисточник и дисклеймер.
+
+## Быстрый старт
+
+1) Создайте Telegram-бота через @BotFather и получите токен.
+
+2) Узнайте chat_id вашего канала:
+- добавьте бота в админы канала (права: постинг сообщений и медиа),
+- отправьте любой тестовый пост вручную,
+- откройте https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates и найдите chat.id.
+
+3) В GitHub репозитории добавьте Secrets:
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_CHAT_ID
+- (опционально) OPENAI_API_KEY — если хотите переформулирование через LLM.
+
+4) Запустите workflow вручную или дождитесь расписания.
+
+## Конфиги
+
+- config/sources.yml — источники
+- config/rubrics.yml — рубрики и расписание
+
+## Принцип безопасности и качества
+
+- бот НЕ ставит диагнозы и НЕ даёт "лечения"
+- всегда дисклеймер
+- всегда ссылки на источники

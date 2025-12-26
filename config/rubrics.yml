@@ -1,4 +1,4 @@
-version: 1.1
+version: 1.2
 
 channel:
   locale: "ru-RU"
@@ -7,8 +7,10 @@ channel:
   hashtags: ["#логопед", "#речь", "#билингвизм", "#развитиеРечи"]
 
 publishing:
-  max_posts_per_run: 2
-  max_posts_per_audience_per_run: 1
+  max_posts_per_run: 3
+  max_posts_per_audience_per_run: 2
+  drafts_mode: "skip"   # skip | post_to_drafts_chat
+  drafts_chat_id_env: "TELEGRAM_DRAFTS_CHAT_ID"
 
 audiences:
   parents:
@@ -51,6 +53,14 @@ audiences:
         byweekday: ["FR"]
         sources: ["logopediya_documents_rss", "logoportal_latest"]
         format: "age_norms"
+        media: ["image_card"]
+
+      - id: question_week
+        title: "Вопрос недели"
+        cadence: "WEEKLY"
+        byweekday: ["SU"]
+        sources: ["asha_multilingual_public"]
+        format: "question_week"
         media: ["image_card"]
 
   pros:

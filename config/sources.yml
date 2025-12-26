@@ -1,38 +1,78 @@
-version: 1
-# Sources are grouped by content type. Each source has a 'type' that maps to a fetcher.
-# Supported types in v1: rss, html_list, static
-# - rss: parse RSS/Atom feed
-# - html_list: parse an HTML page and extract list items using CSS selectors
-# - static: a fixed URL list, rotated for evergreen reference material
+version: 1.1
+
+quality:
+  allow_domains:
+    - "logopediya.com"
+    - "logorina.ru"
+    - "logomag.ru"
+    - "logoportal.ru"
+    - "logopedy.ru"
+    - "asha.org"
+    - "pmc.ncbi.nlm.nih.gov"
+  deny_keywords:
+    - "форум"
+    - "реклама"
+    - "регистрация"
+    - "пароль"
+    - "вход"
+    - "объявления"
+    - "купить"
+    - "магазин"
+    - "доставка"
+    - "вылечить"
+    - "экстрасенс"
+  boost_keywords:
+    - "упраж"
+    - "артикуляц"
+    - "дыхател"
+    - "фонемат"
+    - "лексичес"
+    - "граммат"
+    - "постанов"
+    - "звук"
+    - "билинг"
+    - "запуск речи"
+    - "ОНР"
+    - "дизартр"
+    - "алал"
+    - "заик"
+    - "дисграф"
+    - "дислекс"
 
 sources:
-  - id: logopediya_news
-    name: "Logopediya.com (разделы/материалы)"
-    type: html_list
-    url: "https://logopediya.com/"
+  - id: logopediya_documents_rss
+    name: "Logopediya.com — Документация (RSS)"
+    type: rss
+    url: "https://logopediya.com/documents/rss.xml"
+
+  - id: logopediya_ppt_rss
+    name: "Logopediya.com — Презентации (RSS)"
+    type: rss
+    url: "https://logopediya.com/ppt/rss.xml"
+
+  - id: logopediya_publications_latest
+    name: "Logopediya.com — Публикации (последние)"
+    type: html_latest
+    url: "https://logopediya.com/publ/"
     selectors:
       item: "a"
       title: "text"
       link: "href"
-    include_if:
-      link_contains_any: ["logopediya.com"]
-    notes: "Сайт проекта 'Логопед' создан в 2007 году; содержит материалы для родителей и специалистов."
 
-  - id: logorina_news
-    name: "Logorina.ru (новости/конспекты/материалы)"
-    type: html_list
+  - id: logorina_latest
+    name: "Logorina.ru — Последние материалы"
+    type: html_latest
     url: "https://logorina.ru/"
     selectors:
       item: "a"
       title: "text"
       link: "href"
     include_if:
-      link_contains_any: ["logorina.ru/news/"]
-    notes: "Сайт учителя-логопеда; полезен для практических материалов (конспекты, речевой материал)."
+      link_contains_any: ["/news/"]
 
-  - id: logomag_lib
-    name: "Logomag.ru (библиотека)"
-    type: html_list
+  - id: logomag_lib_latest
+    name: "Logomag.ru — Библиотека (свежее)"
+    type: html_latest
     url: "https://logomag.ru/lib/"
     selectors:
       item: "a"
@@ -40,44 +80,37 @@ sources:
       link: "href"
     include_if:
       link_contains_any: ["/lib/"]
-    notes: "Библиотека ЛОГОМАГ: методические пособия, материалы для логопедов."
 
-  - id: logoportal_articles
-    name: "Logoportal.ru (статьи)"
-    type: html_list
+  - id: logoportal_latest
+    name: "LogoPortal.ru — Статьи (последние)"
+    type: html_latest
     url: "https://logoportal.ru/"
     selectors:
       item: "a"
       title: "text"
       link: "href"
     include_if:
-      link_contains_any: ["statya-"]
-    notes: "Портал с методическими статьями и разработками; много материалов по билингвизму и лексико-грамматике."
+      link_contains_any: ["statya-", "/statya-"]
 
-  - id: logopedy_ru_articles
-    name: "Logopedy.ru (статьи по логопедии)"
-    type: html_list
+  - id: logopedy_articles_latest
+    name: "Logopedy.ru — Литература/статьи"
+    type: html_latest
     url: "https://logopedy.ru/portal/logoped-literature/logoped-article.html"
     selectors:
       item: "a"
       title: "text"
       link: "href"
-    include_if:
-      link_contains_any: ["logopedy.ru"]
-    notes: "Раздел со статьями/литературой и наглядными материалами."
 
   - id: asha_multilingual_public
-    name: "ASHA (публичные материалы о многоязычии)"
+    name: "ASHA — Public (multilingual & late language emergence)"
     type: static
     urls:
       - "https://www.asha.org/public/speech/development/learning-more-than-one-language/"
       - "https://www.asha.org/practice-portal/clinical-topics/late-language-emergence/"
-    notes: "Доказательные тезисы: многоязычие не 'портит' речь; не рекомендуют принудительную монолингвальность."
 
-  - id: nih_pmc_bilingual_science
-    name: "PubMed Central (обзоры по билингвизму)"
+  - id: pmc_bilingual_science
+    name: "PubMed Central — bilingual development reviews"
     type: static
     urls:
       - "https://pmc.ncbi.nlm.nih.gov/articles/PMC6168212/"
       - "https://pmc.ncbi.nlm.nih.gov/articles/PMC8866745/"
-    notes: "Надёжные научные обзоры: код-миксинг нормален; билингвизм не вызывает задержек сам по себе."

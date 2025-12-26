@@ -30,7 +30,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
           # none | groq | gemini
-          REWRITE_PROVIDER: "none"
+          REWRITE_PROVIDER: "gemini"
           # parents | pros | both
           AUDIENCE: "parents"
 

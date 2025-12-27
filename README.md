@@ -1,31 +1,27 @@
-# Logoped Channel Bot (v1)
+# Logoped Channel Bot (v1.3)
 
-Автопостинг рубрик в Telegram-канал без участия автора. Данные берутся из заданных источников,
-в постах всегда указывается ссылка на первоисточник и дисклеймер.
+v1.3 adds:
+- Two-channel publishing:
+  - Main channel: TELEGRAM_CHAT_ID
+  - Drafts channel: TELEGRAM_DRAFTS_CHAT_ID (rejected by fact-check, etc.)
+- Weekly Quality Dashboard (posts on Sunday by default):
+  - how many items passed vs rejected
+  - top rejection reasons
 
-## Быстрый старт
+## Secrets
 
-1) Создайте Telegram-бота через @BotFather и получите токен.
-
-2) Узнайте chat_id вашего канала:
-- добавьте бота в админы канала (права: постинг сообщений и медиа),
-- отправьте любой тестовый пост вручную,
-- откройте https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates и найдите chat.id.
-
-3) В GitHub репозитории добавьте Secrets:
+Required:
 - TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID
-- (опционально) OPENAI_API_KEY — если хотите переформулирование через LLM.
 
-4) Запустите workflow вручную или дождитесь расписания.
+Strongly recommended for v1.3:
+- TELEGRAM_DRAFTS_CHAT_ID (private channel for drafts)
 
-## Конфиги
+Optional:
+- GROQ_API_KEY
+- GEMINI_API_KEY
 
-- config/sources.yml — источники
-- config/rubrics.yml — рубрики и расписание
+## env switches
 
-## Принцип безопасности и качества
-
-- бот НЕ ставит диагнозы и НЕ даёт "лечения"
-- всегда дисклеймер
-- всегда ссылки на источники
+- AUDIENCE = parents | pros | both
+- REWRITE_PROVIDER = none | auto | groq | gemini

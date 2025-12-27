@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os, re, json, time, random, hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urljoin
@@ -17,7 +17,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/1.2 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/1.3 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
@@ -61,6 +61,10 @@ def sha1(s: str) -> str:
 def get_local_now(tzname: str) -> datetime:
     return datetime.now(tz=tz.gettz(tzname))
 
+def iso_week_key(dt: datetime) -> str:
+    y, w, _ = dt.isocalendar()
+    return f"{y}-W{w:02d}"
+
 def is_due(rubric: Dict[str,Any], now: datetime) -> bool:
     cadence = (rubric.get("cadence") or "DAILY").upper()
     if cadence == "DAILY":
@@ -79,11 +83,8 @@ def load_sources() -> Tuple[Dict[str,Source], Dict[str,Any]]:
         out[s["id"]] = Source(**s)
     return out, quality
 
-def state_path(name: str) -> Path:
-    return STATE_DIR/name
-
 def load_state(name: str, default: Any) -> Any:
-    p = state_path(name)
+    p = STATE_DIR/name
     if not p.exists():
         return default
     try:
@@ -92,12 +93,7 @@ def load_state(name: str, default: Any) -> Any:
         return default
 
 def save_state(name: str, data: Any) -> None:
-    state_path(name).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
-
-def append_draft(entry: Dict[str,Any]) -> None:
-    drafts = load_state("drafts.json",[])
-    drafts.append(entry)
-    save_state("drafts.json", drafts[-2000:])
+    (STATE_DIR/name).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
 
 def safe_domain(url: str) -> str:
     try:
@@ -201,7 +197,7 @@ def fetch_html_latest(url: str, selectors: Dict[str,str], include_if: Optional[D
     nodes = soup.select(selectors.get("item","a"))
     link_contains = set((include_if or {}).get("link_contains_any",[]) or [])
     items=[]
-    for a in nodes[:800]:
+    for a in nodes[:900]:
         href = a.get("href") or ""
         title = norm_space(a.get_text(" ",strip=True))
         if not href or not title:
@@ -214,7 +210,7 @@ def fetch_html_latest(url: str, selectors: Dict[str,str], include_if: Optional[D
     uniq={}
     for it in items:
         uniq[it["link"]] = it
-    return list(uniq.values())[:80]
+    return list(uniq.values())[:100]
 
 def fetch_static(urls: List[str]) -> List[Dict[str,str]]:
     return [{"title":"","link":u,"summary":""} for u in urls]
@@ -238,41 +234,6 @@ def enrich_article(item: Dict[str,str]) -> Dict[str,str]:
         sm = extract_article_summary(soup)
         if sm: item["article_summary"]=sm
     return item
-
-def pick_item(items: List[Dict[str,str]], used_canon: set[str], used_titles: set[str], quality_cfg: Dict[str,Any]) -> Tuple[Optional[Dict[str,str]], Optional[Dict[str,Any]]]:
-    ranked=[]
-    for it in items:
-        t = norm_space(it.get("title",""))
-        l = it.get("link","")
-        if not l: continue
-        s,_ = score_item(t or "(no title)", l, quality_cfg)
-        if s>=0:
-            ranked.append((s,it))
-    ranked.sort(key=lambda x:x[0], reverse=True)
-    for s,it in ranked[:18]:
-        it = enrich_article(dict(it))
-        canon = it.get("canonical") or it.get("link","")
-        if not canon or canon in used_canon:
-            continue
-        raw_title = it.get("article_title") or it.get("title") or ""
-        tkey = norm_title_key(raw_title)
-        if tkey and tkey in used_titles:
-            continue
-        dom = safe_domain(canon)
-        summ = it.get("article_summary") or it.get("summary") or ""
-        ok, reason = is_scientific_or_methodical(dom, raw_title, summ, quality_cfg)
-        if not ok:
-            return None, {
-                "ts": datetime.utcnow().isoformat()+"Z",
-                "reason": f"fact_check_failed:{reason}",
-                "title": raw_title,
-                "link": canon,
-                "domain": dom,
-            }
-        it["picked_title"]=raw_title
-        it["picked_summary"]=summ
-        return it, None
-    return None, None
 
 def _is_quota_error(status: int, text: str) -> bool:
     t=(text or "").lower()
@@ -389,9 +350,9 @@ def make_text(title: str, rubric_format: str, channel_cfg: Dict[str,Any], picked
                 "• 5 минут «описательной речи» (цвет, форма, назначение, действия).\n")
 
     text = f"**{title} {title_suffix}**\n\n{body}\n"
-    if picked_title and rubric_format!="question_week":
+    if picked_title and rubric_format not in ("question_week","quality_dashboard"):
         text += f"Материал: {picked_title}\n\n"
-    if summary and rubric_format!="question_week":
+    if summary and rubric_format not in ("question_week","quality_dashboard"):
         text += f"Коротко: {summary}\n\n"
     if link:
         text += f"Источник: {link}\n"
@@ -440,24 +401,112 @@ def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
     with photo_path.open("rb") as f:
         tg_request("sendPhoto", data={"chat_id": chat_id, "caption": caption, "parse_mode":"Markdown"}, files={"photo": f})
 
-def handle_draft(pub_cfg: Dict[str,Any], entry: Dict[str,Any]) -> None:
+def send_message(chat_id: str, text: str) -> None:
+    tg_request("sendMessage", data={"chat_id": chat_id, "text": text, "parse_mode":"Markdown"})
+
+def load_weekly_stats() -> Dict[str,Any]:
+    return load_state("stats_weekly.json", {})
+
+def save_weekly_stats(stats: Dict[str,Any]) -> None:
+    save_state("stats_weekly.json", stats)
+
+def bump_weekly(stats: Dict[str,Any], week_key: str, field: str, amount: int = 1, reason: Optional[str]=None) -> None:
+    wk = stats.get(week_key) or {"passed": 0, "rejected": 0, "reasons": {}}
+    wk[field] = int(wk.get(field,0)) + amount
+    if reason:
+        rs = wk.get("reasons") or {}
+        rs[reason] = int(rs.get(reason,0)) + amount
+        wk["reasons"] = rs
+    stats[week_key] = wk
+
+def format_dashboard(stats: Dict[str,Any], week_key: str, title: str) -> str:
+    wk = stats.get(week_key) or {"passed": 0, "rejected": 0, "reasons": {}}
+    passed = int(wk.get("passed",0))
+    rejected = int(wk.get("rejected",0))
+    reasons = wk.get("reasons") or {}
+    top = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:6]
+    lines = [f"**{title} ({week_key})**",
+             "",
+             f"✅ Прошло: {passed}",
+             f"🗂️ В черновики/отсев: {rejected}",
+             ""]
+    if top:
+        lines.append("Причины отсева (топ):")
+        for k,v in top:
+            lines.append(f"• {k}: {v}")
+    else:
+        lines.append("Причины отсева: нет данных.")
+    lines.append("")
+    lines.append("_Примечание: это тех. статистика качества источников/фильтров._")
+    return "\n".join(lines)
+
+def handle_draft(pub_cfg: Dict[str,Any], entry: Dict[str,Any], stats: Dict[str,Any], week_key: str) -> None:
     mode = (pub_cfg.get("drafts_mode") or "skip").strip()
-    append_draft(entry)
-    if mode=="post_to_drafts_chat":
+    drafts_chat_id = ""
+    if mode == "post_to_drafts_chat":
         env_name = pub_cfg.get("drafts_chat_id_env") or "TELEGRAM_DRAFTS_CHAT_ID"
         drafts_chat_id = os.getenv(env_name,"").strip() or TELEGRAM_DRAFTS_CHAT_ID
-        if drafts_chat_id:
-            msg = ("**Черновик/пропуск**\n\n"
-                   f"Причина: {entry.get('reason')}\n"
-                   f"Заголовок: {entry.get('title')}\n"
-                   f"Ссылка: {entry.get('link')}\n")
-            tg_request("sendMessage", data={"chat_id": drafts_chat_id, "text": msg, "parse_mode":"Markdown"})
+
+    drafts = load_state("drafts.json", [])
+    drafts.append(entry)
+    save_state("drafts.json", drafts[-2000:])
+
+    bump_weekly(stats, week_key, "rejected", 1, reason=str(entry.get("reason","unknown")))
+
+    if mode == "post_to_drafts_chat" and drafts_chat_id:
+        msg = ("**Черновик/пропуск**\n\n"
+               f"Причина: {entry.get('reason')}\n"
+               f"Рубрика: {entry.get('rubric_title','')}\n"
+               f"Заголовок: {entry.get('title')}\n"
+               f"Ссылка: {entry.get('link')}\n")
+        send_message(drafts_chat_id, msg)
+
+def pick_item(items: List[Dict[str,str]], used_canon: set[str], used_titles: set[str], quality_cfg: Dict[str,Any]) -> Tuple[Optional[Dict[str,str]], Optional[Dict[str,Any]]]:
+    ranked=[]
+    for it in items:
+        t = norm_space(it.get("title",""))
+        l = it.get("link","")
+        if not l: 
+            continue
+        s,_ = score_item(t or "(no title)", l, quality_cfg)
+        if s>=0:
+            ranked.append((s,it))
+    ranked.sort(key=lambda x:x[0], reverse=True)
+
+    for s,it in ranked[:18]:
+        it = enrich_article(dict(it))
+        canon = it.get("canonical") or it.get("link","")
+        if not canon or canon in used_canon:
+            continue
+
+        raw_title = it.get("article_title") or it.get("title") or ""
+        tkey = norm_title_key(raw_title)
+        if tkey and tkey in used_titles:
+            continue
+
+        dom = safe_domain(canon)
+        summ = it.get("article_summary") or it.get("summary") or ""
+        ok, reason = is_scientific_or_methodical(dom, raw_title, summ, quality_cfg)
+        if not ok:
+            return None, {
+                "ts": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00","Z"),
+                "reason": f"fact_check_failed:{reason}",
+                "title": raw_title,
+                "link": canon,
+                "domain": dom,
+            }
+
+        it["picked_title"]=raw_title
+        it["picked_summary"]=summ
+        return it, None
+    return None, None
 
 def run() -> None:
     rub_cfg = load_yaml(CFG_DIR/"rubrics.yml")
     channel_cfg = rub_cfg.get("channel",{})
     tzname = channel_cfg.get("timezone","Asia/Nicosia")
     now = get_local_now(tzname)
+    week_key = iso_week_key(now)
 
     sources, quality_cfg = load_sources()
 
@@ -467,6 +516,8 @@ def run() -> None:
     pub_cfg = rub_cfg.get("publishing",{})
     max_posts = int(pub_cfg.get("max_posts_per_run",3))
     max_per_aud = int(pub_cfg.get("max_posts_per_audience_per_run",2))
+
+    stats = load_weekly_stats()
 
     audiences_cfg = rub_cfg.get("audiences",{})
     if AUDIENCE=="both":
@@ -484,11 +535,24 @@ def run() -> None:
         title_suffix = aud_cfg.get("title_suffix","")
         rubrics = aud_cfg.get("rubrics",[]) or []
         aud_posted=0
+
         for rubric in rubrics:
             if posted>=max_posts or aud_posted>=max_per_aud:
                 break
             if not is_due(rubric, now):
                 continue
+
+            if rubric.get("format") == "quality_dashboard":
+                dash_title = pub_cfg.get("dashboard_title","Quality dashboard недели")
+                dashboard_text = format_dashboard(stats, week_key, dash_title)
+                dash_chat = (pub_cfg.get("dashboard_chat") or "main").strip().lower()
+                chat_id = TELEGRAM_CHAT_ID
+                if dash_chat == "drafts" and TELEGRAM_DRAFTS_CHAT_ID:
+                    chat_id = TELEGRAM_DRAFTS_CHAT_ID
+                send_message(chat_id, dashboard_text)
+                time.sleep(0.7)
+                continue
+
             all_items=[]
             for sid in rubric.get("sources",[]):
                 src = sources.get(sid)
@@ -498,28 +562,36 @@ def run() -> None:
                     all_items.extend(fetch_source(src))
                 except Exception as e:
                     print(f"[WARN] source {sid} failed: {e}")
+
             picked, draft = pick_item(all_items, used_canon, used_titles, quality_cfg)
             if draft:
                 draft.update({"audience": aud, "rubric": rubric.get("id",""), "rubric_title": rubric.get("title","")})
-                handle_draft(pub_cfg, draft)
+                handle_draft(pub_cfg, draft, stats, week_key)
                 continue
             if not picked:
                 continue
+
             title = rubric.get("title","Рубрика")
             text = make_text(title, rubric.get("format",""), channel_cfg, picked, title_suffix)
             card = render_image_card(title, "Коротко и по делу")
             send_photo(TELEGRAM_CHAT_ID, card, text[:950])
+
+            bump_weekly(stats, week_key, "passed", 1)
+
             canon = picked.get("canonical") or picked.get("link","")
             if canon: used_canon.add(canon)
             tkey = norm_title_key(picked.get("picked_title") or picked.get("title",""))
             if tkey: used_titles.add(tkey)
+
             posted += 1
             aud_posted += 1
             time.sleep(1.2)
 
-    save_state("used_canonical.json", sorted(list(used_canon))[-5000:])
-    save_state("used_titles.json", sorted(list(used_titles))[-5000:])
-    print(f"Done. Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}.")
+    save_state("used_canonical.json", sorted(list(used_canon))[-6000:])
+    save_state("used_titles.json", sorted(list(used_titles))[-6000:])
+    save_weekly_stats(stats)
+
+    print(f"Done. Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}. Week: {week_key}")
 
 if __name__=="__main__":
     run()

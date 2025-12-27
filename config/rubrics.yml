@@ -1,4 +1,4 @@
-version: 1.2
+version: 1.3
 
 channel:
   locale: "ru-RU"
@@ -9,8 +9,14 @@ channel:
 publishing:
   max_posts_per_run: 3
   max_posts_per_audience_per_run: 2
-  drafts_mode: "skip"   # skip | post_to_drafts_chat
+
+  # v1.3: two-channel publishing
+  drafts_mode: "post_to_drafts_chat"   # skip | post_to_drafts_chat
   drafts_chat_id_env: "TELEGRAM_DRAFTS_CHAT_ID"
+
+  # weekly dashboard settings
+  dashboard_chat: "main"    # main | drafts
+  dashboard_title: "Quality dashboard недели"
 
 audiences:
   parents:
@@ -62,6 +68,14 @@ audiences:
         sources: ["asha_multilingual_public"]
         format: "question_week"
         media: ["image_card"]
+
+      - id: quality_dashboard
+        title: "Quality dashboard"
+        cadence: "WEEKLY"
+        byweekday: ["SU"]
+        sources: []
+        format: "quality_dashboard"
+        media: ["text_only"]
 
   pros:
     title_suffix: "• для специалистов"

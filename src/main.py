@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os, re, json, time, random, hashlib
+import os, re, json, time, random, hashlib, math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,14 +10,16 @@ from urllib.parse import urlparse, urljoin
 import requests, yaml, feedparser
 from bs4 import BeautifulSoup
 from dateutil import tz
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[1]
 CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
+ASSETS_DIR = ROOT / "assets"
+FONTS_DIR = ASSETS_DIR / "fonts"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/1.3 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/1.4 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
@@ -37,8 +39,7 @@ class Source:
     type: str
     url: Optional[str] = None
     urls: Optional[List[str]] = None
-    selectors: Optional[Dict[str,str]] = None
-    include_if: Optional[Dict[str,Any]] = None
+    parser: Optional[str] = None
     notes: str = ""
 
 def load_yaml(path: Path) -> Dict[str,Any]:
@@ -179,6 +180,78 @@ def is_scientific_or_methodical(domain: str, title: str, summary: str, quality_c
         return True,f"methodical_kw_hits:{hits}"
     return False,f"not_methodical_hits:{hits}"
 
+# ---------------------------
+# Site-specific parsers (v1.4)
+# ---------------------------
+
+def _abs(url: str, href: str) -> str:
+    href = (href or "").strip()
+    if not href:
+        return ""
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return urljoin(url, href)
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    return urljoin(url, href)
+
+def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: Optional[str]=None) -> List[Dict[str,str]]:
+    pat = re.compile(href_re) if href_re else None
+    out=[]
+    for a in soup.select(selector):
+        href = _abs(base_url, a.get("href",""))
+        if not href:
+            continue
+        if pat and not pat.search(href):
+            continue
+        title = norm_space(a.get_text(" ", strip=True))
+        if not title or len(title) < 8:
+            continue
+        out.append({"title": title, "link": href, "summary": ""})
+    seen=set(); uniq=[]
+    for it in out:
+        if it["link"] in seen:
+            continue
+        seen.add(it["link"])
+        uniq.append(it)
+    return uniq
+
+def parse_logopediya_publ(url: str, html: str) -> List[Dict[str,str]]:
+    soup = BeautifulSoup(html, "lxml")
+    items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/publ/[^\"']+")
+    items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
+    return items[:80]
+
+def parse_logorina_news(url: str, html: str) -> List[Dict[str,str]]:
+    soup = BeautifulSoup(html, "lxml")
+    items = _collect_links(url, soup, "article a, div.news a, a", r"/news/[\w\-]+/?$")
+    return items[:80]
+
+def parse_logomag_lib(url: str, html: str) -> List[Dict[str,str]]:
+    soup = BeautifulSoup(html, "lxml")
+    items = _collect_links(url, soup, "main a, div.content a, a", r"/lib/[^\"']+")
+    return items[:80]
+
+def parse_logoportal_articles(url: str, html: str) -> List[Dict[str,str]]:
+    soup = BeautifulSoup(html, "lxml")
+    items = _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")
+    return items[:80]
+
+def parse_logopedy_articles(url: str, html: str) -> List[Dict[str,str]]:
+    soup = BeautifulSoup(html, "lxml")
+    items = _collect_links(url, soup, "div.content a, main a, a", r"logoped-article|logoped-literature|portal/[^#]+")
+    items.sort(key=lambda x: len(x["title"]), reverse=True)
+    return items[:80]
+
+SITE_PARSERS = {
+    "logopediya_publ": parse_logopediya_publ,
+    "logorina_news": parse_logorina_news,
+    "logomag_lib": parse_logomag_lib,
+    "logoportal_articles": parse_logoportal_articles,
+    "logopedy_articles": parse_logopedy_articles,
+}
+
 def fetch_rss(url: str) -> List[Dict[str,str]]:
     d = feedparser.parse(url)
     out=[]
@@ -190,36 +263,26 @@ def fetch_rss(url: str) -> List[Dict[str,str]]:
         })
     return out
 
-def fetch_html_latest(url: str, selectors: Dict[str,str], include_if: Optional[Dict[str,Any]]) -> List[Dict[str,str]]:
+def fetch_static(urls: List[str]) -> List[Dict[str,str]]:
+    return [{"title":"","link":u,"summary":""} for u in urls]
+
+def fetch_html_site(url: str, parser_name: str) -> List[Dict[str,str]]:
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text,"lxml")
-    nodes = soup.select(selectors.get("item","a"))
-    link_contains = set((include_if or {}).get("link_contains_any",[]) or [])
-    items=[]
-    for a in nodes[:900]:
-        href = a.get("href") or ""
-        title = norm_space(a.get_text(" ",strip=True))
-        if not href or not title:
-            continue
-        if href.startswith("/"):
-            href = urljoin(url, href)
-        if link_contains and not any(x in href for x in link_contains):
-            continue
-        items.append({"title":title,"link":href,"summary":""})
+    parser = SITE_PARSERS.get(parser_name)
+    if not parser:
+        raise ValueError(f"Unknown site parser: {parser_name}")
+    items = parser(url, r.text)
     uniq={}
     for it in items:
         uniq[it["link"]] = it
-    return list(uniq.values())[:100]
-
-def fetch_static(urls: List[str]) -> List[Dict[str,str]]:
-    return [{"title":"","link":u,"summary":""} for u in urls]
+    return list(uniq.values())
 
 def fetch_source(src: Source) -> List[Dict[str,str]]:
     if src.type=="rss":
         return fetch_rss(src.url or "")
-    if src.type=="html_latest":
-        return fetch_html_latest(src.url or "", src.selectors or {}, src.include_if)
+    if src.type=="html_site":
+        return fetch_html_site(src.url or "", src.parser or "")
     if src.type=="static":
         return fetch_static(src.urls or [])
     raise ValueError(f"Unsupported source type: {src.type}")
@@ -362,32 +425,108 @@ def make_text(title: str, rubric_format: str, channel_cfg: Dict[str,Any], picked
         text += f"\n{tags}\n"
     return rewrite_if_enabled(text)
 
-def render_image_card(title: str, subtitle: str="") -> Path:
-    img = Image.new("RGB",(1280,720),color=(245,245,245))
-    draw = ImageDraw.Draw(img)
-    ft = ImageFont.load_default()
-    fb = ImageFont.load_default()
+# ---------------------------
+# Card rendering (v1.4)
+# ---------------------------
 
-    def wrap(text: str, width: int) -> List[str]:
-        words=text.split()
-        lines=[]; line=[]
+def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    ttf = FONTS_DIR/"DejaVuSans.ttf"
+    if ttf.exists():
+        return ImageFont.truetype(str(ttf), size=size)
+    return ImageFont.load_default()
+
+def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
+    h = (h or "").strip().lstrip("#")
+    if len(h)==3:
+        h = "".join([c+c for c in h])
+    if len(h)!=6:
+        return (74,144,226)
+    return tuple(int(h[i:i+2],16) for i in (0,2,4))
+
+def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any]) -> Path:
+    W,H = 1280,720
+    img = Image.new("RGB",(W,H),(245,247,250))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(H):
+        t = y/(H-1)
+        r = int(245 - 10*t)
+        g = int(247 - 18*t)
+        b = int(250 - 30*t)
+        draw.line([(0,y),(W,y)], fill=(r,g,b))
+
+    wave = Image.new("RGBA",(W,H),(0,0,0,0))
+    wd = ImageDraw.Draw(wave)
+    accent = _hex_to_rgb((branding or {}).get("card_accent","#4A90E2"))
+    for i in range(3):
+        y0 = 440 + i*55
+        pts=[]
+        for x in range(0,W+1,40):
+            yy = y0 + int(12*math.sin((x/140.0) + i))
+            pts.append((x,yy))
+        wd.line(pts, fill=(*accent, 28), width=6)
+    img = Image.alpha_composite(img.convert("RGBA"), wave).convert("RGB")
+
+    panel = (70,90,W-70,H-110)
+
+    shadow = Image.new("RGBA",(W,H),(0,0,0,0))
+    sd = ImageDraw.Draw(shadow)
+    sd.rounded_rectangle([panel[0]+6,panel[1]+10,panel[2]+6,panel[3]+10], radius=28, fill=(0,0,0,65))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(10))
+    img = Image.alpha_composite(img.convert("RGBA"), shadow).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    draw.rounded_rectangle(panel, radius=28, fill=(255,255,255), outline=(235,238,242), width=2)
+
+    ax = panel[0]+28
+    ay = panel[1]+28
+    draw.rounded_rectangle([ax, ay, ax+10, panel[3]-28], radius=6, fill=accent)
+
+    f_title = _load_font(56)
+    f_sub = _load_font(32)
+    f_small = _load_font(24)
+
+    x_text = ax+28
+    y_text = panel[1]+44
+    max_w = panel[2]-x_text-28
+
+    def wrap(text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+        words = (text or "").split()
+        if not words:
+            return []
+        lines=[]; cur=[]
         for w in words:
-            line.append(w)
-            if len(" ".join(line))>=width:
-                lines.append(" ".join(line)); line=[]
-        if line: lines.append(" ".join(line))
+            test = " ".join(cur+[w])
+            if draw.textlength(test, font=font) <= max_width:
+                cur.append(w)
+            else:
+                if cur:
+                    lines.append(" ".join(cur))
+                cur=[w]
+        if cur:
+            lines.append(" ".join(cur))
         return lines
 
-    y=120
-    for line in wrap(title,40)[:4]:
-        draw.text((80,y),line,fill=(20,20,20),font=ft); y+=30
-    if subtitle:
-        y+=20
-        for line in wrap(subtitle,60)[:3]:
-            draw.text((80,y),line,fill=(60,60,60),font=fb); y+=24
-    out = STATE_DIR/f"card_{sha1(title)[:10]}.png"
+    for ln in wrap(rubric_title, f_title, max_w)[:3]:
+        draw.text((x_text, y_text), ln, fill=(24,32,44), font=f_title)
+        y_text += 68
+
+    y_text += 12
+    for ln in wrap(subtitle, f_sub, max_w)[:3]:
+        draw.text((x_text, y_text), ln, fill=(70,78,92), font=f_sub)
+        y_text += 44
+
+    footer = (branding or {}).get("card_footer","")
+    if footer:
+        draw.text((panel[0]+28, panel[3]-48), footer, fill=(110,118,132), font=f_small)
+
+    out = STATE_DIR/f"card_{sha1(rubric_title+subtitle)[:10]}.png"
     img.save(out)
     return out
+
+# ---------------------------
+# Telegram helpers + stats + selection
+# ---------------------------
 
 def tg_request(method: str, data: Dict[str,Any], files: Optional[Dict[str,Any]]=None) -> Dict[str,Any]:
     if not TELEGRAM_BOT_TOKEN:
@@ -466,14 +605,14 @@ def pick_item(items: List[Dict[str,str]], used_canon: set[str], used_titles: set
     for it in items:
         t = norm_space(it.get("title",""))
         l = it.get("link","")
-        if not l: 
+        if not l:
             continue
         s,_ = score_item(t or "(no title)", l, quality_cfg)
         if s>=0:
             ranked.append((s,it))
     ranked.sort(key=lambda x:x[0], reverse=True)
 
-    for s,it in ranked[:18]:
+    for _,it in ranked[:22]:
         it = enrich_article(dict(it))
         canon = it.get("canonical") or it.get("link","")
         if not canon or canon in used_canon:
@@ -504,12 +643,12 @@ def pick_item(items: List[Dict[str,str]], used_canon: set[str], used_titles: set
 def run() -> None:
     rub_cfg = load_yaml(CFG_DIR/"rubrics.yml")
     channel_cfg = rub_cfg.get("channel",{})
+    branding = rub_cfg.get("branding",{})
     tzname = channel_cfg.get("timezone","Asia/Nicosia")
     now = get_local_now(tzname)
     week_key = iso_week_key(now)
 
     sources, quality_cfg = load_sources()
-
     used_canon = set(load_state("used_canonical.json",[]))
     used_titles = set(load_state("used_titles.json",[]))
 
@@ -573,14 +712,20 @@ def run() -> None:
 
             title = rubric.get("title","Рубрика")
             text = make_text(title, rubric.get("format",""), channel_cfg, picked, title_suffix)
-            card = render_image_card(title, "Коротко и по делу")
+
+            subtitle = "Коротко и по делу"
+            summ = (picked.get("picked_summary") or "").strip()
+            if summ:
+                subtitle = summ[:110].rstrip(" .,:;—-") + "…"
+
+            card = render_image_card(title, subtitle, branding)
             send_photo(TELEGRAM_CHAT_ID, card, text[:950])
 
             bump_weekly(stats, week_key, "passed", 1)
 
             canon = picked.get("canonical") or picked.get("link","")
             if canon: used_canon.add(canon)
-            tkey = norm_title_key(picked.get("picked_title") or picked.get("title",""))
+            tkey = norm_title_key(picked.get("picked_title") or picked.get("title") or "")
             if tkey: used_titles.add(tkey)
 
             posted += 1

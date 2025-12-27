@@ -1,4 +1,4 @@
-version: 1.3
+version: 1.4
 
 channel:
   locale: "ru-RU"
@@ -6,15 +6,15 @@ channel:
   disclaimer: "Информация носит образовательный характер и не заменяет консультацию специалиста."
   hashtags: ["#логопед", "#речь", "#билингвизм", "#развитиеРечи"]
 
+branding:
+  card_footer: "Русский логопед онлайн • без воды • с источниками"
+  card_accent: "#4A90E2"
+
 publishing:
   max_posts_per_run: 3
   max_posts_per_audience_per_run: 2
-
-  # v1.3: two-channel publishing
   drafts_mode: "post_to_drafts_chat"   # skip | post_to_drafts_chat
   drafts_chat_id_env: "TELEGRAM_DRAFTS_CHAT_ID"
-
-  # weekly dashboard settings
   dashboard_chat: "main"    # main | drafts
   dashboard_title: "Quality dashboard недели"
 

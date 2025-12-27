@@ -1,4 +1,4 @@
-version: 1.3
+version: 1.4
 
 quality:
   allow_domains:
@@ -77,54 +77,33 @@ sources:
 
   - id: logopediya_publications_latest
     name: "Logopediya.com — Публикации (последние)"
-    type: html_latest
+    type: html_site
     url: "https://logopediya.com/publ/"
-    selectors:
-      item: "a"
-      title: "text"
-      link: "href"
+    parser: "logopediya_publ"
 
   - id: logorina_latest
     name: "Logorina.ru — Последние материалы"
-    type: html_latest
+    type: html_site
     url: "https://logorina.ru/"
-    selectors:
-      item: "a"
-      title: "text"
-      link: "href"
-    include_if:
-      link_contains_any: ["/news/"]
+    parser: "logorina_news"
 
   - id: logomag_lib_latest
     name: "Logomag.ru — Библиотека (свежее)"
-    type: html_latest
+    type: html_site
     url: "https://logomag.ru/lib/"
-    selectors:
-      item: "a"
-      title: "text"
-      link: "href"
-    include_if:
-      link_contains_any: ["/lib/"]
+    parser: "logomag_lib"
 
   - id: logoportal_latest
     name: "LogoPortal.ru — Статьи (последние)"
-    type: html_latest
+    type: html_site
     url: "https://logoportal.ru/"
-    selectors:
-      item: "a"
-      title: "text"
-      link: "href"
-    include_if:
-      link_contains_any: ["statya-", "/statya-"]
+    parser: "logoportal_articles"
 
   - id: logopedy_articles_latest
     name: "Logopedy.ru — Литература/статьи"
-    type: html_latest
+    type: html_site
     url: "https://logopedy.ru/portal/logoped-literature/logoped-article.html"
-    selectors:
-      item: "a"
-      title: "text"
-      link: "href"
+    parser: "logopedy_articles"
 
   - id: asha_multilingual_public
     name: "ASHA — Public (multilingual & late language emergence)"

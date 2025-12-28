@@ -7,7 +7,7 @@ channel:
   hashtags: ["#логопед", "#речь", "#билингвизм", "#развитиеРечи"]
 
 branding:
-  card_theme: "minimal"  # minimal | kids | scientific
+  card_theme: "kids"  # minimal | kids | scientific
   card_footer: "Русский логопед онлайн • без воды • с источниками"
   card_accent: "#4A90E2"
 

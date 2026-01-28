@@ -19,7 +19,7 @@ ASSETS_DIR = ROOT / "assets"
 FONTS_DIR = ASSETS_DIR / "fonts"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/1.6 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/1.6.1 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
@@ -31,6 +31,14 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY","").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY","").strip()
 
 AUDIENCE = os.getenv("AUDIENCE","parents").strip().lower()  # parents|pros|both
+
+# v1.6.1: style/length knobs (Telegram photo caption is limited; we keep a conservative target)
+PARENTS_MAX_BODY_CHARS = int(os.getenv("PARENTS_MAX_BODY_CHARS","860"))
+PROS_MAX_BODY_CHARS = int(os.getenv("PROS_MAX_BODY_CHARS","980"))
+
+# v1.6.1: quality gate knobs
+MIN_MEANING_BULLETS = int(os.getenv("MIN_MEANING_BULLETS","2"))
+MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS","3"))
 
 @dataclass
 class Source:
@@ -47,6 +55,12 @@ def load_yaml(path: Path) -> Dict[str,Any]:
 
 def norm_space(s: str) -> str:
     return re.sub(r"\s+"," ",(s or "").strip())
+
+def clamp_text(s: str, max_len: int) -> str:
+    s = norm_space(s)
+    if len(s) <= max_len:
+        return s
+    return (s[:max_len].rstrip(" .,:;—-") + "…").strip()
 
 def norm_title_key(s: str) -> str:
     s = (s or "").lower()
@@ -304,16 +318,24 @@ def enrich_article(item: Dict[str,str]) -> Dict[str,str]:
         if sm: item["article_summary"]=sm
     return item
 
+# ---------------------------
+# LLM rewriting (v1.6.1 prompts v2)
+# ---------------------------
+
 def _is_quota_error(status: int, text: str) -> bool:
     t=(text or "").lower()
-    return status in (402,429) or any(k in t for k in ["quota","rate limit","exceeded","insufficient_quota"])
+    return status in (402,429) or any(k in t for k in ["quota","rate limit","exceeded","insufficient_quota","resource_exhausted"])
 
 def rewrite_with_groq(prompt: str) -> str:
     if not GROQ_API_KEY: raise RuntimeError("GROQ_API_KEY missing")
     r = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type":"application/json"},
-        json={"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":prompt}],"temperature":0.4},
+        json={
+            "model":"llama-3.1-8b-instant",
+            "messages":[{"role":"user","content":prompt}],
+            "temperature":0.35
+        },
         timeout=45
     )
     if r.status_code!=200 and _is_quota_error(r.status_code,r.text):
@@ -334,11 +356,63 @@ def rewrite_with_gemini(prompt: str) -> str:
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-def rewrite_if_enabled(text: str) -> str:
+def _aud_limits(audience: str) -> int:
+    a = (audience or "parents").strip().lower()
+    return PARENTS_MAX_BODY_CHARS if a == "parents" else PROS_MAX_BODY_CHARS
+
+def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
+    a = (audience or "parents").strip().lower()
+
+    common_rules = (
+        "Требования:\n"
+        "1) Русский язык. Нейтрально-научный, бережный тон.\n"
+        "2) НЕ ставь диагнозы, НЕ обещай лечения, НЕ назначай препараты.\n"
+        "3) Не добавляй новых фактов. Только перефразируй.\n"
+        "4) Сохрани структуру и порядок секций и списков.\n"
+        "5) Не меняй названия секций и не удаляй их.\n"
+        "6) Не добавляй новых разделов.\n"
+        f"7) Длина тела текста (без блока «Источник» и без дисклеймера/хештегов): до {max_chars} символов.\n"
+        "Секции должны быть ровно такими:\n"
+        "«Суть», «Что это значит для вас», «Практика на сегодня (5–7 минут)», «Норма / когда нужен специалист».\n"
+    )
+
+    if a == "pros":
+        style = (
+            "Аудитория: специалисты (логопеды/дефектологи).\n"
+            "Стиль: профессионально, точнее термины, но без канцелярита. "
+            "Можно использовать умеренную терминологию (фонематический слух, артикуляционная моторика, лексико-грамматический строй), "
+            "но формулировки должны оставаться ясными.\n"
+        )
+    else:
+        style = (
+            "Аудитория: родители.\n"
+            "Стиль: разговорный, простые слова, поддерживающий тон. "
+            "Убирай канцелярит и ‘умные’ обороты. "
+            "Если встречается термин — кратко объясни простыми словами в той же фразе.\n"
+        )
+
+    return (
+        style
+        + common_rules
+        + "\nТЕКСТ ДЛЯ ПЕРЕФОРМУЛИРОВКИ:\n"
+        + body.strip()
+    )
+
+def _enforce_body_limit_v2(text: str, max_chars: int) -> str:
+    t = text.strip()
+    if len(t) <= max_chars:
+        return t
+    # аккуратно урезаем конец, стараясь не ломать блоки: обрезаем по последней границе строки
+    cut = t[:max_chars]
+    if "\n" in cut:
+        cut = cut[:cut.rfind("\n")].rstrip()
+    return (cut.rstrip(" .,:;—-") + "…").strip()
+
+def rewrite_if_enabled(text: str, audience: str) -> str:
     if REWRITE_PROVIDER=="none":
         return text
 
-    # v1.6: protect Source + disclaimer + hashtags from rewriting
+    # v1.6+: protect Source + disclaimer + hashtags from rewriting
     marker = "\n**Источник**\n"
     idx = text.find(marker)
 
@@ -351,19 +425,15 @@ def rewrite_if_enabled(text: str) -> str:
         body = parts[0].strip()
         tail = ("Источник:"+parts[1]).strip() if len(parts)==2 else ""
 
-    prompt = (
-        "Переформулируй текст ниже по-русски: разговорный, нейтрально-научный, без диагнозов и обещаний лечения. "
-        "Не добавляй факты. Сохрани структуру и порядок блоков, а также заголовки секций и списки. "
-        "Заголовки секций: «Суть», «Что это значит для вас», «Практика на сегодня (5–7 минут)», «Норма / когда нужен специалист». "
-        "Сохрани эмодзи. Не добавляй новые разделы.\n\n"
-        "ТЕКСТ:\n"+body+"\n"
-    )
+    max_chars = _aud_limits(audience)
+    prompt = _build_rewrite_prompt_v2(body, audience, max_chars)
 
     try:
         if REWRITE_PROVIDER in ("groq","auto"):
             try:
                 out = rewrite_with_groq(prompt)
-                return out.strip() + ("\n\n"+tail if tail else "")
+                out = _enforce_body_limit_v2(out, max_chars)
+                return out + ("\n\n"+tail if tail else "")
             except Exception as e:
                 if REWRITE_PROVIDER=="groq":
                     raise
@@ -373,12 +443,17 @@ def rewrite_if_enabled(text: str) -> str:
                     print(f"[WARN] groq rewrite failed: {e}")
         if REWRITE_PROVIDER in ("gemini","auto"):
             out = rewrite_with_gemini(prompt)
-            return out.strip() + ("\n\n"+tail if tail else "")
+            out = _enforce_body_limit_v2(out, max_chars)
+            return out + ("\n\n"+tail if tail else "")
     except Exception as e:
         print(f"[WARN] rewrite failed ({REWRITE_PROVIDER}): {e}")
         return text
 
     return text
+
+# ---------------------------
+# Post template v2 + quality gate (v1.6.1)
+# ---------------------------
 
 def make_question_week() -> str:
     questions = [
@@ -398,22 +473,73 @@ def _numbered(lines: List[str]) -> str:
     clean = [norm_space(x) for x in lines if norm_space(x)]
     return "\n".join([f"{i+1}) {x}" for i,x in enumerate(clean)])
 
-def build_post_v2(
+def _has_required_headings(text: str) -> bool:
+    # v1.6.1: ensure structure is intact after rewrite (or no-rewrite)
+    required = [
+        "**Суть**",
+        "**Что это значит для вас**",
+        "**Практика на сегодня (5–7 минут)**",
+        "**Норма / когда нужен специалист**",
+        "**Источник**",
+    ]
+    return all(r in text for r in required)
+
+def _quality_gate(
+    rubric_format: str,
+    audience: str,
+    link: str,
+    essence: str,
+    meaning: List[str],
+    practice: List[str],
+    norm_lines: List[str],
+) -> Tuple[bool, str]:
+    rf = (rubric_format or "").strip().lower()
+    aud = (audience or "parents").strip().lower()
+
+    if not link or not link.startswith(("http://","https://")):
+        return False, "quality_gate:no_source_link"
+
+    # essence should not be empty/too short (except question_week which can be compact)
+    ess_len = len(norm_space(essence))
+    if rf != "question_week" and ess_len < 40:
+        return False, f"quality_gate:weak_essence_len:{ess_len}"
+    if rf == "question_week" and ess_len < 25:
+        return False, f"quality_gate:weak_question_len:{ess_len}"
+
+    # meaning bullets
+    m = [x for x in meaning if norm_space(x)]
+    if len(m) < MIN_MEANING_BULLETS:
+        return False, f"quality_gate:meaning_bullets_lt_{MIN_MEANING_BULLETS}:{len(m)}"
+
+    # practice steps
+    p = [x for x in practice if norm_space(x)]
+    if len(p) < MIN_PRACTICE_STEPS:
+        return False, f"quality_gate:practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(p)}"
+
+    # norm lines: must include both normal and consult hint
+    nl = "\n".join([norm_space(x) for x in norm_lines if norm_space(x)])
+    if "✅" not in nl or "⚠️" not in nl:
+        return False, "quality_gate:norm_block_missing_markers"
+
+    # audience nuance: for pros, require at least one actionable pro-oriented line in practice for pro rubrics
+    if aud == "pros" and rf in ("pro_friendly","case_digest"):
+        blob = " ".join(p).lower()
+        if not any(k in blob for k in ["цель", "критер", "чек", "контрол", "онлайн", "план"]):
+            return False, "quality_gate:pros_practice_too_generic"
+
+    return True, "ok"
+
+def compose_post_v2(
     rubric_title: str,
     rubric_format: str,
     audience: str,
     channel_cfg: Dict[str,Any],
     picked: Dict[str,str],
     title_suffix: str
-) -> str:
+) -> Tuple[str, Dict[str,Any]]:
     """
     v1.6 — post_template_v2 with mandatory blocks for all rubrics (except quality_dashboard).
-    Blocks:
-      - Суть
-      - Что это значит для вас
-      - Практика на сегодня (5–7 минут)
-      - Норма / когда нужен специалист
-      - Источник (link + type)
+    v1.6.1 — prompts v2 + quality gate + structure validation.
     """
     link = picked.get("canonical") or picked.get("link","")
     picked_title = picked.get("picked_title") or picked.get("title") or ""
@@ -424,6 +550,10 @@ def build_post_v2(
     aud = (audience or "parents").strip().lower()
     rf = (rubric_format or "").strip().lower()
 
+    # clamp article title/summary to keep posts compact and consistent
+    picked_title_c = clamp_text(picked_title, 140) if picked_title else ""
+    summary_c = clamp_text(summary, 240) if summary else ""
+
     # --- Суть
     if rf == "question_week":
         q = make_question_week()
@@ -431,16 +561,16 @@ def build_post_v2(
             "Небольшой “вопрос недели” — чтобы мягко понять текущую ситуацию и выбрать следующий шаг.\n\n"
             f"**{q}**"
         )
-        if not picked_title:
-            picked_title = "Рубрика канала (вопрос для самонаблюдения)"
-        if not summary:
-            summary = "Формат: наблюдение, маленький шаг, без давления."
+        if not picked_title_c:
+            picked_title_c = "Рубрика канала (вопрос для самонаблюдения)"
+        if not summary_c:
+            summary_c = "Формат: наблюдение, маленький шаг, без давления."
     else:
         essence_lines = []
-        if picked_title:
-            essence_lines.append(f"Материал: {picked_title}")
-        if summary:
-            essence_lines.append(f"Коротко: {summary}")
+        if picked_title_c:
+            essence_lines.append(f"Материал: {picked_title_c}")
+        if summary_c:
+            essence_lines.append(f"Коротко: {summary_c}")
         essence = "\n".join(essence_lines).strip() or "Коротко и по делу о развитии речи."
 
     # --- Что это значит для вас (2–3 пункта)
@@ -460,8 +590,8 @@ def build_post_v2(
     elif rf == "myth_fact":
         meaning = [
             "Полезно отделять популярные мифы от того, что реально наблюдается в развитии речи.",
-            "Обычно важнее понимание, коммуникация и динамика, чем единичные “симптомы”.",
-            "Если тревожно — лучше оценивать ситуацию комплексно, а не по одному признаку.",
+            "Обычно важнее понимание, коммуникация и динамика, чем единичные признаки.",
+            "Если тревожно — лучше смотреть на ситуацию комплексно, а не по одному симптому.",
         ]
     elif rf == "age_norms":
         meaning = [
@@ -479,7 +609,7 @@ def build_post_v2(
         else:
             meaning = [
                 "Переносите материал в практику: цель → критерий → шаги → контроль.",
-                "Для онлайн особенно важны демонстрация, простое ДЗ и короткий чек-лист для родителей.",
+                "Для онлайн особенно важны демонстрация, простое ДЗ и короткий чек-лист.",
                 "Учитывайте билингвальную среду и перенос навыков между языками.",
             ]
     else:
@@ -520,7 +650,7 @@ def build_post_v2(
         practice = [
             "Выберите 1 ситуацию для спокойного “моделирования”: повторите фразу ребёнка правильно, без оценки.",
             "5 минут игры на словарь (категории: еда/одежда/игрушки).",
-            "В конце задайте один открытый вопрос: «Что было самым интересным?»",
+            "В конце — один открытый вопрос: «Что было самым интересным?»",
         ]
     elif rf in ("pro_friendly","case_digest") and aud != "parents":
         practice = [
@@ -535,20 +665,31 @@ def build_post_v2(
             "1 минута дыхательной игры (пузыри/ватный шарик/дуем на перышко).",
         ]
 
-    # --- Норма vs когда нужен специалист
+    # --- Норма / когда нужен специалист
     if rf in ("pro_friendly","case_digest") and aud != "parents":
         norm_lines = [
             "✅ Норма: есть стабильный контакт, понимание инструкций, постепенная динамика по целям.",
-            "⚠️ Обсудить со специалистом: выраженная регрессия навыков, стойкая усталость/напряжение при говорении, отсутствие прогресса при регулярной практике 4–6 недель.",
+            "⚠️ Обсудить со специалистом: выраженная регрессия навыков или отсутствие прогресса при регулярной практике 4–6 недель.",
         ]
     else:
         norm_lines = [
             "✅ Норма: ребёнок понимает обращённую речь, общается (жестами/словами), и есть постепенный прогресс по неделям.",
-            "⚠️ Обсудить со специалистом: если ребёнок часто не понимает простые просьбы, резко “теряет” навыки, избегает общения или прогресса нет при регулярной практике 4–6 недель.",
+            "⚠️ Обсудить со специалистом: если ребёнок часто не понимает простые просьбы, резко “теряет” навыки или прогресса нет при регулярной практике 4–6 недель.",
         ]
 
     factcheck = picked.get("fact_check") or ""
     stype = picked.get("source_type") or source_type_label_from_factcheck(factcheck)
+
+    ok, q_reason = _quality_gate(rf, aud, link, essence, meaning, practice, norm_lines)
+    meta = {
+        "ok": ok,
+        "reason": q_reason,
+        "rubric_format": rf,
+        "audience": aud,
+        "source_type": stype,
+    }
+    if not ok:
+        return "", meta
 
     parts: List[str] = []
     parts.append(f"**{rubric_title} {title_suffix}**")
@@ -566,7 +707,7 @@ def build_post_v2(
     parts.append("\n".join(norm_lines))
     parts.append("")
     parts.append("**Источник**")
-    parts.append(f"🔗 {link}" if link else "🔗 (ссылка недоступна)")
+    parts.append(f"🔗 {link}")
     parts.append(f"Тип: {stype}")
 
     if disclaimer:
@@ -576,18 +717,17 @@ def build_post_v2(
         parts.append("")
         parts.append(tags)
 
-    return rewrite_if_enabled("\n".join(parts).strip())
+    raw_text = "\n".join(parts).strip()
 
-def make_text(
-    rubric_title: str,
-    rubric_format: str,
-    audience: str,
-    channel_cfg: Dict[str,Any],
-    picked: Dict[str,str],
-    title_suffix: str
-) -> str:
-    # v1.6 — route through post_template_v2
-    return build_post_v2(rubric_title, rubric_format, audience, channel_cfg, picked, title_suffix)
+    final_text = rewrite_if_enabled(raw_text, aud)
+
+    # final sanity check: rewrite must preserve structure
+    if not _has_required_headings(final_text):
+        meta["ok"] = False
+        meta["reason"] = "quality_gate:rewrite_broke_structure"
+        return "", meta
+
+    return final_text, meta
 
 # ---------------------------
 # Card rendering (v1.4)
@@ -618,7 +758,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
     theme = str(theme).strip().lower()
 
     W,H = 1280,720
-
     accent = _hex_to_rgb((branding or {}).get("card_accent","#4A90E2"))
 
     # Theme palettes
@@ -640,7 +779,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
         sub_color = (54, 62, 78)
         footer_color = (98, 104, 118)
         wave_alpha = 22
-        # if accent too "bright", enforce deep blue-ish
         if sum(accent) > 560:
             accent = (36, 79, 166)
     else:  # minimal
@@ -669,7 +807,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
     ld = ImageDraw.Draw(layer)
 
     if theme in ("minimal","scientific"):
-        # subtle wave strokes
         for i in range(3):
             y0 = 440 + i*55
             pts=[]
@@ -679,7 +816,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
             ld.line(pts, fill=(*accent, wave_alpha), width=6 if theme=="minimal" else 5)
 
         if theme == "scientific":
-            # faint grid in top-right
             gx0, gy0, gx1, gy1 = 760, 60, 1240, 300
             step = 34
             grid_col = (accent[0], accent[1], accent[2], 16)
@@ -689,7 +825,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
                 ld.line([(gx0,y),(gx1,y)], fill=grid_col, width=2)
 
     elif theme == "kids":
-        # playful dots (deterministic per rubric)
         seed = int(hashlib.sha1((rubric_title or "").encode("utf-8")).hexdigest()[:8], 16)
         rng = random.Random(seed)
         dot_col = (accent[0], accent[1], accent[2], 22)
@@ -835,11 +970,17 @@ def handle_draft(pub_cfg: Dict[str,Any], entry: Dict[str,Any], stats: Dict[str,A
         msg = ("**Черновик/пропуск**\n\n"
                f"Причина: {entry.get('reason')}\n"
                f"Рубрика: {entry.get('rubric_title','')}\n"
+               f"Аудитория: {entry.get('audience','')}\n"
                f"Заголовок: {entry.get('title')}\n"
                f"Ссылка: {entry.get('link')}\n")
         send_message(drafts_chat_id, msg)
 
-def pick_item(items: List[Dict[str,str]], used_canon: set[str], used_titles: set[str], quality_cfg: Dict[str,Any]) -> Tuple[Optional[Dict[str,str]], Optional[Dict[str,Any]]]:
+def pick_item(
+    items: List[Dict[str,str]],
+    used_canon: set[str],
+    used_titles: set[str],
+    quality_cfg: Dict[str,Any]
+) -> Tuple[Optional[Dict[str,str]], Optional[Dict[str,Any]]]:
     ranked=[]
     for it in items:
         t = norm_space(it.get("title",""))
@@ -952,7 +1093,22 @@ def run() -> None:
                 continue
 
             title = rubric.get("title","Рубрика")
-            text = make_text(title, rubric.get("format",""), aud, channel_cfg, picked, title_suffix)
+            text, meta = compose_post_v2(title, rubric.get("format",""), aud, channel_cfg, picked, title_suffix)
+
+            if not meta.get("ok", False):
+                draft_entry = {
+                    "ts": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00","Z"),
+                    "reason": str(meta.get("reason","quality_gate_failed")),
+                    "audience": aud,
+                    "rubric": rubric.get("id",""),
+                    "rubric_title": title,
+                    "title": picked.get("picked_title") or picked.get("title") or "",
+                    "link": picked.get("canonical") or picked.get("link") or "",
+                    "domain": safe_domain(picked.get("canonical") or picked.get("link") or ""),
+                    "source_type": meta.get("source_type",""),
+                }
+                handle_draft(pub_cfg, draft_entry, stats, week_key)
+                continue
 
             subtitle = "Коротко и по делу"
             summ = (picked.get("picked_summary") or "").strip()

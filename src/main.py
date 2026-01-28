@@ -68,14 +68,11 @@ def markdown_to_plain(text: str) -> str:
     Поэтому при ошибке парсинга мы отправляем plain-text без parse_mode.
     """
     t = text or ""
-    # убираем типовые маркеры Markdown
     t = t.replace("**", "")
     t = t.replace("__", "")
     t = t.replace("`", "")
-    # одиночные маркеры
     t = t.replace("*", "")
     t = t.replace("_", "")
-    # иногда встречаются "###" и т.п.
     t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.MULTILINE)
     return t.strip()
 
@@ -432,7 +429,6 @@ def _enforce_body_limit_v2(text: str, max_chars: int) -> str:
     t = text.strip()
     if len(t) <= max_chars:
         return t
-    # аккуратно урезаем конец, стараясь не ломать блоки: обрезаем по последней границе строки
     cut = t[:max_chars]
     if "\n" in cut:
         cut = cut[:cut.rfind("\n")].rstrip()
@@ -442,7 +438,6 @@ def rewrite_if_enabled(text: str, audience: str) -> str:
     if REWRITE_PROVIDER=="none":
         return text
 
-    # v1.6+: protect Source + disclaimer + hashtags from rewriting
     marker = "\n**Источник**\n"
     idx = text.find(marker)
 
@@ -450,7 +445,6 @@ def rewrite_if_enabled(text: str, audience: str) -> str:
         body = text[:idx].strip()
         tail = text[idx:].strip()
     else:
-        # legacy fallback (older template)
         parts = text.split("Источник:",1)
         body = parts[0].strip()
         tail = ("Источник:"+parts[1]).strip() if len(parts)==2 else ""
@@ -504,7 +498,6 @@ def _numbered(lines: List[str]) -> str:
     return "\n".join([f"{i+1}) {x}" for i,x in enumerate(clean)])
 
 def _has_required_headings(text: str) -> bool:
-    # v1.6.1: ensure structure is intact after rewrite (or no-rewrite)
     required = [
         "**Суть**",
         "**Что это значит для вас**",
@@ -529,29 +522,24 @@ def _quality_gate(
     if not link or not link.startswith(("http://","https://")):
         return False, "quality_gate:no_source_link"
 
-    # essence should not be empty/too short (except question_week which can be compact)
     ess_len = len(norm_space(essence))
     if rf != "question_week" and ess_len < 40:
         return False, f"quality_gate:weak_essence_len:{ess_len}"
     if rf == "question_week" and ess_len < 25:
         return False, f"quality_gate:weak_question_len:{ess_len}"
 
-    # meaning bullets
     m = [x for x in meaning if norm_space(x)]
     if len(m) < MIN_MEANING_BULLETS:
         return False, f"quality_gate:meaning_bullets_lt_{MIN_MEANING_BULLETS}:{len(m)}"
 
-    # practice steps
     p = [x for x in practice if norm_space(x)]
     if len(p) < MIN_PRACTICE_STEPS:
         return False, f"quality_gate:practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(p)}"
 
-    # norm lines: must include both normal and consult hint
     nl = "\n".join([norm_space(x) for x in norm_lines if norm_space(x)])
     if "✅" not in nl or "⚠️" not in nl:
         return False, "quality_gate:norm_block_missing_markers"
 
-    # audience nuance: for pros, require at least one actionable pro-oriented line in practice for pro rubrics
     if aud == "pros" and rf in ("pro_friendly","case_digest"):
         blob = " ".join(p).lower()
         if not any(k in blob for k in ["цель", "критер", "чек", "контрол", "онлайн", "план"]):
@@ -567,10 +555,6 @@ def compose_post_v2(
     picked: Dict[str,str],
     title_suffix: str
 ) -> Tuple[str, Dict[str,Any]]:
-    """
-    v1.6 — post_template_v2 with mandatory blocks for all rubrics (except quality_dashboard).
-    v1.6.1 — prompts v2 + quality gate + structure validation.
-    """
     link = picked.get("canonical") or picked.get("link","")
     picked_title = picked.get("picked_title") or picked.get("title") or ""
     summary = picked.get("picked_summary") or picked.get("summary") or ""
@@ -580,11 +564,9 @@ def compose_post_v2(
     aud = (audience or "parents").strip().lower()
     rf = (rubric_format or "").strip().lower()
 
-    # clamp article title/summary to keep posts compact and consistent
     picked_title_c = clamp_text(picked_title, 140) if picked_title else ""
     summary_c = clamp_text(summary, 240) if summary else ""
 
-    # --- Суть
     if rf == "question_week":
         q = make_question_week()
         essence = (
@@ -603,7 +585,6 @@ def compose_post_v2(
             essence_lines.append(f"Коротко: {summary_c}")
         essence = "\n".join(essence_lines).strip() or "Коротко и по делу о развитии речи."
 
-    # --- Что это значит для вас (2–3 пункта)
     meaning: List[str]
     if rf == "bilingual_parents":
         meaning = [
@@ -649,7 +630,6 @@ def compose_post_v2(
             "Лучше опираться на проверенные источники и наблюдать динамику 2–4 недели.",
         ]
 
-    # --- Практика 5–7 минут
     practice: List[str]
     if rf == "exercise_steps":
         practice = [
@@ -695,7 +675,6 @@ def compose_post_v2(
             "1 минута дыхательной игры (пузыри/ватный шарик/дуем на перышко).",
         ]
 
-    # --- Норма / когда нужен специалист
     if rf in ("pro_friendly","case_digest") and aud != "parents":
         norm_lines = [
             "✅ Норма: есть стабильный контакт, понимание инструкций, постепенная динамика по целям.",
@@ -743,15 +722,13 @@ def compose_post_v2(
     if disclaimer:
         parts.append("")
         parts.append(f"_{disclaimer}_")
-    if tags (:= tags):
+    if tags:
         parts.append("")
         parts.append(tags)
 
     raw_text = "\n".join(parts).strip()
-
     final_text = rewrite_if_enabled(raw_text, aud)
 
-    # final sanity check: rewrite must preserve structure
     if not _has_required_headings(final_text):
         meta["ok"] = False
         meta["reason"] = "quality_gate:rewrite_broke_structure"
@@ -778,19 +755,12 @@ def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
     return tuple(int(h[i:i+2],16) for i in (0,2,4))
 
 def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any]) -> Path:
-    """
-    Visual themes (switch in config/rubrics.yml -> branding.card_theme):
-      - minimal: clean neutral, subtle waves
-      - kids: softer palette, playful dots
-      - scientific: stricter palette, grid accents
-    """
     theme = (branding or {}).get("card_theme","minimal") or "minimal"
     theme = str(theme).strip().lower()
 
     W,H = 1280,720
     accent = _hex_to_rgb((branding or {}).get("card_accent","#4A90E2"))
 
-    # Theme palettes
     if theme == "kids":
         bg_top = (252, 246, 255)
         bg_bottom = (240, 252, 255)
@@ -811,7 +781,7 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
         wave_alpha = 22
         if sum(accent) > 560:
             accent = (36, 79, 166)
-    else:  # minimal
+    else:
         bg_top = (245, 247, 250)
         bg_bottom = (235, 240, 246)
         panel_fill = (255,255,255)
@@ -824,7 +794,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
     img = Image.new("RGB",(W,H),bg_top)
     draw = ImageDraw.Draw(img)
 
-    # gradient background
     for y in range(H):
         t = y/(H-1)
         r = int(bg_top[0] + (bg_bottom[0]-bg_top[0])*t)
@@ -832,7 +801,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
         b = int(bg_top[2] + (bg_bottom[2]-bg_top[2])*t)
         draw.line([(0,y),(W,y)], fill=(r,g,b))
 
-    # accents layer
     layer = Image.new("RGBA",(W,H),(0,0,0,0))
     ld = ImageDraw.Draw(layer)
 
@@ -869,7 +837,6 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
     img = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # panel + shadow
     panel = (70,90,W-70,H-110)
     shadow = Image.new("RGBA",(W,H),(0,0,0,0))
     sd = ImageDraw.Draw(shadow)
@@ -880,12 +847,10 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
 
     draw.rounded_rectangle(panel, radius=28, fill=panel_fill, outline=panel_outline, width=2)
 
-    # accent bar
     ax = panel[0]+28
     ay = panel[1]+28
     draw.rounded_rectangle([ax, ay, ax+10, panel[3]-28], radius=6, fill=accent)
 
-    # typography
     f_title = _load_font(56 if theme!="scientific" else 54)
     f_sub = _load_font(32 if theme!="scientific" else 30)
     f_small = _load_font(24)
@@ -955,7 +920,6 @@ def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
         raise RuntimeError("TELEGRAM_CHAT_ID is missing/empty.")
     cap = (caption or "").strip()
 
-    # 1) пробуем Markdown
     try:
         with photo_path.open("rb") as f:
             tg_request(
@@ -985,7 +949,6 @@ def send_message(chat_id: str, text: str) -> None:
         raise RuntimeError("TELEGRAM_CHAT_ID is missing/empty.")
     t = (text or "").strip()
 
-    # 1) пробуем Markdown
     try:
         tg_request("sendMessage", data={"chat_id": chat_id, "text": t[:4000], "parse_mode":"Markdown"})
         return
@@ -1200,7 +1163,6 @@ def run() -> None:
 
             card = render_image_card(title, subtitle, branding)
 
-            # Telegram sometimes fails on Markdown entities in caption; fallback to plain text + sendMessage
             try:
                 send_photo(TELEGRAM_CHAT_ID, card, text[:950])
             except Exception as e:

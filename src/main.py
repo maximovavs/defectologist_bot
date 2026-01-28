@@ -19,12 +19,16 @@ ASSETS_DIR = ROOT / "assets"
 FONTS_DIR = ASSETS_DIR / "fonts"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/1.6.1 (+https://github.com/)"
+# v1.6.3: PROS etalon v2.1 (strict): explicit Фокус/Цель/Критерии/Перенос + PROS card subtitle from Фокус
+USER_AGENT = "logoped-channel-bot/1.6.3 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID","").strip()
 TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID","").strip()
+
+# Telegram parse mode can be fragile; keep default, but add fallback to plain text on 400
+TELEGRAM_PARSE_MODE = (os.getenv("TELEGRAM_PARSE_MODE","Markdown").strip() or "Markdown")
 
 REWRITE_PROVIDER = os.getenv("REWRITE_PROVIDER","auto").strip().lower()  # none|auto|groq|gemini
 GROQ_API_KEY = os.getenv("GROQ_API_KEY","").strip()
@@ -40,6 +44,14 @@ PROS_MAX_BODY_CHARS = int(os.getenv("PROS_MAX_BODY_CHARS","980"))
 MIN_MEANING_BULLETS = int(os.getenv("MIN_MEANING_BULLETS","2"))
 MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS","3"))
 
+# v2.1 (PROS etalon): stricter pros requirements
+PROS_MIN_MEANING_BULLETS = int(os.getenv("PROS_MIN_MEANING_BULLETS","3"))
+PROS_MIN_ARROW_STEPS = int(os.getenv("PROS_MIN_ARROW_STEPS","2"))
+
+# Optional: allow insecure TLS for some sources (OFF by default)
+ALLOW_INSECURE_TLS = os.getenv("ALLOW_INSECURE_TLS","0").strip() in ("1","true","yes")
+
+
 @dataclass
 class Source:
     id: str
@@ -50,11 +62,14 @@ class Source:
     parser: Optional[str] = None
     notes: str = ""
 
+
 def load_yaml(path: Path) -> Dict[str,Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
+
 def norm_space(s: str) -> str:
     return re.sub(r"\s+"," ",(s or "").strip())
+
 
 def clamp_text(s: str, max_len: int) -> str:
     s = norm_space(s)
@@ -62,19 +77,6 @@ def clamp_text(s: str, max_len: int) -> str:
         return s
     return (s[:max_len].rstrip(" .,:;—-") + "…").strip()
 
-def markdown_to_plain(text: str) -> str:
-    """
-    Telegram Markdown часто падает на URL с '_' и прочими символами.
-    Поэтому при ошибке парсинга мы отправляем plain-text без parse_mode.
-    """
-    t = text or ""
-    t = t.replace("**", "")
-    t = t.replace("__", "")
-    t = t.replace("`", "")
-    t = t.replace("*", "")
-    t = t.replace("_", "")
-    t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.MULTILINE)
-    return t.strip()
 
 def norm_title_key(s: str) -> str:
     s = (s or "").lower()
@@ -84,15 +86,19 @@ def norm_title_key(s: str) -> str:
     s = re.sub(r"\s+"," ",s).strip()
     return s[:180]
 
+
 def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
 
 def get_local_now(tzname: str) -> datetime:
     return datetime.now(tz=tz.gettz(tzname))
 
+
 def iso_week_key(dt: datetime) -> str:
     y, w, _ = dt.isocalendar()
     return f"{y}-W{w:02d}"
+
 
 def is_due(rubric: Dict[str,Any], now: datetime) -> bool:
     cadence = (rubric.get("cadence") or "DAILY").upper()
@@ -104,6 +110,7 @@ def is_due(rubric: Dict[str,Any], now: datetime) -> bool:
         return map_wd[now.weekday()] in byweekday
     return False
 
+
 def load_sources() -> Tuple[Dict[str,Source], Dict[str,Any]]:
     cfg = load_yaml(CFG_DIR/"sources.yml")
     quality = cfg.get("quality",{})
@@ -111,6 +118,7 @@ def load_sources() -> Tuple[Dict[str,Source], Dict[str,Any]]:
     for s in cfg.get("sources",[]):
         out[s["id"]] = Source(**s)
     return out, quality
+
 
 def load_state(name: str, default: Any) -> Any:
     p = STATE_DIR/name
@@ -121,8 +129,10 @@ def load_state(name: str, default: Any) -> Any:
     except Exception:
         return default
 
+
 def save_state(name: str, data: Any) -> None:
     (STATE_DIR/name).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
+
 
 def safe_domain(url: str) -> str:
     try:
@@ -130,9 +140,11 @@ def safe_domain(url: str) -> str:
     except Exception:
         return ""
 
+
 def domain_allowed(url: str, allow_domains: List[str]) -> bool:
     d = safe_domain(url)
     return bool(d) and any(d==ad or d.endswith("."+ad) for ad in allow_domains)
+
 
 def score_item(title: str, link: str, quality_cfg: Dict[str,Any]) -> Tuple[int,str]:
     t = (title or "").strip()
@@ -152,22 +164,20 @@ def score_item(title: str, link: str, quality_cfg: Dict[str,Any]) -> Tuple[int,s
             score += 2
     return (score,"ok")
 
-def http_get(url: str, timeout: int = 25) -> requests.Response:
-    """
-    Безопасный GET: для logorina.ru при CERT_VERIFY делаем единичный ретрай verify=False.
-    """
+
+def _requests_get(url: str, timeout: int, verify: bool = True) -> requests.Response:
     try:
-        return requests.get(url, headers=HEADERS, timeout=timeout)
+        return requests.get(url, headers=HEADERS, timeout=timeout, verify=verify)
     except requests.exceptions.SSLError:
-        d = safe_domain(url)
-        if d.endswith("logorina.ru"):
-            print("[WARN] SSL verify failed for logorina.ru; retry with verify=False")
+        if ALLOW_INSECURE_TLS and verify:
+            print(f"[WARN] SSL verify failed for {url}; retry with verify=False (ALLOW_INSECURE_TLS=1)")
             return requests.get(url, headers=HEADERS, timeout=timeout, verify=False)
         raise
 
+
 def get_canonical_and_soup(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
     try:
-        r = http_get(url, timeout=25)
+        r = _requests_get(url, timeout=25, verify=True)
         r.raise_for_status()
         soup = BeautifulSoup(r.text,"lxml")
         canon = soup.find("link", rel=lambda x: x and "canonical" in x.lower())
@@ -180,6 +190,7 @@ def get_canonical_and_soup(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
     except Exception:
         return url, None
 
+
 def extract_article_title(soup: BeautifulSoup) -> str:
     og = soup.find("meta", property="og:title")
     if og and og.get("content"):
@@ -190,6 +201,7 @@ def extract_article_title(soup: BeautifulSoup) -> str:
     if soup.title and soup.title.string:
         return norm_space(soup.title.string)
     return ""
+
 
 def extract_article_summary(soup: BeautifulSoup) -> str:
     md = soup.find("meta", attrs={"name":"description"})
@@ -210,6 +222,7 @@ def extract_article_summary(soup: BeautifulSoup) -> str:
             break
     return norm_space(" ".join(paras))[:420]
 
+
 def is_scientific_or_methodical(domain: str, title: str, summary: str, quality_cfg: Dict[str,Any]) -> Tuple[bool,str]:
     scientific_domains = [d.lower() for d in (quality_cfg.get("scientific_domains") or [])]
     if any(domain==d or domain.endswith("."+d) for d in scientific_domains):
@@ -221,11 +234,13 @@ def is_scientific_or_methodical(domain: str, title: str, summary: str, quality_c
         return True,f"methodical_kw_hits:{hits}"
     return False,f"not_methodical_hits:{hits}"
 
+
 def source_type_label_from_factcheck(factcheck_reason: str) -> str:
     r = (factcheck_reason or "").lower()
     if "scientific_domain" in r:
         return "научный/академический источник"
     return "методический/профессиональный материал"
+
 
 # ---------------------------
 # Site-specific parsers (v1.4)
@@ -242,6 +257,7 @@ def _abs(url: str, href: str) -> str:
     if href.startswith("http://") or href.startswith("https://"):
         return href
     return urljoin(url, href)
+
 
 def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: Optional[str]=None) -> List[Dict[str,str]]:
     pat = re.compile(href_re) if href_re else None
@@ -264,32 +280,38 @@ def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: O
         uniq.append(it)
     return uniq
 
+
 def parse_logopediya_publ(url: str, html: str) -> List[Dict[str,str]]:
     soup = BeautifulSoup(html, "lxml")
     items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/publ/[^\"']+")
     items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
     return items[:80]
 
+
 def parse_logorina_news(url: str, html: str) -> List[Dict[str,str]]:
     soup = BeautifulSoup(html, "lxml")
     items = _collect_links(url, soup, "article a, div.news a, a", r"/news/[\w\-]+/?$")
     return items[:80]
+
 
 def parse_logomag_lib(url: str, html: str) -> List[Dict[str,str]]:
     soup = BeautifulSoup(html, "lxml")
     items = _collect_links(url, soup, "main a, div.content a, a", r"/lib/[^\"']+")
     return items[:80]
 
+
 def parse_logoportal_articles(url: str, html: str) -> List[Dict[str,str]]:
     soup = BeautifulSoup(html, "lxml")
     items = _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")
     return items[:80]
+
 
 def parse_logopedy_articles(url: str, html: str) -> List[Dict[str,str]]:
     soup = BeautifulSoup(html, "lxml")
     items = _collect_links(url, soup, "div.content a, main a, a", r"logoped-article|logoped-literature|portal/[^#]+")
     items.sort(key=lambda x: len(x["title"]), reverse=True)
     return items[:80]
+
 
 SITE_PARSERS = {
     "logopediya_publ": parse_logopediya_publ,
@@ -298,6 +320,7 @@ SITE_PARSERS = {
     "logoportal_articles": parse_logoportal_articles,
     "logopedy_articles": parse_logopedy_articles,
 }
+
 
 def fetch_rss(url: str) -> List[Dict[str,str]]:
     d = feedparser.parse(url)
@@ -310,11 +333,13 @@ def fetch_rss(url: str) -> List[Dict[str,str]]:
         })
     return out
 
+
 def fetch_static(urls: List[str]) -> List[Dict[str,str]]:
     return [{"title":"","link":u,"summary":""} for u in urls]
 
+
 def fetch_html_site(url: str, parser_name: str) -> List[Dict[str,str]]:
-    r = http_get(url, timeout=30)
+    r = _requests_get(url, timeout=30, verify=True)
     r.raise_for_status()
     parser = SITE_PARSERS.get(parser_name)
     if not parser:
@@ -325,6 +350,7 @@ def fetch_html_site(url: str, parser_name: str) -> List[Dict[str,str]]:
         uniq[it["link"]] = it
     return list(uniq.values())
 
+
 def fetch_source(src: Source) -> List[Dict[str,str]]:
     if src.type=="rss":
         return fetch_rss(src.url or "")
@@ -333,6 +359,7 @@ def fetch_source(src: Source) -> List[Dict[str,str]]:
     if src.type=="static":
         return fetch_static(src.urls or [])
     raise ValueError(f"Unsupported source type: {src.type}")
+
 
 def enrich_article(item: Dict[str,str]) -> Dict[str,str]:
     link = item.get("link","")
@@ -345,6 +372,7 @@ def enrich_article(item: Dict[str,str]) -> Dict[str,str]:
         if sm: item["article_summary"]=sm
     return item
 
+
 # ---------------------------
 # LLM rewriting (v1.6.1 prompts v2)
 # ---------------------------
@@ -352,6 +380,7 @@ def enrich_article(item: Dict[str,str]) -> Dict[str,str]:
 def _is_quota_error(status: int, text: str) -> bool:
     t=(text or "").lower()
     return status in (402,429) or any(k in t for k in ["quota","rate limit","exceeded","insufficient_quota","resource_exhausted"])
+
 
 def rewrite_with_groq(prompt: str) -> str:
     if not GROQ_API_KEY: raise RuntimeError("GROQ_API_KEY missing")
@@ -370,6 +399,7 @@ def rewrite_with_groq(prompt: str) -> str:
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
+
 def rewrite_with_gemini(prompt: str) -> str:
     if not GEMINI_API_KEY: raise RuntimeError("GEMINI_API_KEY missing")
     r = requests.post(
@@ -383,9 +413,11 @@ def rewrite_with_gemini(prompt: str) -> str:
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
+
 def _aud_limits(audience: str) -> int:
     a = (audience or "parents").strip().lower()
     return PARENTS_MAX_BODY_CHARS if a == "parents" else PROS_MAX_BODY_CHARS
+
 
 def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
     a = (audience or "parents").strip().lower()
@@ -398,16 +430,19 @@ def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
         "4) Сохрани структуру и порядок секций и списков.\n"
         "5) Не меняй названия секций и не удаляй их.\n"
         "6) Не добавляй новых разделов.\n"
-        f"7) Длина тела текста (без блока «Источник» и без дисклеймера/хештегов): до {max_chars} символов.\n"
+        "7) Сохрани маркеры списков: '•' для буллетов и '1) 2) 3)' для шагов.\n"
+        "8) НЕ удаляй символ '→' в шагах практики (если он есть).\n"
+        "9) НЕ меняй слова-маркеры в строках, начинающихся с: 'Фокус:', 'Цель (2 недели):', 'Критерии:', 'Перенос:'.\n"
+        f"10) Длина тела текста (без блока «Источник» и без дисклеймера/хештегов): до {max_chars} символов.\n"
         "Секции должны быть ровно такими:\n"
-        "«Суть», «Что это значит для вас», «Практика на сегодня (5–7 минут)», «Норма / когда нужен специалист».\n"
+        "«Суть», «Что это значит для вас», «Практика на сегодня (5–7 минут)», «Норма / когда нужен специалист», «Источник».\n"
     )
 
     if a == "pros":
         style = (
             "Аудитория: специалисты (логопеды/дефектологи).\n"
-            "Стиль: профессионально, точнее термины, но без канцелярита. "
-            "Можно использовать умеренную терминологию (фонематический слух, артикуляционная моторика, лексико-грамматический строй), "
+            "Стиль: профессионально, точнее термины, без канцелярита. "
+            "Допустима умеренная терминология (фонематический слух, артикуляционная моторика, лексико-грамматический строй), "
             "но формулировки должны оставаться ясными.\n"
         )
     else:
@@ -425,6 +460,7 @@ def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
         + body.strip()
     )
 
+
 def _enforce_body_limit_v2(text: str, max_chars: int) -> str:
     t = text.strip()
     if len(t) <= max_chars:
@@ -433,6 +469,7 @@ def _enforce_body_limit_v2(text: str, max_chars: int) -> str:
     if "\n" in cut:
         cut = cut[:cut.rfind("\n")].rstrip()
     return (cut.rstrip(" .,:;—-") + "…").strip()
+
 
 def rewrite_if_enabled(text: str, audience: str) -> str:
     if REWRITE_PROVIDER=="none":
@@ -475,8 +512,9 @@ def rewrite_if_enabled(text: str, audience: str) -> str:
 
     return text
 
+
 # ---------------------------
-# Post template v2 + quality gate (v1.6.1)
+# Post template v2 + quality gate (v1.6.1) + PROS etalon v2.1 strict
 # ---------------------------
 
 def make_question_week() -> str:
@@ -489,13 +527,16 @@ def make_question_week() -> str:
     ]
     return random.choice(questions)
 
+
 def _bullets(lines: List[str]) -> str:
     clean = [norm_space(x) for x in lines if norm_space(x)]
     return "\n".join([f"• {x}" for x in clean])
 
+
 def _numbered(lines: List[str]) -> str:
     clean = [norm_space(x) for x in lines if norm_space(x)]
     return "\n".join([f"{i+1}) {x}" for i,x in enumerate(clean)])
+
 
 def _has_required_headings(text: str) -> bool:
     required = [
@@ -506,6 +547,159 @@ def _has_required_headings(text: str) -> bool:
         "**Источник**",
     ]
     return all(r in text for r in required)
+
+
+def _extract_section(text: str, heading: str, next_headings: List[str]) -> str:
+    idx = text.find(heading)
+    if idx == -1:
+        return ""
+    start = idx + len(heading)
+    tail = text[start:]
+    end = len(tail)
+    for nh in next_headings:
+        j = tail.find(nh)
+        if j != -1:
+            end = min(end, j)
+    return tail[:end].strip()
+
+
+def _infer_pros_fields(picked_title: str, picked_summary: str) -> Dict[str,Any]:
+    blob = f"{picked_title}\n{picked_summary}".lower()
+
+    topic = "общий"
+    if any(k in blob for k in ["дизартр"]):
+        topic = "дизартрия"
+    elif any(k in blob for k in ["алали", "моторн", "сенсорн"]):
+        topic = "алалия/тяжёлое недоразвитие речи"
+    elif any(k in blob for k in ["фонемат", "фонем"]):
+        topic = "фонематические процессы"
+    elif any(k in blob for k in ["заик", "логоневроз"]):
+        topic = "заикание"
+    elif any(k in blob for k in ["слогов", "слогова", "слоговой"]):
+        topic = "слоговая структура"
+    elif any(k in blob for k in ["лексик", "граммат", "аграммат"]):
+        topic = "лексико-грамматический строй"
+
+    if topic == "дизартрия":
+        focus = "моторный компонент (артикуляционная моторика/дыхание/темп) + перенос в фразовую и спонтанную речь"
+        goal = "повысить разборчивость фразовой речи при сохранении темпа и речевого дыхания"
+        criteria = [
+            "в фразах 4–6 слов ≥ 80% разборчивости (по 10 пробам)",
+            "устойчивость артикуляционных укладов: ≥ 8/10 точных повторов в целевых слогах",
+        ]
+        transfer = "изолированный уклад → слог → слово → фраза → спонтанная речь (в бытовых ситуациях)"
+    elif topic == "алалия/тяжёлое недоразвитие речи":
+        focus = "программирование высказывания + словарь/грамматика; фиксируем динамику по инициативным фразам"
+        goal = "увеличить инициативные фразы и стабильность базовых грамматических конструкций"
+        criteria = [
+            "рост числа инициативных фраз (≥ 2 слова) в день: +3–5 по дневнику",
+            "точность моделей: «кто/что делает», «где», «какой» ≥ 8/10 в задании",
+        ]
+        transfer = "структура фразы в игре → в быту (просьбы/комментарии/рассказы по картинке)"
+    elif topic == "фонематические процессы":
+        focus = "фонематические процессы (различение/анализ) + связка с артикуляцией и письмом/чтением"
+        goal = "улучшить различение близких фонем и точность фонематического анализа на доступном материале"
+        criteria = [
+            "дифференциация пар (например, С–Ш/Т–К) ≥ 8/10 в пробе",
+            "фонематический анализ: выделение первого/последнего звука ≥ 8/10",
+        ]
+        transfer = "слуховая проба → слог/слово → самоконтроль в речи/письме"
+    elif topic == "заикание":
+        focus = "плавность/ритм + управление речевым дыханием; минимизируем давление и фиксируем триггеры"
+        goal = "стабилизировать плавность на коротких фразах и снизить частоту выраженных запинок"
+        criteria = [
+            "в пересказе 1–2 минут: снижение выраженных запинок (по отметкам в протоколе)",
+            "контроль темпа/дыхания: выполнение ритмо-речевых проб ≥ 8/10",
+        ]
+        transfer = "упражнение → диалог → спонтанное высказывание (с безопасным темпом)"
+    elif topic == "слоговая структура":
+        focus = "слоговая структура и моторное программирование; двигаемся от слога к слову и фразе"
+        goal = "снизить пропуски/перестановки слогов и закрепить слоговые модели в словах"
+        criteria = [
+            "в 10 целевых словах: ≥ 8 без перестановок/пропусков слогов",
+            "в фразе из 3–4 слов: сохранение слоговой структуры ≥ 8/10",
+        ]
+        transfer = "слог → слово → фраза → спонтанка (в игре/бытовом действии)"
+    elif topic == "лексико-грамматический строй":
+        focus = "лексико-грамматический строй: словарь + базовые грамматические модели, перенос в связную речь"
+        goal = "укрепить базовые грамматические конструкции и расширить активный словарь по теме"
+        criteria = [
+            "модели (предлоги/род/число): ≥ 8/10 в задании",
+            "активный словарь по теме: +10 слов за 2 недели (по карточкам/дневнику)",
+        ]
+        transfer = "модель в упражнении → в рассказ по картинке → в диалог"
+    else:
+        focus = "профиль речи: понимание, инициатива, слоговая структура, фонематические процессы, артикуляционная моторика"
+        goal = "получить измеримую динамику в речи на выбранном материале с переносом в бытовое общение"
+        criteria = [
+            "по 2 критериям: ≥ 8/10 выполнений в целевых заданиях",
+            "перенос: целевые элементы появляются в спонтанной фразе ≥ 5 раз/день (по дневнику)",
+        ]
+        transfer = "задание → игра → бытовая ситуация (микропрактики ежедневно 5–10 минут)"
+
+    return {
+        "topic": topic,
+        "focus": focus,
+        "goal": goal,
+        "criteria": criteria,
+        "transfer": transfer,
+    }
+
+
+def _criteria_inline(criteria: List[str]) -> str:
+    clean = [norm_space(x) for x in (criteria or []) if norm_space(x)]
+    clean = clean[:3]
+    if not clean:
+        return ""
+    if len(clean) == 1:
+        return f"1) {clean[0]}"
+    if len(clean) == 2:
+        return f"1) {clean[0]}; 2) {clean[1]}"
+    return f"1) {clean[0]}; 2) {clean[1]}; 3) {clean[2]}"
+
+
+def _validate_rendered_post(final_text: str, audience: str) -> Tuple[bool,str]:
+    a = (audience or "parents").strip().lower()
+
+    s_ess = _extract_section(final_text, "**Суть**", ["**Что это значит для вас**"])
+    s_mean = _extract_section(final_text, "**Что это значит для вас**", ["**Практика на сегодня (5–7 минут)**"])
+    s_pr = _extract_section(final_text, "**Практика на сегодня (5–7 минут)**", ["**Норма / когда нужен специалист**"])
+    s_norm = _extract_section(final_text, "**Норма / когда нужен специалист**", ["**Источник**"])
+    s_src = _extract_section(final_text, "**Источник**", [])
+
+    if len(norm_space(s_ess)) < 20:
+        return False, "quality_gate:rendered_essence_too_short"
+
+    bullets = [ln for ln in s_mean.splitlines() if ln.strip().startswith("• ")]
+    nums = [ln for ln in s_pr.splitlines() if re.match(r"^\s*\d+\)\s+", ln.strip())]
+
+    if a == "pros":
+        # strict v2.1: explicit markers in essence
+        needed_markers = ["Фокус:", "Цель (2 недели):", "Критерии:", "Перенос:"]
+        if not all(m in s_ess for m in needed_markers):
+            return False, "quality_gate:rendered_pros_missing_focus_goal_criteria_transfer"
+
+        if len(bullets) < PROS_MIN_MEANING_BULLETS:
+            return False, f"quality_gate:rendered_meaning_bullets_lt_{PROS_MIN_MEANING_BULLETS}:{len(bullets)}"
+        if len(nums) < MIN_PRACTICE_STEPS:
+            return False, f"quality_gate:rendered_practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(nums)}"
+        arrow_steps = sum(1 for ln in nums if "→" in ln)
+        if arrow_steps < PROS_MIN_ARROW_STEPS:
+            return False, f"quality_gate:rendered_pros_arrow_steps_lt_{PROS_MIN_ARROW_STEPS}:{arrow_steps}"
+    else:
+        if len(bullets) < MIN_MEANING_BULLETS:
+            return False, f"quality_gate:rendered_meaning_bullets_lt_{MIN_MEANING_BULLETS}:{len(bullets)}"
+        if len(nums) < MIN_PRACTICE_STEPS:
+            return False, f"quality_gate:rendered_practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(nums)}"
+
+    if "✅" not in s_norm or "⚠️" not in s_norm:
+        return False, "quality_gate:rendered_norm_block_missing_markers"
+
+    if "http://" not in s_src and "https://" not in s_src:
+        return False, "quality_gate:rendered_missing_source_url"
+
+    return True, "ok"
+
 
 def _quality_gate(
     rubric_format: str,
@@ -529,23 +723,58 @@ def _quality_gate(
         return False, f"quality_gate:weak_question_len:{ess_len}"
 
     m = [x for x in meaning if norm_space(x)]
-    if len(m) < MIN_MEANING_BULLETS:
-        return False, f"quality_gate:meaning_bullets_lt_{MIN_MEANING_BULLETS}:{len(m)}"
-
     p = [x for x in practice if norm_space(x)]
-    if len(p) < MIN_PRACTICE_STEPS:
-        return False, f"quality_gate:practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(p)}"
+
+    if aud == "pros":
+        needed_markers = ["Фокус:", "Цель (2 недели):", "Критерии:", "Перенос:"]
+        if not all(mk in essence for mk in needed_markers):
+            return False, "quality_gate:pros_missing_focus_goal_criteria_transfer"
+        if len(m) < PROS_MIN_MEANING_BULLETS:
+            return False, f"quality_gate:pros_meaning_bullets_lt_{PROS_MIN_MEANING_BULLETS}:{len(m)}"
+        if len(p) < MIN_PRACTICE_STEPS:
+            return False, f"quality_gate:practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(p)}"
+        arrow_steps = sum(1 for x in p if "→" in x)
+        if arrow_steps < PROS_MIN_ARROW_STEPS:
+            return False, f"quality_gate:pros_arrow_steps_lt_{PROS_MIN_ARROW_STEPS}:{arrow_steps}"
+        blob = (essence + " " + " ".join(m) + " " + " ".join(p)).lower()
+        if not any(k in blob for k in ["цель", "критер"]):
+            return False, "quality_gate:pros_missing_goal_or_criteria"
+    else:
+        if len(m) < MIN_MEANING_BULLETS:
+            return False, f"quality_gate:meaning_bullets_lt_{MIN_MEANING_BULLETS}:{len(m)}"
+        if len(p) < MIN_PRACTICE_STEPS:
+            return False, f"quality_gate:practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(p)}"
 
     nl = "\n".join([norm_space(x) for x in norm_lines if norm_space(x)])
     if "✅" not in nl or "⚠️" not in nl:
         return False, "quality_gate:norm_block_missing_markers"
 
     if aud == "pros" and rf in ("pro_friendly","case_digest"):
-        blob = " ".join(p).lower()
-        if not any(k in blob for k in ["цель", "критер", "чек", "контрол", "онлайн", "план"]):
+        blob2 = " ".join(p).lower()
+        if not any(k in blob2 for k in ["цель", "критер", "чек", "контрол", "онлайн", "план"]):
             return False, "quality_gate:pros_practice_too_generic"
 
     return True, "ok"
+
+
+def _pros_meaning_v21(topic: str) -> List[str]:
+    return [
+        "Смотрите не только на «звук», а на профиль: понимание инструкций, инициативу коммуникации, слоговую структуру, утомляемость, темп.",
+        "Разводите уровни: изолированный звук → слог/слово → фраза → спонтанная речь; фиксируйте динамику по критериям на 2–4 недели.",
+        "При схожей картине уточняйте механизмы: артикуляционная моторика/программирование, фонематические процессы, лексико-грамматический строй (и контекст билингвизма).",
+    ]
+
+
+def _pros_practice_v21(goal: str, criteria: List[str], transfer: str) -> List[str]:
+    c_inline = _criteria_inline(criteria)
+    goal_short = clamp_text(goal, 110)
+    transfer_short = clamp_text(transfer, 120)
+    return [
+        "Быстрый скрининг (1–2 пробы) → отметьте ведущий механизм (моторика/программирование vs фонематические процессы).",
+        f"Цель → критерии → материал: цель (2 недели) «{goal_short}» → критерии: {c_inline} → подберите слоги/слова/фразы.",
+        f"Перенос и контроль: упражнение → игра → быт → отметки «получилось/не получилось»; перенос: {transfer_short}.",
+    ]
+
 
 def compose_post_v2(
     rubric_title: str,
@@ -555,6 +784,13 @@ def compose_post_v2(
     picked: Dict[str,str],
     title_suffix: str
 ) -> Tuple[str, Dict[str,Any]]:
+    """
+    v1.6.3 — PROS v2.1 strict:
+      - In PROS, essence ALWAYS contains explicit lines:
+        Фокус / Цель (2 недели) / Критерии / Перенос
+      - Card subtitle for PROS will be taken from "Фокус:" line (see run()).
+      - Post-rewrite validation requires those markers preserved.
+    """
     link = picked.get("canonical") or picked.get("link","")
     picked_title = picked.get("picked_title") or picked.get("title") or ""
     summary = picked.get("picked_summary") or picked.get("summary") or ""
@@ -567,6 +803,11 @@ def compose_post_v2(
     picked_title_c = clamp_text(picked_title, 140) if picked_title else ""
     summary_c = clamp_text(summary, 240) if summary else ""
 
+    pros_fields = None
+    if aud == "pros":
+        pros_fields = _infer_pros_fields(picked_title_c, summary_c)
+
+    # --- Суть
     if rf == "question_week":
         q = make_question_week()
         essence = (
@@ -583,35 +824,45 @@ def compose_post_v2(
             essence_lines.append(f"Материал: {picked_title_c}")
         if summary_c:
             essence_lines.append(f"Коротко: {summary_c}")
+
+        if aud == "pros" and pros_fields:
+            essence_lines.append(f"Фокус: {pros_fields['focus']}")
+            essence_lines.append(f"Цель (2 недели): {pros_fields['goal']}")
+            essence_lines.append(f"Критерии: {_criteria_inline(pros_fields['criteria'])}")
+            essence_lines.append(f"Перенос: {pros_fields['transfer']}")
+
         essence = "\n".join(essence_lines).strip() or "Коротко и по делу о развитии речи."
 
+    # --- Что это значит для вас
     meaning: List[str]
-    if rf == "bilingual_parents":
-        meaning = [
-            "Смешивание языков и “вставки” слов второго языка часто бывают частью нормы в билингвизме.",
-            "Запреты и давление обычно снижают мотивацию говорить — лучше поддерживать русский регулярно и спокойно.",
-            "Важнее смотреть на понимание и динамику, а не на идеальную “чистоту” языка в каждый момент.",
-        ]
-    elif rf == "exercise_steps":
-        meaning = [
-            "Короткая регулярная практика эффективнее редких “длинных” занятий.",
-            "Зеркало и игра помогают удержать внимание и сделать упражнение привычкой.",
-            "Если ребёнок устал — лучше остановиться раньше, чем закрепить сопротивление.",
-        ]
-    elif rf == "myth_fact":
-        meaning = [
-            "Полезно отделять популярные мифы от того, что реально наблюдается в развитии речи.",
-            "Обычно важнее понимание, коммуникация и динамика, чем единичные признаки.",
-            "Если тревожно — лучше смотреть на ситуацию комплексно, а не по одному симптому.",
-        ]
-    elif rf == "age_norms":
-        meaning = [
-            "Возрастные нормы — ориентир, а не “экзамен”: варианты нормы бывают широкими.",
-            "Главное — динамика: растёт ли понимание и инициатива общения, появляются ли новые слова/фразы.",
-            "Удобнее обсуждать сомнения по конкретным примерам, а не “по ощущениям”.",
-        ]
-    elif rf in ("pro_friendly","case_digest"):
-        if aud == "parents":
+    if aud == "pros" and pros_fields:
+        meaning = _pros_meaning_v21(pros_fields.get("topic","общий"))
+    else:
+        if rf == "bilingual_parents":
+            meaning = [
+                "Смешивание языков и “вставки” слов второго языка часто бывают частью нормы в билингвизме.",
+                "Запреты и давление обычно снижают мотивацию говорить — лучше поддерживать русский регулярно и спокойно.",
+                "Важнее смотреть на понимание и динамику, а не на идеальную “чистоту” языка в каждый момент.",
+            ]
+        elif rf == "exercise_steps":
+            meaning = [
+                "Короткая регулярная практика эффективнее редких “длинных” занятий.",
+                "Зеркало и игра помогают удержать внимание и сделать упражнение привычкой.",
+                "Если ребёнок устал — лучше остановиться раньше, чем закрепить сопротивление.",
+            ]
+        elif rf == "myth_fact":
+            meaning = [
+                "Полезно отделять популярные мифы от того, что реально наблюдается в развитии речи.",
+                "Обычно важнее понимание, коммуникация и динамика, чем единичные признаки.",
+                "Если тревожно — лучше смотреть на ситуацию комплексно, а не по одному симптому.",
+            ]
+        elif rf == "age_norms":
+            meaning = [
+                "Возрастные нормы — ориентир, а не “экзамен”: варианты нормы бывают широкими.",
+                "Главное — динамика: растёт ли понимание и инициатива общения, появляются ли новые слова/фразы.",
+                "Удобнее обсуждать сомнения по конкретным примерам, а не “по ощущениям”.",
+            ]
+        elif rf in ("pro_friendly","case_digest"):
             meaning = [
                 "Ниже — идея, как превратить материал в понятный домашний шаг без перегруза.",
                 "Если ребёнку сложно — начинайте с малого и фиксируйте маленький прогресс.",
@@ -619,66 +870,59 @@ def compose_post_v2(
             ]
         else:
             meaning = [
-                "Переносите материал в практику: цель → критерий → шаги → контроль.",
-                "Для онлайн особенно важны демонстрация, простое ДЗ и короткий чек-лист.",
-                "Учитывайте билингвальную среду и перенос навыков между языками.",
+                "Самый надёжный прогресс в речи — регулярные маленькие шаги, а не разовые “рывки”.",
+                "Коммуникация важнее идеальной артикуляции: сначала смысл и желание говорить, потом точность.",
+                "Лучше опираться на проверенные источники и наблюдать динамику 2–4 недели.",
             ]
-    else:
-        meaning = [
-            "Самый надёжный прогресс в речи — регулярные маленькие шаги, а не разовые “рывки”.",
-            "Коммуникация важнее идеальной артикуляции: сначала смысл и желание говорить, потом точность.",
-            "Лучше опираться на проверенные источники и наблюдать динамику 2–4 недели.",
-        ]
 
+    # --- Практика 5–7 минут
     practice: List[str]
-    if rf == "exercise_steps":
-        practice = [
-            "Перед зеркалом: «Лопаточка» — 5 раз по 5 секунд.",
-            "«Часики» — 10 плавных движений вправо-влево.",
-            "1 минута: дуем на ватный шарик/мыльные пузыри (в игре).",
-            "В конце — короткая похвала за попытки, без “переделывай”.",
-        ]
-    elif rf == "bilingual_parents":
-        practice = [
-            "Игра “Два варианта”: повторите фразу ребёнка по-русски (спокойно, без исправлений), затем спросите «как по-русски?».",
-            "5 минут “островка русского”: книжка/картинки/комментирование действий дома.",
-            "В конце дня: ребёнок выбирает 3 предмета и называет их по-русски (можно с подсказкой).",
-        ]
-    elif rf == "question_week":
-        practice = [
-            "Запишите 3 примера фраз ребёнка (как есть) и ситуации, где они прозвучали.",
-            "Отметьте: понимает ли ребёнок просьбы без жестов (2–3 примера).",
-            "Выберите 1 мини-игру на речь на 5 минут (картинки/описание предмета/пузыри).",
-        ]
-    elif rf == "age_norms":
-        practice = [
-            "5 минут “описательной речи”: выберите предмет и проговорите (цвет/форма/назначение/действие).",
-            "Игра “Кто что делает?”: 10 глаголов по картинкам (прыгает, рисует, моет…).",
-            "Если ребёнок билингв — дайте ответить, затем мягко повторите модель по-русски.",
-        ]
-    elif rf == "myth_fact":
-        practice = [
-            "Выберите 1 ситуацию для спокойного “моделирования”: повторите фразу ребёнка правильно, без оценки.",
-            "5 минут игры на словарь (категории: еда/одежда/игрушки).",
-            "В конце — один открытый вопрос: «Что было самым интересным?»",
-        ]
-    elif rf in ("pro_friendly","case_digest") and aud != "parents":
-        practice = [
-            "Сформулируйте цель на 2 недели (1–2 измеримых критерия).",
-            "Подготовьте демонстрацию 1 упражнения + чек-лист для родителей (до 6 пунктов).",
-            "Продумайте перенос в билингвальной среде: где закреплять русский ежедневно 5–10 минут.",
-        ]
+    if aud == "pros" and pros_fields:
+        practice = _pros_practice_v21(pros_fields["goal"], pros_fields["criteria"], pros_fields["transfer"])
     else:
-        practice = [
-            "5 минут артикуляционной гимнастики (в игре, перед зеркалом).",
-            "5 минут “словарной игры”: категории/противоположности/описание предметов.",
-            "1 минута дыхательной игры (пузыри/ватный шарик/дуем на перышко).",
-        ]
+        if rf == "exercise_steps":
+            practice = [
+                "Перед зеркалом: «Лопаточка» — 5 раз по 5 секунд.",
+                "«Часики» — 10 плавных движений вправо-влево.",
+                "1 минута: дуем на ватный шарик/мыльные пузыри (в игре).",
+                "В конце — короткая похвала за попытки, без “переделывай”.",
+            ]
+        elif rf == "bilingual_parents":
+            practice = [
+                "Игра “Два варианта”: повторите фразу ребёнка по-русски (спокойно, без исправлений), затем спросите «как по-русски?».",
+                "5 минут “островка русского”: книжка/картинки/комментирование действий дома.",
+                "В конце дня: ребёнок выбирает 3 предмета и называет их по-русски (можно с подсказкой).",
+            ]
+        elif rf == "question_week":
+            practice = [
+                "Запишите 3 примера фраз ребёнка (как есть) и ситуации, где они прозвучали.",
+                "Отметьте: понимает ли ребёнок просьбы без жестов (2–3 примера).",
+                "Выберите 1 мини-игру на речь на 5 минут (картинки/описание предмета/пузыри).",
+            ]
+        elif rf == "age_norms":
+            practice = [
+                "5 минут “описательной речи”: выберите предмет и проговорите (цвет/форма/назначение/действие).",
+                "Игра “Кто что делает?”: 10 глаголов по картинкам (прыгает, рисует, моет…).",
+                "Если ребёнок билингв — дайте ответить, затем мягко повторите модель по-русски.",
+            ]
+        elif rf == "myth_fact":
+            practice = [
+                "Выберите 1 ситуацию для спокойного “моделирования”: повторите фразу ребёнка правильно, без оценки.",
+                "5 минут игры на словарь (категории: еда/одежда/игрушки).",
+                "В конце — один открытый вопрос: «Что было самым интересным?»",
+            ]
+        else:
+            practice = [
+                "5 минут артикуляционной гимнастики (в игре, перед зеркалом).",
+                "5 минут “словарной игры”: категории/противоположности/описание предметов.",
+                "1 минута дыхательной игры (пузыри/ватный шарик/дуем на перышко).",
+            ]
 
-    if rf in ("pro_friendly","case_digest") and aud != "parents":
+    # --- Норма / когда нужен специалист
+    if aud == "pros":
         norm_lines = [
-            "✅ Норма: есть стабильный контакт, понимание инструкций, постепенная динамика по целям.",
-            "⚠️ Обсудить со специалистом: выраженная регрессия навыков или отсутствие прогресса при регулярной практике 4–6 недель.",
+            "✅ Норма: есть стабильный контакт, понимание инструкций, постепенная динамика по критериям (с переносом в речь).",
+            "⚠️ Обсудить со специалистом: регресс навыков, стойкое отсутствие прогресса при регулярной практике 4–6 недель или выраженные трудности понимания.",
         ]
     else:
         norm_lines = [
@@ -696,6 +940,7 @@ def compose_post_v2(
         "rubric_format": rf,
         "audience": aud,
         "source_type": stype,
+        "pros_fields": pros_fields or {},
     }
     if not ok:
         return "", meta
@@ -727,6 +972,7 @@ def compose_post_v2(
         parts.append(tags)
 
     raw_text = "\n".join(parts).strip()
+
     final_text = rewrite_if_enabled(raw_text, aud)
 
     if not _has_required_headings(final_text):
@@ -734,7 +980,14 @@ def compose_post_v2(
         meta["reason"] = "quality_gate:rewrite_broke_structure"
         return "", meta
 
+    ok2, r2 = _validate_rendered_post(final_text, aud)
+    if not ok2:
+        meta["ok"] = False
+        meta["reason"] = r2
+        return "", meta
+
     return final_text, meta
+
 
 # ---------------------------
 # Card rendering (v1.4)
@@ -746,6 +999,7 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
         return ImageFont.truetype(str(ttf), size=size)
     return ImageFont.load_default()
 
+
 def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
     h = (h or "").strip().lstrip("#")
     if len(h)==3:
@@ -754,7 +1008,14 @@ def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
         return (74,144,226)
     return tuple(int(h[i:i+2],16) for i in (0,2,4))
 
+
 def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any]) -> Path:
+    """
+    Visual themes (switch in config/rubrics.yml -> branding.card_theme):
+      - minimal: clean neutral, subtle waves
+      - kids: softer palette, playful dots
+      - scientific: stricter palette, grid accents
+    """
     theme = (branding or {}).get("card_theme","minimal") or "minimal"
     theme = str(theme).strip().lower()
 
@@ -893,6 +1154,7 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str,Any])
     img.save(out)
     return out
 
+
 # ---------------------------
 # Telegram helpers + stats + selection
 # ---------------------------
@@ -902,72 +1164,56 @@ def tg_request(method: str, data: Dict[str,Any], files: Optional[Dict[str,Any]]=
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     r = requests.post(url, data=data, files=files, timeout=30)
-
-    if not r.ok:
-        desc = ""
-        try:
-            j = r.json()
-            desc = j.get("description","") or str(j)
-        except Exception:
-            desc = (r.text or "")[:800]
-        print(f"[TG] {method} failed: {r.status_code} :: {desc[:800]}")
-        r.raise_for_status()
-
+    if r.status_code >= 400:
+        print(f"[ERROR] Telegram {method} failed: {r.status_code} {r.text[:700]}")
+    r.raise_for_status()
     return r.json()
 
-def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
-    if not chat_id:
-        raise RuntimeError("TELEGRAM_CHAT_ID is missing/empty.")
-    cap = (caption or "").strip()
 
-    try:
-        with photo_path.open("rb") as f:
+def _strip_markdown_simple(text: str) -> str:
+    t = text or ""
+    t = t.replace("**", "")
+    t = t.replace("_", "")
+    return t
+
+
+def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
+    with photo_path.open("rb") as f:
+        try:
             tg_request(
                 "sendPhoto",
-                data={"chat_id": chat_id, "caption": cap[:1000], "parse_mode":"Markdown"},
+                data={"chat_id": chat_id, "caption": caption, "parse_mode": TELEGRAM_PARSE_MODE},
                 files={"photo": f}
             )
-        return
-    except requests.exceptions.HTTPError as e:
-        resp_text = ""
-        if getattr(e, "response", None) is not None:
-            resp_text = (e.response.text or "")
-        if "parse entities" in resp_text.lower() or "can't parse" in resp_text.lower():
-            print("[WARN] Telegram Markdown parse error in caption; retry without parse_mode")
-            cap_plain = markdown_to_plain(cap)
-            with photo_path.open("rb") as f:
-                tg_request(
-                    "sendPhoto",
-                    data={"chat_id": chat_id, "caption": cap_plain[:1000]},
-                    files={"photo": f}
-                )
-            return
-        raise
+        except requests.exceptions.HTTPError as e:
+            resp = getattr(e, "response", None)
+            if resp is not None and resp.status_code == 400 and TELEGRAM_PARSE_MODE:
+                print("[WARN] sendPhoto got 400; retry without parse_mode (plain text caption).")
+                f.seek(0)
+                tg_request("sendPhoto", data={"chat_id": chat_id, "caption": _strip_markdown_simple(caption)}, files={"photo": f})
+            else:
+                raise
+
 
 def send_message(chat_id: str, text: str) -> None:
-    if not chat_id:
-        raise RuntimeError("TELEGRAM_CHAT_ID is missing/empty.")
-    t = (text or "").strip()
-
     try:
-        tg_request("sendMessage", data={"chat_id": chat_id, "text": t[:4000], "parse_mode":"Markdown"})
-        return
+        tg_request("sendMessage", data={"chat_id": chat_id, "text": text, "parse_mode": TELEGRAM_PARSE_MODE})
     except requests.exceptions.HTTPError as e:
-        resp_text = ""
-        if getattr(e, "response", None) is not None:
-            resp_text = (e.response.text or "")
-        if "parse entities" in resp_text.lower() or "can't parse" in resp_text.lower():
-            print("[WARN] Telegram Markdown parse error in message; retry without parse_mode")
-            tp = markdown_to_plain(t)
-            tg_request("sendMessage", data={"chat_id": chat_id, "text": tp[:4000]})
-            return
-        raise
+        resp = getattr(e, "response", None)
+        if resp is not None and resp.status_code == 400 and TELEGRAM_PARSE_MODE:
+            print("[WARN] sendMessage got 400; retry without parse_mode (plain text).")
+            tg_request("sendMessage", data={"chat_id": chat_id, "text": _strip_markdown_simple(text)})
+        else:
+            raise
+
 
 def load_weekly_stats() -> Dict[str,Any]:
     return load_state("stats_weekly.json", {})
 
+
 def save_weekly_stats(stats: Dict[str,Any]) -> None:
     save_state("stats_weekly.json", stats)
+
 
 def bump_weekly(stats: Dict[str,Any], week_key: str, field: str, amount: int = 1, reason: Optional[str]=None) -> None:
     wk = stats.get(week_key) or {"passed": 0, "rejected": 0, "reasons": {}}
@@ -977,6 +1223,7 @@ def bump_weekly(stats: Dict[str,Any], week_key: str, field: str, amount: int = 1
         rs[reason] = int(rs.get(reason,0)) + amount
         wk["reasons"] = rs
     stats[week_key] = wk
+
 
 def format_dashboard(stats: Dict[str,Any], week_key: str, title: str) -> str:
     wk = stats.get(week_key) or {"passed": 0, "rejected": 0, "reasons": {}}
@@ -999,6 +1246,7 @@ def format_dashboard(stats: Dict[str,Any], week_key: str, title: str) -> str:
     lines.append("_Примечание: это тех. статистика качества источников/фильтров._")
     return "\n".join(lines)
 
+
 def handle_draft(pub_cfg: Dict[str,Any], entry: Dict[str,Any], stats: Dict[str,Any], week_key: str) -> None:
     mode = (pub_cfg.get("drafts_mode") or "skip").strip()
     drafts_chat_id = ""
@@ -1020,6 +1268,7 @@ def handle_draft(pub_cfg: Dict[str,Any], entry: Dict[str,Any], stats: Dict[str,A
                f"Заголовок: {entry.get('title')}\n"
                f"Ссылка: {entry.get('link')}\n")
         send_message(drafts_chat_id, msg)
+
 
 def pick_item(
     items: List[Dict[str,str]],
@@ -1067,6 +1316,29 @@ def pick_item(
         it["source_type"]=source_type_label_from_factcheck(reason)
         return it, None
     return None, None
+
+
+def _subtitle_from_post(text: str, audience: str) -> str:
+    aud = (audience or "parents").strip().lower()
+    if not text:
+        return "Коротко и по делу"
+    if aud == "pros":
+        s_ess = _extract_section(text, "**Суть**", ["**Что это значит для вас**"])
+        for ln in s_ess.splitlines():
+            if ln.strip().startswith("Фокус:"):
+                val = ln.strip().replace("Фокус:", "", 1).strip()
+                if val:
+                    return clamp_text(val, 110)
+        return "Профессиональный разбор: профиль → цель → критерии → перенос"
+    # parents: prefer summary-like short
+    s_ess = _extract_section(text, "**Суть**", ["**Что это значит для вас**"])
+    for ln in s_ess.splitlines():
+        if ln.strip().startswith("Коротко:"):
+            val = ln.strip().replace("Коротко:", "", 1).strip()
+            if val:
+                return clamp_text(val, 110)
+    return "Коротко и по делу"
+
 
 def run() -> None:
     rub_cfg = load_yaml(CFG_DIR/"rubrics.yml")
@@ -1156,22 +1428,11 @@ def run() -> None:
                 handle_draft(pub_cfg, draft_entry, stats, week_key)
                 continue
 
-            subtitle = "Коротко и по делу"
-            summ = (picked.get("picked_summary") or "").strip()
-            if summ:
-                subtitle = summ[:110].rstrip(" .,:;—-") + "…"
-
+            subtitle = _subtitle_from_post(text, aud)
             card = render_image_card(title, subtitle, branding)
 
-            try:
-                send_photo(TELEGRAM_CHAT_ID, card, text[:950])
-            except Exception as e:
-                print(f"[WARN] send_photo failed; fallback to send_message. Err: {e}")
-                try:
-                    send_message(TELEGRAM_CHAT_ID, markdown_to_plain(text)[:4000])
-                except Exception as e2:
-                    print(f"[ERROR] send_message fallback also failed: {e2}")
-                    raise
+            # Telegram caption limit: keep conservative
+            send_photo(TELEGRAM_CHAT_ID, card, text[:950])
 
             bump_weekly(stats, week_key, "passed", 1)
 
@@ -1189,6 +1450,7 @@ def run() -> None:
     save_weekly_stats(stats)
 
     print(f"Done. Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}. Week: {week_key}")
+
 
 if __name__=="__main__":
     run()

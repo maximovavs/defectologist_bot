@@ -62,6 +62,23 @@ def clamp_text(s: str, max_len: int) -> str:
         return s
     return (s[:max_len].rstrip(" .,:;—-") + "…").strip()
 
+def markdown_to_plain(text: str) -> str:
+    """
+    Telegram Markdown часто падает на URL с '_' и прочими символами.
+    Поэтому при ошибке парсинга мы отправляем plain-text без parse_mode.
+    """
+    t = text or ""
+    # убираем типовые маркеры Markdown
+    t = t.replace("**", "")
+    t = t.replace("__", "")
+    t = t.replace("`", "")
+    # одиночные маркеры
+    t = t.replace("*", "")
+    t = t.replace("_", "")
+    # иногда встречаются "###" и т.п.
+    t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.MULTILINE)
+    return t.strip()
+
 def norm_title_key(s: str) -> str:
     s = (s or "").lower()
     s = re.sub(r"[^\w\s]+"," ",s,flags=re.UNICODE)
@@ -138,9 +155,22 @@ def score_item(title: str, link: str, quality_cfg: Dict[str,Any]) -> Tuple[int,s
             score += 2
     return (score,"ok")
 
+def http_get(url: str, timeout: int = 25) -> requests.Response:
+    """
+    Безопасный GET: для logorina.ru при CERT_VERIFY делаем единичный ретрай verify=False.
+    """
+    try:
+        return requests.get(url, headers=HEADERS, timeout=timeout)
+    except requests.exceptions.SSLError:
+        d = safe_domain(url)
+        if d.endswith("logorina.ru"):
+            print("[WARN] SSL verify failed for logorina.ru; retry with verify=False")
+            return requests.get(url, headers=HEADERS, timeout=timeout, verify=False)
+        raise
+
 def get_canonical_and_soup(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=25)
+        r = http_get(url, timeout=25)
         r.raise_for_status()
         soup = BeautifulSoup(r.text,"lxml")
         canon = soup.find("link", rel=lambda x: x and "canonical" in x.lower())
@@ -287,7 +317,7 @@ def fetch_static(urls: List[str]) -> List[Dict[str,str]]:
     return [{"title":"","link":u,"summary":""} for u in urls]
 
 def fetch_html_site(url: str, parser_name: str) -> List[Dict[str,str]]:
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = http_get(url, timeout=30)
     r.raise_for_status()
     parser = SITE_PARSERS.get(parser_name)
     if not parser:
@@ -713,7 +743,7 @@ def compose_post_v2(
     if disclaimer:
         parts.append("")
         parts.append(f"_{disclaimer}_")
-    if tags:
+    if tags (:= tags):
         parts.append("")
         parts.append(tags)
 
@@ -907,15 +937,68 @@ def tg_request(method: str, data: Dict[str,Any], files: Optional[Dict[str,Any]]=
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     r = requests.post(url, data=data, files=files, timeout=30)
-    r.raise_for_status()
+
+    if not r.ok:
+        desc = ""
+        try:
+            j = r.json()
+            desc = j.get("description","") or str(j)
+        except Exception:
+            desc = (r.text or "")[:800]
+        print(f"[TG] {method} failed: {r.status_code} :: {desc[:800]}")
+        r.raise_for_status()
+
     return r.json()
 
 def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
-    with photo_path.open("rb") as f:
-        tg_request("sendPhoto", data={"chat_id": chat_id, "caption": caption, "parse_mode":"Markdown"}, files={"photo": f})
+    if not chat_id:
+        raise RuntimeError("TELEGRAM_CHAT_ID is missing/empty.")
+    cap = (caption or "").strip()
+
+    # 1) пробуем Markdown
+    try:
+        with photo_path.open("rb") as f:
+            tg_request(
+                "sendPhoto",
+                data={"chat_id": chat_id, "caption": cap[:1000], "parse_mode":"Markdown"},
+                files={"photo": f}
+            )
+        return
+    except requests.exceptions.HTTPError as e:
+        resp_text = ""
+        if getattr(e, "response", None) is not None:
+            resp_text = (e.response.text or "")
+        if "parse entities" in resp_text.lower() or "can't parse" in resp_text.lower():
+            print("[WARN] Telegram Markdown parse error in caption; retry without parse_mode")
+            cap_plain = markdown_to_plain(cap)
+            with photo_path.open("rb") as f:
+                tg_request(
+                    "sendPhoto",
+                    data={"chat_id": chat_id, "caption": cap_plain[:1000]},
+                    files={"photo": f}
+                )
+            return
+        raise
 
 def send_message(chat_id: str, text: str) -> None:
-    tg_request("sendMessage", data={"chat_id": chat_id, "text": text, "parse_mode":"Markdown"})
+    if not chat_id:
+        raise RuntimeError("TELEGRAM_CHAT_ID is missing/empty.")
+    t = (text or "").strip()
+
+    # 1) пробуем Markdown
+    try:
+        tg_request("sendMessage", data={"chat_id": chat_id, "text": t[:4000], "parse_mode":"Markdown"})
+        return
+    except requests.exceptions.HTTPError as e:
+        resp_text = ""
+        if getattr(e, "response", None) is not None:
+            resp_text = (e.response.text or "")
+        if "parse entities" in resp_text.lower() or "can't parse" in resp_text.lower():
+            print("[WARN] Telegram Markdown parse error in message; retry without parse_mode")
+            tp = markdown_to_plain(t)
+            tg_request("sendMessage", data={"chat_id": chat_id, "text": tp[:4000]})
+            return
+        raise
 
 def load_weekly_stats() -> Dict[str,Any]:
     return load_state("stats_weekly.json", {})
@@ -1116,7 +1199,17 @@ def run() -> None:
                 subtitle = summ[:110].rstrip(" .,:;—-") + "…"
 
             card = render_image_card(title, subtitle, branding)
-            send_photo(TELEGRAM_CHAT_ID, card, text[:950])
+
+            # Telegram sometimes fails on Markdown entities in caption; fallback to plain text + sendMessage
+            try:
+                send_photo(TELEGRAM_CHAT_ID, card, text[:950])
+            except Exception as e:
+                print(f"[WARN] send_photo failed; fallback to send_message. Err: {e}")
+                try:
+                    send_message(TELEGRAM_CHAT_ID, markdown_to_plain(text)[:4000])
+                except Exception as e2:
+                    print(f"[ERROR] send_message fallback also failed: {e2}")
+                    raise
 
             bump_weekly(stats, week_key, "passed", 1)
 

@@ -33,7 +33,7 @@ ASSETS_DIR = ROOT / "assets"
 FONTS_DIR = ASSETS_DIR / "fonts"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/1.6.2 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/1.6.3 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -49,13 +49,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()  # parents|pros|both
 
-# Caption is limited in Telegram; keep conservative target for BODY (without source/disclaimer/hashtags)
+# v1.6.1: style/length knobs (Telegram caption is limited; we keep conservative targets)
 PARENTS_MAX_BODY_CHARS = int(os.getenv("PARENTS_MAX_BODY_CHARS", "860"))
 PROS_MAX_BODY_CHARS = int(os.getenv("PROS_MAX_BODY_CHARS", "980"))
 
-# Quality-gate knobs
+# v1.6.1: quality gate knobs
 MIN_MEANING_BULLETS = int(os.getenv("MIN_MEANING_BULLETS", "2"))
 MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS", "3"))
+
+# Telegram hard limits: captions are very strict (often ~1024 chars, but UTF-8 bytes matter).
+# Use bytes-limit for safety.
+TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
+TG_SEND_FULL_TEXT_AFTER_PHOTO = (os.getenv("TG_SEND_FULL_TEXT_AFTER_PHOTO", "1").strip().lower() in ("1", "true", "yes"))
 
 # Optional: treat these domains as insecure TLS (comma-separated), if you want to bypass bad certs
 INSECURE_TLS_DOMAINS = [
@@ -161,6 +166,40 @@ def is_due(rubric: Dict[str, Any], now: datetime) -> bool:
     return False
 
 
+def utf8_clip(text: str, max_bytes: int, add_ellipsis: bool = True) -> str:
+    """
+    Clip by UTF-8 bytes (Telegram caption errors are often byte-based).
+    Guarantees result.encode('utf-8') <= max_bytes.
+    """
+    s = (text or "")
+    b = s.encode("utf-8")
+    if len(b) <= max_bytes:
+        return s
+    cut = b[:max_bytes]
+    while cut:
+        try:
+            out = cut.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            cut = cut[:-1]
+    else:
+        return "…"
+
+    out = out.rstrip(" .,:;—-")
+    if add_ellipsis:
+        ell = "…"
+        # ensure ellipsis fits
+        while out and len((out + ell).encode("utf-8")) > max_bytes:
+            out = out[:-1]
+            out = out.rstrip(" .,:;—-")
+        if len((out + ell).encode("utf-8")) <= max_bytes:
+            out = out + ell
+    # final guard
+    while len(out.encode("utf-8")) > max_bytes and out:
+        out = out[:-1]
+    return out.strip() or "…"
+
+
 # =========================
 # Sources
 # =========================
@@ -220,7 +259,7 @@ def extract_article_summary(soup: BeautifulSoup) -> str:
     ogd = soup.find("meta", property="og:description")
     if ogd and ogd.get("content"):
         return norm_space(ogd["content"])
-    paras = []
+    paras: List[str] = []
     for p in soup.select("p"):
         txt = norm_space(p.get_text(" ", strip=True))
         if len(txt) < 60:
@@ -296,6 +335,7 @@ def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: O
         if not title or len(title) < 8:
             continue
         out.append({"title": title, "link": href, "summary": ""})
+
     seen: set[str] = set()
     uniq: List[Dict[str, str]] = []
     for it in out:
@@ -504,7 +544,6 @@ def _has_required_headings_plain(text: str) -> bool:
         "Норма / когда нужен специалист",
         "Источник",
     ]
-    # headings should appear as standalone lines (robust enough for our usage)
     lines = [(x or "").strip() for x in (text or "").splitlines()]
     s = set(lines)
     return all(h in s for h in required)
@@ -513,20 +552,18 @@ def _has_required_headings_plain(text: str) -> bool:
 def rewrite_if_enabled_plain(full_plain_text: str, audience: str) -> Tuple[str, bool, str]:
     """
     Returns: (rewritten_or_raw, used_rewrite, note)
-    We also implement the requested behavior:
+    Requested behavior:
       - if rewrite breaks structure -> fallback to raw, do NOT fail quality.
     """
     if REWRITE_PROVIDER == "none":
         return full_plain_text, False, "rewrite:none"
 
-    # split at "Источник" heading (keep it + tail intact)
     marker = "\nИсточник\n"
     idx = full_plain_text.find(marker)
     if idx != -1:
         body = full_plain_text[:idx].strip()
         tail = full_plain_text[idx:].strip()
     else:
-        # fallback: try first occurrence of line "Источник"
         parts = re.split(r"\nИсточник\s*\n", full_plain_text, maxsplit=1)
         if len(parts) == 2:
             body = parts[0].strip()
@@ -637,9 +674,7 @@ def compose_post_plain_v21(
     title_suffix: str,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Produces STRICT PLAIN TEXT (no HTML/Markdown). Then we rewrite (optional), then render to Telegram HTML.
-
-    Also: we do NOT fail good posts due to rewrite; we fallback to raw plain if rewrite breaks structure.
+    Produces STRICT PLAIN TEXT (no HTML/Markdown). Then rewrite (optional) with fallback on raw.
     """
     link = picked.get("canonical") or picked.get("link", "")
     picked_title = picked.get("picked_title") or picked.get("title") or ""
@@ -705,7 +740,7 @@ def compose_post_plain_v21(
                 "Системность важнее идеальности выполнения.",
             ]
         else:
-            # PROS v2.1 (чуть более «методически»)
+            # PROS v2.1
             meaning = [
                 "Оперируйте связкой: задача → критерий успешности → шаги → контроль (2–4 недели).",
                 "Смотрите перенос: фонематические/артикуляционные навыки → слоги → слова → фраза → связная речь.",
@@ -751,7 +786,6 @@ def compose_post_plain_v21(
             "В конце — один открытый вопрос: «Что было самым интересным?»",
         ]
     elif rf in ("pro_friendly", "case_digest") and aud != "parents":
-        # PROS v2.1: чуть более «операционально»
         practice = [
             "Сформулируйте цель на 2 недели и 1–2 измеримых критерия (частота/точность/самоконтроль).",
             "Соберите мини-протокол: стимул → подсказка → самостоятельное выполнение → перенос в спонтанную речь.",
@@ -833,7 +867,7 @@ def compose_post_plain_v21(
     meta["rewrite_used"] = used_rewrite
     meta["rewrite_note"] = note
 
-    # Final structure sanity; if broken (should already fallback), still ensure raw is used
+    # Absolute guard
     if not _has_required_headings_plain(final_plain):
         print("[WARN] final structure broken unexpectedly -> force raw")
         final_plain = raw_plain
@@ -861,9 +895,12 @@ def _escape(s: str) -> str:
 
 
 def _strip_html_tags(s: str) -> str:
-    # used for safe-send fallback; remove tags and unescape entities
     s = re.sub(r"<[^>]+>", "", s or "")
     return _html.unescape(s)
+
+
+def _looks_like_html(s: str) -> bool:
+    return bool(re.search(r"</?(b|i|a)\b", s or ""))
 
 
 def render_plain_to_telegram_html(plain_text: str) -> str:
@@ -871,7 +908,7 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
     Convert our strict plain post to Telegram HTML:
       - First line as <b>title</b>
       - Headings as <b>Heading</b>
-      - Source link "🔗 URL" as clickable <a href="URL">URL</a>
+      - Source link "🔗 URL" as clickable <a href="URL">domain</a>
       - Disclaimer line starting with "ℹ️ " italicized
     """
     lines = (plain_text or "").splitlines()
@@ -894,7 +931,6 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
         if stripped.startswith("🔗 "):
             url = stripped[2:].strip()
             if url.startswith(("http://", "https://")):
-                # show domain as text but keep full url in href
                 dom = safe_domain(url) or url
                 out.append(f"🔗 <a href=\"{_html.escape(url, quote=True)}\">{_escape(dom)}</a>")
             else:
@@ -905,23 +941,118 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             out.append(f"<i>{_escape(stripped)}</i>")
             continue
 
-        # default line
         out.append(_escape(s))
 
     return "\n".join(out).strip()
 
 
-def _caption_clip_safe(html_caption: str, max_len: int = 1024) -> str:
+def parse_plain_sections(plain_post: str) -> Tuple[str, Dict[str, List[str]]]:
     """
-    Best-effort clipping for Telegram caption length.
-    If too long, we fallback to plain text (no tags) clipped, because clipping HTML safely is non-trivial.
+    Very simple parser for our strict plain format.
+    Title = first line.
+    Headings are in _HTML_HEADINGS.
     """
-    if len(html_caption) <= max_len:
+    lines = (plain_post or "").splitlines()
+    title = (lines[0].strip() if lines else "").strip()
+    sec: Dict[str, List[str]] = {}
+    cur = ""
+    for i, line in enumerate(lines[1:], start=1):
+        s = line.strip()
+        if s in _HTML_HEADINGS:
+            cur = s
+            sec[cur] = []
+            continue
+        if cur:
+            sec[cur].append(line.rstrip("\n"))
+    return title, sec
+
+
+def build_caption_plain(plain_post: str, max_bytes: int) -> str:
+    """
+    Build a compact caption that keeps required semantics and fits TG_CAPTION_MAX_BYTES by UTF-8 bytes.
+    We keep:
+      - Title
+      - 1–2 lines of "Суть"
+      - MIN_MEANING_BULLETS bullets
+      - MIN_PRACTICE_STEPS steps
+      - both norm lines (✅/⚠️)
+      - source domain
+    """
+    title, sec = parse_plain_sections(plain_post)
+
+    def take_lines(key: str, n: int) -> List[str]:
+        arr = sec.get(key, []) or []
+        out = []
+        for x in arr:
+            if x.strip():
+                out.append(x.strip())
+            if len(out) >= n:
+                break
+        return out
+
+    essence_lines = take_lines("Суть", 2)
+    meaning_lines = [x.strip() for x in (sec.get("Что это значит для вас", []) or []) if x.strip().startswith("•")]
+    practice_lines = [x.strip() for x in (sec.get("Практика на сегодня (5–7 минут)", []) or []) if re.match(r"^\d+\)\s+", x.strip())]
+    norm_lines = [x.strip() for x in (sec.get("Норма / когда нужен специалист", []) or []) if x.strip().startswith(("✅", "⚠️"))]
+    source_lines = [x.strip() for x in (sec.get("Источник", []) or []) if x.strip()]
+    src_url = ""
+    for x in source_lines:
+        if x.startswith("🔗 "):
+            src_url = x[2:].strip()
+            break
+    src_dom = safe_domain(src_url) if src_url else ""
+
+    lines: List[str] = []
+    if title:
+        lines.append(title)
+    lines.append("")
+    lines.append("Суть")
+    if essence_lines:
+        # keep essence compact
+        ess = " ".join(essence_lines)
+        lines.append(clamp_text(ess, 260))
+    else:
+        lines.append("Коротко и по делу.")
+    lines.append("")
+    lines.append("Что это значит для вас")
+    for x in meaning_lines[:max(MIN_MEANING_BULLETS, 2)]:
+        lines.append(clamp_text(x, 170))
+    lines.append("")
+    lines.append("Практика на сегодня (5–7 минут)")
+    for x in practice_lines[:max(MIN_PRACTICE_STEPS, 3)]:
+        lines.append(clamp_text(x, 190))
+    lines.append("")
+    lines.append("Норма / когда нужен специалист")
+    for x in norm_lines[:2]:
+        lines.append(clamp_text(x, 220))
+    lines.append("")
+    lines.append("Источник")
+    if src_url and src_dom:
+        lines.append(f"🔗 {src_url}")
+    elif src_url:
+        lines.append(f"🔗 {src_url}")
+    else:
+        lines.append("🔗 (нет ссылки)")
+
+    caption = "\n".join(lines).strip()
+
+    # Hard clip by UTF-8 bytes (VERY IMPORTANT)
+    return utf8_clip(caption, max_bytes=max_bytes, add_ellipsis=True)
+
+
+def render_caption_html_from_plain(plain_caption: str) -> str:
+    return render_plain_to_telegram_html(plain_caption)
+
+
+def _caption_to_send(html_caption: str, max_bytes: int) -> str:
+    """
+    Ensure caption fits by bytes.
+    If HTML version exceeds bytes, fallback to plain text (no tags) clipped by bytes.
+    """
+    if len(html_caption.encode("utf-8")) <= max_bytes:
         return html_caption
     plain = _strip_html_tags(html_caption)
-    if len(plain) <= max_len:
-        return plain
-    return (plain[:max_len].rstrip(" .,:;—-") + "…").strip()
+    return utf8_clip(plain, max_bytes=max_bytes, add_ellipsis=True)
 
 
 # =========================
@@ -1099,13 +1230,14 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
 
 
 def _safe_retry_plain_text(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove parse_mode and strip any markup (HTML/Markdown) from text/caption."""
+    """Remove parse_mode and strip markup (HTML/Markdown) from text/caption + clip for captions."""
     data2 = dict(data)
     data2.pop("parse_mode", None)
     if "text" in data2:
         data2["text"] = _strip_html_tags(str(data2.get("text", "")))
     if "caption" in data2:
-        data2["caption"] = _strip_html_tags(str(data2.get("caption", "")))
+        plain = _strip_html_tags(str(data2.get("caption", "")))
+        data2["caption"] = utf8_clip(plain, max_bytes=TG_CAPTION_MAX_BYTES, add_ellipsis=True)
     return data2
 
 
@@ -1144,15 +1276,35 @@ def send_message(chat_id: str, html_text: str) -> None:
     tg_request_safe("sendMessage", data=data)
 
 
-def send_photo(chat_id: str, photo_path: Path, html_caption: str) -> None:
-    caption = _caption_clip_safe(html_caption, max_len=1024)
-    data = {"chat_id": chat_id, "caption": caption}
-    if TELEGRAM_PARSE_MODE and caption == html_caption:
-        # only set parse_mode when we actually send HTML (not plain fallback from clipping)
+def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
+    """
+    caption may be HTML or plain. We enforce TG_CAPTION_MAX_BYTES by UTF-8 bytes before send.
+    """
+    cap = caption or ""
+    # hard bytes clip (works for both HTML and plain; but if HTML is clipped, it might break tags -> tg_request_safe retry will handle)
+    cap = _caption_to_send(cap, max_bytes=TG_CAPTION_MAX_BYTES)
+
+    data: Dict[str, Any] = {"chat_id": chat_id, "caption": cap}
+    if TELEGRAM_PARSE_MODE and _looks_like_html(cap):
         data["parse_mode"] = TELEGRAM_PARSE_MODE
 
     with photo_path.open("rb") as f:
         tg_request_safe("sendPhoto", data=data, files={"photo": f})
+
+
+def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
+    """
+    Robust delivery:
+      1) Build compact caption (fits bytes) and send as photo caption.
+      2) Optionally send full text as separate message (avoids caption length failures).
+    """
+    caption_plain = build_caption_plain(plain_post, max_bytes=TG_CAPTION_MAX_BYTES)
+    caption_html = render_caption_html_from_plain(caption_plain)
+    send_photo(chat_id, card_path, caption_html)
+
+    if TG_SEND_FULL_TEXT_AFTER_PHOTO:
+        # Send full post as message to guarantee full content delivery (no caption limits).
+        send_message(chat_id, html_full_post)
 
 
 # =========================
@@ -1184,7 +1336,6 @@ def format_dashboard(stats: Dict[str, Any], week_key: str, title: str) -> str:
     reasons = wk.get("reasons") or {}
     top = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:6]
 
-    # Plain -> HTML render later
     lines = [
         f"{title} ({week_key})",
         "",
@@ -1200,6 +1351,7 @@ def format_dashboard(stats: Dict[str, Any], week_key: str, title: str) -> str:
         lines.append("Причины отсева: нет данных.")
     lines.append("")
     lines.append("ℹ️ Примечание: тех. статистика качества источников/фильтров.")
+
     plain = "\n".join(lines).strip()
     return render_plain_to_telegram_html(plain)
 
@@ -1330,7 +1482,6 @@ def run() -> None:
             if not is_due(rubric, now):
                 continue
 
-            # quality dashboard post
             if (rubric.get("format") or "").strip().lower() == "quality_dashboard":
                 dash_title = pub_cfg.get("dashboard_title", "Quality dashboard недели")
                 dashboard_html = format_dashboard(stats, week_key, dash_title)
@@ -1342,7 +1493,6 @@ def run() -> None:
                 time.sleep(0.7)
                 continue
 
-            # collect items from sources
             all_items: List[Dict[str, str]] = []
             for sid in rubric.get("sources", []) or []:
                 src = sources.get(sid)
@@ -1380,10 +1530,8 @@ def run() -> None:
                 handle_draft(pub_cfg, draft_entry, stats, week_key)
                 continue
 
-            # Render to Telegram HTML (requested)
-            html_post = render_plain_to_telegram_html(plain_post)
+            html_full_post = render_plain_to_telegram_html(plain_post)
 
-            # Card subtitle
             subtitle = "Коротко и по делу"
             summ = (picked.get("picked_summary") or "").strip()
             if summ:
@@ -1391,8 +1539,11 @@ def run() -> None:
 
             card = render_image_card(title, subtitle, branding)
 
-            # Send with safe send (auto retry on Telegram 400 without markup)
-            send_photo(TELEGRAM_CHAT_ID, card, html_post)
+            # NEW: robust post delivery:
+            # - caption is always compact + bytes-limited (prevents “message caption is too long”)
+            # - safe-send retries without markup on 400
+            # - (optionally) full text goes as separate message
+            send_post_with_card(TELEGRAM_CHAT_ID, card, plain_post, html_full_post)
 
             bump_weekly(stats, week_key, "passed", 1)
 
@@ -1411,7 +1562,12 @@ def run() -> None:
     save_state("used_titles.json", sorted(list(used_titles))[-6000:])
     save_weekly_stats(stats)
 
-    print(f"Done. Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}. Week: {week_key}. Parse: {TELEGRAM_PARSE_MODE}")
+    print(
+        "Done. "
+        f"Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}. Week: {week_key}. "
+        f"Parse: {TELEGRAM_PARSE_MODE}. CaptionMaxBytes: {TG_CAPTION_MAX_BYTES}. "
+        f"FullTextAfterPhoto: {int(TG_SEND_FULL_TEXT_AFTER_PHOTO)}"
+    )
 
 
 if __name__ == "__main__":

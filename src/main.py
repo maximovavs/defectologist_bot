@@ -60,7 +60,9 @@ MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS", "3"))
 # Telegram hard limits: captions are very strict (often ~1024 chars, but UTF-8 bytes matter).
 # Use bytes-limit for safety.
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
-TG_SEND_FULL_TEXT_AFTER_PHOTO = (os.getenv("TG_SEND_FULL_TEXT_AFTER_PHOTO", "1").strip().lower() in ("1", "true", "yes"))
+TG_SEND_FULL_TEXT_AFTER_PHOTO = (
+    os.getenv("TG_SEND_FULL_TEXT_AFTER_PHOTO", "1").strip().lower() in ("1", "true", "yes")
+)
 
 # Optional: treat these domains as insecure TLS (comma-separated), if you want to bypass bad certs
 INSECURE_TLS_DOMAINS = [
@@ -969,14 +971,7 @@ def parse_plain_sections(plain_post: str) -> Tuple[str, Dict[str, List[str]]]:
 
 def build_caption_plain(plain_post: str, max_bytes: int) -> str:
     """
-    Build a compact caption that keeps required semantics and fits TG_CAPTION_MAX_BYTES by UTF-8 bytes.
-    We keep:
-      - Title
-      - 1–2 lines of "Суть"
-      - MIN_MEANING_BULLETS bullets
-      - MIN_PRACTICE_STEPS steps
-      - both norm lines (✅/⚠️)
-      - source domain
+    Build a compact caption that keeps required semantics and fits max_bytes (UTF-8 bytes).
     """
     title, sec = parse_plain_sections(plain_post)
 
@@ -1000,7 +995,6 @@ def build_caption_plain(plain_post: str, max_bytes: int) -> str:
         if x.startswith("🔗 "):
             src_url = x[2:].strip()
             break
-    src_dom = safe_domain(src_url) if src_url else ""
 
     lines: List[str] = []
     if title:
@@ -1008,51 +1002,35 @@ def build_caption_plain(plain_post: str, max_bytes: int) -> str:
     lines.append("")
     lines.append("Суть")
     if essence_lines:
-        # keep essence compact
         ess = " ".join(essence_lines)
-        lines.append(clamp_text(ess, 260))
+        lines.append(clamp_text(ess, 240))
     else:
         lines.append("Коротко и по делу.")
     lines.append("")
     lines.append("Что это значит для вас")
     for x in meaning_lines[:max(MIN_MEANING_BULLETS, 2)]:
-        lines.append(clamp_text(x, 170))
+        lines.append(clamp_text(x, 160))
     lines.append("")
     lines.append("Практика на сегодня (5–7 минут)")
     for x in practice_lines[:max(MIN_PRACTICE_STEPS, 3)]:
-        lines.append(clamp_text(x, 190))
+        lines.append(clamp_text(x, 175))
     lines.append("")
     lines.append("Норма / когда нужен специалист")
     for x in norm_lines[:2]:
-        lines.append(clamp_text(x, 220))
+        lines.append(clamp_text(x, 210))
     lines.append("")
     lines.append("Источник")
-    if src_url and src_dom:
-        lines.append(f"🔗 {src_url}")
-    elif src_url:
+    if src_url:
         lines.append(f"🔗 {src_url}")
     else:
-        lines.append("🔗 (нет ссылки)")
+        lines.append("🔗 (см. полный текст)")
 
     caption = "\n".join(lines).strip()
-
-    # Hard clip by UTF-8 bytes (VERY IMPORTANT)
     return utf8_clip(caption, max_bytes=max_bytes, add_ellipsis=True)
 
 
 def render_caption_html_from_plain(plain_caption: str) -> str:
     return render_plain_to_telegram_html(plain_caption)
-
-
-def _caption_to_send(html_caption: str, max_bytes: int) -> str:
-    """
-    Ensure caption fits by bytes.
-    If HTML version exceeds bytes, fallback to plain text (no tags) clipped by bytes.
-    """
-    if len(html_caption.encode("utf-8")) <= max_bytes:
-        return html_caption
-    plain = _strip_html_tags(html_caption)
-    return utf8_clip(plain, max_bytes=max_bytes, add_ellipsis=True)
 
 
 # =========================
@@ -1229,15 +1207,32 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
     return r.json()
 
 
-def _safe_retry_plain_text(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove parse_mode and strip markup (HTML/Markdown) from text/caption + clip for captions."""
+def _tg_error_description(resp_text: str) -> str:
+    try:
+        j = json.loads(resp_text or "")
+        if isinstance(j, dict):
+            return str(j.get("description") or "") or (resp_text or "")
+    except Exception:
+        pass
+    return (resp_text or "").strip()
+
+
+def _safe_retry_plain_text(data: Dict[str, Any], caption_max_bytes: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Remove parse_mode and strip markup (HTML/Markdown) from text/caption.
+    For captions, also enforce UTF-8 bytes limit.
+    """
     data2 = dict(data)
     data2.pop("parse_mode", None)
+
     if "text" in data2:
         data2["text"] = _strip_html_tags(str(data2.get("text", "")))
+
     if "caption" in data2:
         plain = _strip_html_tags(str(data2.get("caption", "")))
-        data2["caption"] = utf8_clip(plain, max_bytes=TG_CAPTION_MAX_BYTES, add_ellipsis=True)
+        cap_limit = int(caption_max_bytes or TG_CAPTION_MAX_BYTES)
+        data2["caption"] = utf8_clip(plain, max_bytes=cap_limit, add_ellipsis=True)
+
     return data2
 
 
@@ -1246,6 +1241,7 @@ def tg_request_safe(method: str, data: Dict[str, Any], files: Optional[Dict[str,
     Requested behavior:
       - if Telegram returns 400 (Bad Request), retry once without markup (plain text),
         and log the reason.
+      - extra hardening: if caption too long even after retry, clip more and retry once more.
     """
     try:
         return tg_request(method, data=data, files=files)
@@ -1259,12 +1255,31 @@ def tg_request_safe(method: str, data: Dict[str, Any], files: Optional[Dict[str,
             text = ""
 
         if status == 400:
-            print(f"[WARN] Telegram 400 on {method}. Will retry plain. Response: {text[:500]}")
+            desc = _tg_error_description(text)
+            print(f"[WARN] Telegram 400 on {method}. Will retry plain. Description: {desc}")
+
+            # 1) plain retry
             try:
                 data_plain = _safe_retry_plain_text(data)
                 return tg_request(method, data=data_plain, files=files)
-            except Exception as e2:
-                print(f"[ERROR] Telegram safe retry failed for {method}: {e2}")
+            except requests.exceptions.HTTPError as e2:
+                resp2 = getattr(e2, "response", None)
+                status2 = getattr(resp2, "status_code", None)
+                text2 = ""
+                try:
+                    text2 = (resp2.text or "") if resp2 is not None else ""
+                except Exception:
+                    text2 = ""
+                desc2 = _tg_error_description(text2)
+
+                # 2) If caption too long, clip more and retry once more
+                if status2 == 400 and "caption is too long" in (desc2 or "").lower() and "caption" in data:
+                    smaller = min(780, TG_CAPTION_MAX_BYTES)
+                    print(f"[WARN] Telegram still says caption too long. Retrying with smaller caption bytes={smaller}.")
+                    data_plain2 = _safe_retry_plain_text(data, caption_max_bytes=smaller)
+                    return tg_request(method, data=data_plain2, files=files)
+
+                print(f"[ERROR] Telegram safe retry failed for {method}: {e2}. Description: {desc2}")
                 raise
         raise
 
@@ -1276,34 +1291,96 @@ def send_message(chat_id: str, html_text: str) -> None:
     tg_request_safe("sendMessage", data=data)
 
 
-def send_photo(chat_id: str, photo_path: Path, caption: str) -> None:
+def send_photo(chat_id: str, photo_path: Path, caption_html: str, caption_plain_fallback: Optional[str] = None) -> None:
     """
-    caption may be HTML or plain. We enforce TG_CAPTION_MAX_BYTES by UTF-8 bytes before send.
+    Robust sendPhoto:
+      - try HTML caption if it fits and looks like HTML
+      - fallback to plain caption
+      - if Telegram says caption too long -> progressively shrink caption
+      - as last resort: send without caption (and rely on full text message after)
     """
-    cap = caption or ""
-    # hard bytes clip (works for both HTML and plain; but if HTML is clipped, it might break tags -> tg_request_safe retry will handle)
-    cap = _caption_to_send(cap, max_bytes=TG_CAPTION_MAX_BYTES)
+    plain_fb = caption_plain_fallback or _strip_html_tags(caption_html or "")
+    plain_fb = plain_fb or ""
 
-    data: Dict[str, Any] = {"chat_id": chat_id, "caption": cap}
-    if TELEGRAM_PARSE_MODE and _looks_like_html(cap):
-        data["parse_mode"] = TELEGRAM_PARSE_MODE
+    # Prepare candidates (caption, parse_mode)
+    candidates: List[Tuple[str, Optional[str], str]] = []
 
-    with photo_path.open("rb") as f:
-        tg_request_safe("sendPhoto", data=data, files={"photo": f})
+    # 1) HTML caption only if it fits bytes and contains safe tags
+    cap_html = (caption_html or "").strip()
+    if cap_html and _looks_like_html(cap_html) and len(cap_html.encode("utf-8")) <= TG_CAPTION_MAX_BYTES:
+        candidates.append((cap_html, TELEGRAM_PARSE_MODE or "HTML", "html"))
+
+    # 2) Plain caption (full limit)
+    cap_plain = utf8_clip(plain_fb, max_bytes=TG_CAPTION_MAX_BYTES, add_ellipsis=True)
+    candidates.append((cap_plain, None, "plain"))
+
+    # 3) Smaller plain captions (for stubborn Telegram limits)
+    for mb in [min(780, TG_CAPTION_MAX_BYTES), 650, 520, 400]:
+        candidates.append((utf8_clip(plain_fb, max_bytes=mb, add_ellipsis=True), None, f"plain_{mb}"))
+
+    # 4) No caption fallback
+    candidates.append(("", None, "no_caption"))
+
+    last_err: Optional[Exception] = None
+
+    for cap, pm, label in candidates:
+        data: Dict[str, Any] = {"chat_id": chat_id}
+        if cap:
+            data["caption"] = cap
+        if pm and cap:
+            data["parse_mode"] = pm
+
+        try:
+            with photo_path.open("rb") as f:
+                tg_request("sendPhoto", data=data, files={"photo": f})
+            return
+        except requests.exceptions.HTTPError as e:
+            last_err = e
+            resp = getattr(e, "response", None)
+            status = getattr(resp, "status_code", None)
+            txt = ""
+            try:
+                txt = (resp.text or "") if resp is not None else ""
+            except Exception:
+                txt = ""
+            desc = _tg_error_description(txt)
+
+            if status == 400:
+                # we keep trying next candidate (this is expected for parse errors / caption length)
+                print(f"[WARN] sendPhoto failed (attempt={label}) 400: {desc}")
+                continue
+
+            # non-400: stop immediately
+            raise
+
+    # If all attempts failed, raise last error
+    if last_err:
+        raise last_err
 
 
 def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
     """
-    Robust delivery:
-      1) Build compact caption (fits bytes) and send as photo caption.
-      2) Optionally send full text as separate message (avoids caption length failures).
+    Variant B (requested):
+      1) Photo with SHORT caption (robust against TG caption limits)
+      2) Full text as separate message (HTML)
     """
-    caption_plain = build_caption_plain(plain_post, max_bytes=TG_CAPTION_MAX_BYTES)
-    caption_html = render_caption_html_from_plain(caption_plain)
-    send_photo(chat_id, card_path, caption_html)
+    # Headroom for HTML tags in caption (avoid exceeding TG_CAPTION_MAX_BYTES)
+    cap_html_base_bytes = max(200, TG_CAPTION_MAX_BYTES - 160)
+
+    caption_plain_for_html = build_caption_plain(plain_post, max_bytes=cap_html_base_bytes)
+    caption_html = render_caption_html_from_plain(caption_plain_for_html)
+
+    caption_plain_fallback = build_caption_plain(plain_post, max_bytes=TG_CAPTION_MAX_BYTES)
+
+    try:
+        send_photo(chat_id, card_path, caption_html, caption_plain_fallback=caption_plain_fallback)
+    except Exception as e:
+        # Do not fail the whole run: fallback to text-only
+        print(f"[ERROR] sendPhoto failed окончательно, fallback to sendMessage only. Reason: {e}")
+        send_message(chat_id, html_full_post)
+        return
 
     if TG_SEND_FULL_TEXT_AFTER_PHOTO:
-        # Send full post as message to guarantee full content delivery (no caption limits).
         send_message(chat_id, html_full_post)
 
 
@@ -1539,10 +1616,7 @@ def run() -> None:
 
             card = render_image_card(title, subtitle, branding)
 
-            # NEW: robust post delivery:
-            # - caption is always compact + bytes-limited (prevents “message caption is too long”)
-            # - safe-send retries without markup on 400
-            # - (optionally) full text goes as separate message
+            # Variant B (2 messages): photo + short caption, then full text.
             send_post_with_card(TELEGRAM_CHAT_ID, card, plain_post, html_full_post)
 
             bump_weekly(stats, week_key, "passed", 1)

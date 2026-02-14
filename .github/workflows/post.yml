@@ -13,6 +13,15 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
+
+    # ✅ job-level env — виден во всех шагах
+    env:
+      TZ: "Asia/Nicosia"
+      REWRITE_PROVIDER: "auto"
+      AUDIENCE: "parents"
+      INSECURE_TLS_DOMAINS: "logorina.ru"
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,25 +40,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_DRAFTS_CHAT_ID: ${{ secrets.TELEGRAM_DRAFTS_CHAT_ID }}
-
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-          REWRITE_PROVIDER: "auto"
-          AUDIENCE: "parents"
-          TZ: "Asia/Nicosia"
-
-          # ВАЖНО: для logorina.ru (если у хоста "кривой" TLS)
-          INSECURE_TLS_DOMAINS: "logorina.ru"
-
-          # DRY_RUN: по расписанию = 0, руками можно выбрать 1
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
         run: |
           python -m src.main
 
       - name: Upload dry-run artifacts
-        if: env.DRY_RUN == '1'
+        if: ${{ env.DRY_RUN == '1' }}
         uses: actions/upload-artifact@v4
         with:
           name: dryrun-artifacts
           path: artifacts/**
+          if-no-files-found: warn

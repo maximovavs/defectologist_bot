@@ -25,13 +25,15 @@ audiences:
     rubrics:
       - id: tip_of_day
         title: "Совет логопеда дня"
+        kind: advice
         cadence: "DAILY"
         sources: ["logopediya_documents_rss", "logopediya_ppt_rss", "logorina_latest", "logopedy_articles_latest"]
-        format: "parent_friendly"
+        format: "exercise_steps"
         media: ["image_card"]
 
       - id: play_and_speak
         title: "Играем и говорим"
+        kind: advice
         cadence: "WEEKLY"
         byweekday: ["TU", "SA"]
         sources: ["logorina_latest", "logopedy_articles_latest"]
@@ -40,6 +42,7 @@ audiences:
 
       - id: myth_fact
         title: "Миф / Факт"
+        kind: digest
         cadence: "WEEKLY"
         byweekday: ["WE"]
         sources: ["asha_multilingual_public", "pmc_bilingual_science"]
@@ -48,6 +51,7 @@ audiences:
 
       - id: bilingual_corner
         title: "Русский за границей"
+        kind: bilingual
         cadence: "WEEKLY"
         byweekday: ["TH"]
         sources: ["asha_multilingual_public", "pmc_bilingual_science", "logoportal_latest"]
@@ -56,6 +60,7 @@ audiences:
 
       - id: age_norms
         title: "Возрастная норма"
+        kind: norms
         cadence: "WEEKLY"
         byweekday: ["FR"]
         sources: ["logopediya_documents_rss", "logoportal_latest"]
@@ -64,6 +69,7 @@ audiences:
 
       - id: question_week
         title: "Вопрос недели"
+        kind: question_week
         cadence: "WEEKLY"
         byweekday: ["SU"]
         sources: ["asha_multilingual_public"]
@@ -72,6 +78,7 @@ audiences:
 
       - id: quality_dashboard
         title: "Quality dashboard"
+        kind: dashboard
         cadence: "WEEKLY"
         byweekday: ["SU"]
         sources: []
@@ -83,6 +90,7 @@ audiences:
     rubrics:
       - id: method_piggybank
         title: "Методическая копилка"
+        kind: digest
         cadence: "WEEKLY"
         byweekday: ["SU"]
         sources: ["logomag_lib_latest", "logoportal_latest", "logopedy_articles_latest"]
@@ -91,6 +99,7 @@ audiences:
 
       - id: case_digest
         title: "Кейс-дайджест (анонимно)"
+        kind: digest
         cadence: "WEEKLY"
         byweekday: ["MO"]
         sources: ["logoportal_latest", "logomag_lib_latest"]

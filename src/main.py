@@ -6,6 +6,7 @@ import json
 import time
 import random
 import hashlib
+import shutil
 import math
 import html as _html
 from dataclasses import dataclass
@@ -33,12 +34,15 @@ ASSETS_DIR = ROOT / "assets"
 FONTS_DIR = ASSETS_DIR / "fonts"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/1.6.3 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/1.8.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip()
+
+# v1.8: dry run (no Telegram). Generate artifacts locally into .state/dry_run/<ts>/
+DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
 
 # Use HTML for Telegram rendering (requested)
 TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()  # HTML | Markdown | ""
@@ -200,6 +204,23 @@ def utf8_clip(text: str, max_bytes: int, add_ellipsis: bool = True) -> str:
     while len(out.encode("utf-8")) > max_bytes and out:
         out = out[:-1]
     return out.strip() or "…"
+
+
+def _is_sovet_dnya_format(rubric_format: str) -> bool:
+    """
+    v1.7.1: 'Совет дня' must be strictly practice-oriented:
+      - no academic theory blocks
+      - no diagnostic language
+    We keep it robust to different ids used in rubrics.yml.
+    """
+    rf = (rubric_format or "").strip().lower()
+    if rf in {
+        "tip_day", "daily_tip", "advice_day", "tip_of_day",
+        "sovet_dnya", "sovet_dnya_parents", "sovet_day",
+        "sovet_logopeda", "logoped_tip_day",
+    }:
+        return True
+    return ("совет" in rf) or ("tip" in rf and "day" in rf)
 
 
 # =========================
@@ -494,8 +515,10 @@ def _aud_limits(audience: str) -> int:
     return PARENTS_MAX_BODY_CHARS if a == "parents" else PROS_MAX_BODY_CHARS
 
 
-def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
+def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int, rubric_format: str = "") -> str:
     a = (audience or "parents").strip().lower()
+    rf = (rubric_format or "").strip().lower()
+    is_tip = _is_sovet_dnya_format(rf)
 
     common_rules = (
         "Требования:\n"
@@ -511,6 +534,15 @@ def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
         "Форматирование: только обычный текст, без HTML/Markdown.\n"
     )
 
+    tip_rules = ""
+    if is_tip:
+        tip_rules = (
+            "\nДоп. правило для рубрики «Совет дня»:\n"
+            "- ЖЁСТКО запрети теорию: никаких определений, классификаций, описаний синдромов, аббревиатур и академических обзоров.\n"
+            "- Только краткая практическая польза: (1) важное/зачем, (2) шаги практики, (3) когда обсудить со специалистом.\n"
+            "- Никаких диагнозов и диагностических формулировок.\n"
+        )
+
     if a == "pros":
         style = (
             "Аудитория: специалисты (логопеды/дефектологи).\n"
@@ -525,7 +557,7 @@ def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int) -> str:
             "Если встречается термин — кратко поясни простыми словами в той же фразе.\n"
         )
 
-    return style + common_rules + "\nТЕКСТ ДЛЯ ПЕРЕФОРМУЛИРОВКИ:\n" + (body or "").strip()
+    return style + common_rules + tip_rules + "\nТЕКСТ ДЛЯ ПЕРЕФОРМУЛИРОВКИ:\n" + (body or "").strip()
 
 
 def _enforce_body_limit_v2(text: str, max_chars: int) -> str:
@@ -551,7 +583,7 @@ def _has_required_headings_plain(text: str) -> bool:
     return all(h in s for h in required)
 
 
-def rewrite_if_enabled_plain(full_plain_text: str, audience: str) -> Tuple[str, bool, str]:
+def rewrite_if_enabled_plain(full_plain_text: str, audience: str, rubric_format: str = "") -> Tuple[str, bool, str]:
     """
     Returns: (rewritten_or_raw, used_rewrite, note)
     Requested behavior:
@@ -575,7 +607,7 @@ def rewrite_if_enabled_plain(full_plain_text: str, audience: str) -> Tuple[str, 
             tail = ""
 
     max_chars = _aud_limits(audience)
-    prompt = _build_rewrite_prompt_v2(body, audience, max_chars)
+    prompt = _build_rewrite_prompt_v2(body, audience, max_chars, rubric_format=rubric_format)
 
     try:
         if REWRITE_PROVIDER in ("groq", "auto"):
@@ -686,6 +718,7 @@ def compose_post_plain_v21(
 
     aud = (audience or "parents").strip().lower()
     rf = (rubric_format or "").strip().lower()
+    is_tip = _is_sovet_dnya_format(rf)
 
     picked_title_c = clamp_text(picked_title, 140) if picked_title else ""
     summary_c = clamp_text(summary, 240) if summary else ""
@@ -701,6 +734,12 @@ def compose_post_plain_v21(
             picked_title_c = "Рубрика канала (вопрос для самонаблюдения)"
         if not summary_c:
             summary_c = "Формат: наблюдение, маленький шаг, без давления."
+    elif is_tip:
+        # v1.7.1: Совет дня = практика + короткое пояснение (без академической теории)
+        essence = (
+            "Совет дня — короткая практика на 5–7 минут: один навык, один шаг, без давления и «экзаменов».\n"
+            "Цель: поддержать речь через игру и повторяемость."
+        )
     else:
         essence_lines: List[str] = []
         if picked_title_c:
@@ -710,7 +749,13 @@ def compose_post_plain_v21(
         essence = "\n".join(essence_lines).strip() or "Коротко и по делу о развитии речи."
 
     # --- Что это значит для вас
-    if rf == "bilingual_parents":
+    if is_tip:
+        meaning = [
+            "Сегодня важнее регулярность, чем идеальность: 5 минут каждый день дают лучший эффект, чем редкие «длинные» занятия.",
+            "Мы поддерживаем желание говорить: сначала комфорт и смысл, затем точность произношения.",
+            "Если ребёнок устал — заканчиваем раньше, чтобы не закреплять сопротивление.",
+        ]
+    elif rf == "bilingual_parents":
         meaning = [
             "Смешивание языков и “вставки” слов второго языка часто бывают частью нормы в билингвизме.",
             "Запреты и давление обычно снижают мотивацию говорить — лучше поддерживать русский регулярно и спокойно.",
@@ -756,7 +801,15 @@ def compose_post_plain_v21(
         ]
 
     # --- Практика
-    if rf == "exercise_steps":
+    if is_tip:
+        # v1.7.1: Совет дня = упражнение + цель + вариация по возрасту (без тяжёлой теории)
+        practice = [
+            "2 минуты «Эхо»: вы говорите слог/короткое слово, ребёнок повторяет (похвала за попытку).",
+            "2 минуты «Кто что делает?»: 6–10 глаголов по картинкам/предметам (прыгает, моет, рисует…).",
+            "1 минута «Дуем в игре»: пузыри/ватный шарик/перышко (ровный выдох).",
+            "Вариант по возрасту: 3–4 года — 3–5 повторов; 5–6 лет — 6–10 повторов; 7+ — добавьте короткую фразу.",
+        ]
+    elif rf == "exercise_steps":
         practice = [
             "Перед зеркалом: «Лопаточка» — 5 раз по 5 секунд.",
             "«Часики» — 10 плавных движений вправо-влево.",
@@ -865,7 +918,7 @@ def compose_post_plain_v21(
     raw_plain = "\n".join(lines).strip()
 
     # Rewrite with requested fallback behavior
-    final_plain, used_rewrite, note = rewrite_if_enabled_plain(raw_plain, aud)
+    final_plain, used_rewrite, note = rewrite_if_enabled_plain(raw_plain, aud, rubric_format=rf)
     meta["rewrite_used"] = used_rewrite
     meta["rewrite_note"] = note
 
@@ -969,6 +1022,57 @@ def parse_plain_sections(plain_post: str) -> Tuple[str, Dict[str, List[str]]]:
     return title, sec
 
 
+def build_card_theses_from_plain(plain_post: str) -> List[str]:
+    """
+    v1.7: card must show exactly 3 short theses derived from the LLM answer:
+      1) important
+      2) practice
+      3) when to a specialist
+    We extract from our strict sections.
+    """
+    _, sec = parse_plain_sections(plain_post)
+
+    def _first_meaning() -> str:
+        arr = sec.get("Что это значит для вас", []) or []
+        for x in arr:
+            s = x.strip()
+            if s.startswith("•"):
+                s = s.lstrip("•").strip()
+            if s:
+                return s
+        # fallback: first essence line
+        ess = [x.strip() for x in (sec.get("Суть", []) or []) if x.strip()]
+        return ess[0] if ess else "Короткий полезный фокус на сегодня."
+
+    def _first_practice() -> str:
+        arr = sec.get("Практика на сегодня (5–7 минут)", []) or []
+        for x in arr:
+            s = x.strip()
+            s = re.sub(r"^\d+\)\s*", "", s)
+            if s:
+                return s
+        return "Сделайте один маленький шаг (5 минут) — в игре."
+
+    def _specialist_line() -> str:
+        arr = sec.get("Норма / когда нужен специалист", []) or []
+        # prefer ⚠️ line
+        for x in arr:
+            s = x.strip()
+            if s.startswith("⚠️"):
+                return s.lstrip("⚠️").strip()
+        # fallback: any non-empty
+        for x in arr:
+            s = x.strip()
+            if s:
+                return s.lstrip("✅").lstrip("⚠️").strip()
+        return "Если есть регресс или нет прогресса 4–6 недель — обсудите со специалистом."
+
+    a = clamp_text(_first_meaning(), 92)
+    b = clamp_text(_first_practice(), 92)
+    c = clamp_text(_specialist_line(), 92)
+    return [f"💡 {a}", f"🧩 {b}", f"⚠️ {c}"]
+
+
 def build_caption_plain(plain_post: str, max_bytes: int) -> str:
     """
     Build a compact caption that keeps required semantics and fits max_bytes (UTF-8 bytes).
@@ -1053,7 +1157,7 @@ def _hex_to_rgb(h: str) -> Tuple[int, int, int]:
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str, Any]) -> Path:
+def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]) -> Path:
     theme = (branding or {}).get("card_theme", "minimal") or "minimal"
     theme = str(theme).strip().lower()
 
@@ -1158,6 +1262,18 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str, Any]
     y_text = panel[1] + 44
     max_w = panel[2] - x_text - 28
 
+    def fit_one_line(text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+        t = norm_space(text or "")
+        if not t:
+            return ""
+        if draw.textlength(t, font=font) <= max_width:
+            return t
+        base = t.rstrip(" .,:;—-")
+        ell = "…"
+        while base and draw.textlength(base + ell, font=font) > max_width:
+            base = base[:-1].rstrip(" .,:;—-")
+        return (base + ell).strip() if base else "…"
+
     def wrap(text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
         words = (text or "").split()
         if not words:
@@ -1181,15 +1297,35 @@ def render_image_card(rubric_title: str, subtitle: str, branding: Dict[str, Any]
         y_text += 68
 
     y_text += 12
-    for ln in wrap(subtitle, f_sub, max_w)[:3]:
-        draw.text((x_text, y_text), ln, fill=sub_color, font=f_sub)
-        y_text += 44
+    # v1.7: if subtitle is a list -> render exactly 3 theses (one line each)
+    if isinstance(subtitle, (list, tuple)):
+        theses = [norm_space(str(x)) for x in subtitle if norm_space(str(x))]
+        theses = theses[:3]
+        f_th = _load_font(36 if theme != "scientific" else 34)
+        for t in theses:
+            one = fit_one_line(t, f_th, max_w)
+            if one:
+                draw.text((x_text, y_text), one, fill=sub_color, font=f_th)
+                y_text += 52
+    else:
+        sub_txt = str(subtitle or "")
+        for ln in wrap(sub_txt, f_sub, max_w)[:3]:
+            draw.text((x_text, y_text), ln, fill=sub_color, font=f_sub)
+            y_text += 44
 
     footer = (branding or {}).get("card_footer", "")
     if footer:
         draw.text((panel[0] + 28, panel[3] - 48), footer, fill=footer_color, font=f_small)
 
-    out = STATE_DIR / f"card_{sha1(theme + rubric_title + subtitle)[:10]}.png"
+    # ---- subtitle_key FIX: stable hash input even when subtitle is list/tuple ----
+    if isinstance(subtitle, (list, tuple)):
+        subtitle_key = " | ".join([norm_space(str(x)) for x in subtitle if norm_space(str(x))])
+    else:
+        subtitle_key = norm_space(str(subtitle or ""))
+    subtitle_key = subtitle_key[:320]
+    # ---------------------------------------------------------------------------
+
+    out = STATE_DIR / f"card_{sha1(theme + rubric_title + subtitle_key)[:10]}.png"
     img.save(out)
     return out
 
@@ -1384,6 +1520,56 @@ def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_ful
         send_message(chat_id, html_full_post)
 
 
+def _slug(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^\w\-]+", "-", s, flags=re.UNICODE)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s[:60] or "item"
+
+
+def write_dry_run_outputs(
+    out_dir: Path,
+    idx: int,
+    aud: str,
+    rubric_id: str,
+    rubric_title: str,
+    plain_post: str,
+    html_full_post: str,
+    card_path: Path,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = f"{idx:02d}_{_slug(aud)}_{_slug(rubric_id or rubric_title)}"
+
+    # card
+    card_out = out_dir / f"{base}.png"
+    try:
+        shutil.copyfile(card_path, card_out)
+    except Exception:
+        # fallback: save again
+        Image.open(card_path).save(card_out)
+
+    # caption (same logic as sender)
+    cap_html_base_bytes = max(200, TG_CAPTION_MAX_BYTES - 160)
+    caption_plain_for_html = build_caption_plain(plain_post, max_bytes=cap_html_base_bytes)
+    caption_html = render_caption_html_from_plain(caption_plain_for_html)
+    caption_plain_full = build_caption_plain(plain_post, max_bytes=TG_CAPTION_MAX_BYTES)
+
+    (out_dir / f"{base}.plain.txt").write_text(plain_post, encoding="utf-8")
+    (out_dir / f"{base}.full.html.txt").write_text(html_full_post, encoding="utf-8")
+    (out_dir / f"{base}.caption.plain.txt").write_text(caption_plain_full, encoding="utf-8")
+    (out_dir / f"{base}.caption.html.txt").write_text(caption_html, encoding="utf-8")
+
+    meta = {
+        "idx": idx,
+        "audience": aud,
+        "rubric_id": rubric_id,
+        "rubric_title": rubric_title,
+        "card": str(card_out),
+        "caption_bytes_max": TG_CAPTION_MAX_BYTES,
+    }
+    (out_dir / f"{base}.meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 # =========================
 # Weekly stats + drafts
 # =========================
@@ -1534,6 +1720,13 @@ def run() -> None:
 
     stats = load_weekly_stats()
 
+    dry_out_dir: Optional[Path] = None
+    if DRY_RUN:
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        dry_out_dir = STATE_DIR / "dry_run" / ts
+        dry_out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[DRY_RUN] enabled: outputs -> {dry_out_dir}")
+
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
     if AUDIENCE == "both":
         aud_list = ["parents", "pros"]
@@ -1609,38 +1802,52 @@ def run() -> None:
 
             html_full_post = render_plain_to_telegram_html(plain_post)
 
-            subtitle = "Коротко и по делу"
-            summ = (picked.get("picked_summary") or "").strip()
-            if summ:
-                subtitle = summ[:110].rstrip(" .,:;—-") + "…"
+            # v1.7: card must show 3 theses (important / practice / specialist)
+            theses = build_card_theses_from_plain(plain_post)
 
-            card = render_image_card(title, subtitle, branding)
+            card = render_image_card(title, theses, branding)
 
-            # Variant B (2 messages): photo + short caption, then full text.
-            send_post_with_card(TELEGRAM_CHAT_ID, card, plain_post, html_full_post)
+            if DRY_RUN and dry_out_dir is not None:
+                write_dry_run_outputs(
+                    dry_out_dir,
+                    idx=posted + 1,
+                    aud=aud,
+                    rubric_id=str(rubric.get("id", "") or ""),
+                    rubric_title=title,
+                    plain_post=plain_post,
+                    html_full_post=html_full_post,
+                    card_path=card,
+                )
+            else:
+                # Variant B (2 messages): photo + short caption, then full text.
+                send_post_with_card(TELEGRAM_CHAT_ID, card, plain_post, html_full_post)
 
-            bump_weekly(stats, week_key, "passed", 1)
+            if not DRY_RUN:
+                bump_weekly(stats, week_key, "passed", 1)
 
             canon = picked.get("canonical") or picked.get("link", "")
-            if canon:
-                used_canon.add(canon)
-            tkey = norm_title_key(picked.get("picked_title") or picked.get("title") or "")
-            if tkey:
-                used_titles.add(tkey)
+            if not DRY_RUN:
+                if canon:
+                    used_canon.add(canon)
+                tkey = norm_title_key(picked.get("picked_title") or picked.get("title") or "")
+                if tkey:
+                    used_titles.add(tkey)
 
             posted += 1
             aud_posted += 1
             time.sleep(1.2)
 
-    save_state("used_canonical.json", sorted(list(used_canon))[-6000:])
-    save_state("used_titles.json", sorted(list(used_titles))[-6000:])
-    save_weekly_stats(stats)
+    if not DRY_RUN:
+        save_state("used_canonical.json", sorted(list(used_canon))[-6000:])
+        save_state("used_titles.json", sorted(list(used_titles))[-6000:])
+        save_weekly_stats(stats)
 
     print(
         "Done. "
         f"Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}. Week: {week_key}. "
         f"Parse: {TELEGRAM_PARSE_MODE}. CaptionMaxBytes: {TG_CAPTION_MAX_BYTES}. "
         f"FullTextAfterPhoto: {int(TG_SEND_FULL_TEXT_AFTER_PHOTO)}"
+        f"{' [DRY_RUN]' if DRY_RUN else ''}"
     )
 
 

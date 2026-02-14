@@ -3,21 +3,29 @@ name: Logoped Channel Bot v1.5
 on:
   schedule:
     - cron: "30 8 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "DRY_RUN=1 (не публиковать, сохранить artifacts/**)"
+        required: false
+        default: "0"
 
 jobs:
   post:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -30,5 +38,18 @@ jobs:
           REWRITE_PROVIDER: "auto"
           AUDIENCE: "parents"
           TZ: "Asia/Nicosia"
+
+          # ВАЖНО: для logorina.ru (если у хоста "кривой" TLS)
+          INSECURE_TLS_DOMAINS: "logorina.ru"
+
+          # DRY_RUN: по расписанию = 0, руками можно выбрать 1
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
         run: |
           python -m src.main
+
+      - name: Upload dry-run artifacts
+        if: env.DRY_RUN == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-artifacts
+          path: artifacts/**

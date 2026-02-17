@@ -28,8 +28,17 @@ audiences:
         kind: advice
         cadence: "DAILY"
         sources: ["logopediya_documents_rss", "logopediya_ppt_rss", "logorina_latest", "logopedy_articles_latest"]
-        format: "exercise_steps"
+        format: "tip_of_day"
         media: ["image_card"]
+
+      - id: quality_dashboard
+        title: "Quality dashboard"
+        kind: dashboard
+        cadence: "WEEKLY"
+        byweekday: ["SU"]
+        sources: []
+        format: "quality_dashboard"
+        media: ["text_only"]
 
       - id: play_and_speak
         title: "Играем и говорим"
@@ -75,15 +84,6 @@ audiences:
         sources: ["asha_multilingual_public"]
         format: "question_week"
         media: ["image_card"]
-
-      - id: quality_dashboard
-        title: "Quality dashboard"
-        kind: dashboard
-        cadence: "WEEKLY"
-        byweekday: ["SU"]
-        sources: []
-        format: "quality_dashboard"
-        media: ["text_only"]
 
   pros:
     title_suffix: "• для специалистов"

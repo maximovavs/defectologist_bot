@@ -223,6 +223,175 @@ def _is_sovet_dnya_format(rubric_format: str) -> bool:
     return ("совет" in rf) or ("tip" in rf and "day" in rf)
 
 
+def _seeded_choice(items: List[str], seed: str) -> str:
+    arr = [x for x in (items or []) if norm_space(x)]
+    if not arr:
+        return ""
+    h = sha1(seed or "seed")[:8]
+    rng = random.Random(int(h, 16))
+    return rng.choice(arr)
+
+
+_DIAG_MASK_PATTERNS = [
+    r"\bалал(ия|ии|ией|ию|ий)\b",
+    r"\bдизартри(я|и|ей|ю)\b",
+    r"\bдислал(ия|ии|ией|ию)\b",
+    r"\bринолал(ия|ии|ией|ию)\b",
+    r"\bафази(я|и|ей|ю)\b",
+    r"\bзаикани(е|я|ем|ю)\b",
+    r"\bлогоневроз(а|ом|е|)\b",
+    r"\bдисграфи(я|и|ей|ю)\b",
+    r"\bдислекси(я|и|ей|ю)\b",
+    r"\bонр\b",
+    r"\bффнр?\b",
+    r"\bзрр\b",
+    r"\bзпр\b",
+]
+
+
+def _mask_diagnostics_for_parents(text: str) -> str:
+    """
+    Light masking to avoid overloading parents with academic/diagnostic labels
+    in surfaced text (titles/summaries). We keep meaning but soften wording.
+    """
+    t = norm_space(text or "")
+    if not t:
+        return ""
+    for pat in _DIAG_MASK_PATTERNS:
+        t = re.sub(pat, "речевые трудности", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
+def _infer_parent_topic(title: str, summary: str) -> str:
+    blob = f"{title}\n{summary}".lower()
+    m = [
+        (["билинг", "двуязы"], "билингвизм и два языка"),
+        (["артикуляц", "гимнаст", "зеркал"], "артикуляционная гимнастика без слёз"),
+        (["дых", "выдох", "дуем", "пузы"], "дыхательные игры (ровный выдох)"),
+        (["фонемат", "слух"], "фонематический слух (слышать различия звуков)"),
+        (["словар", "лексик"], "расширение словаря"),
+        (["граммат", "предложен", "фраз"], "фразовая речь и грамматика"),
+        (["звук", "произнош", "артикул"], "чистота произношения звуков"),
+        (["чтени", "письм"], "поддержка чтения и письма"),
+    ]
+    for keys, label in m:
+        if any(k in blob for k in keys):
+            return label
+    return "развитие речи через игру"
+
+
+def _source_label_for_parents(url: str) -> str:
+    dom = safe_domain(url)
+    if not dom:
+        return "Материалы логопедов"
+    if "logopedy.ru" in dom:
+        return "Материалы Logopedy.ru"
+    if "logopediya" in dom:
+        return "Материалы Logopediya.ru"
+    if "logoportal" in dom:
+        return "Материалы LogoPortal"
+    if "logorina" in dom:
+        return "Материалы Logorina"
+    if dom.endswith("asha.org") or "asha.org" in dom:
+        return "Рекомендации ASHA"
+    if "ncbi" in dom or "nih.gov" in dom:
+        return "Научные публикации (PMC/NLM)"
+    return f"Материалы {dom}"
+
+
+def _default_engagement_question(audience: str, rubric_format: str, seed: str) -> str:
+    aud = (audience or "parents").strip().lower()
+    rf = (rubric_format or "").strip().lower()
+
+    if aud == "parents":
+        by_rf = {
+            "exercise_steps": [
+                "У вас получается делать это упражнение в игре — или ребёнок протестует?",
+                "Какой формат заходит лучше: зеркало, игрушка или «соревнование на время»?",
+            ],
+            "bilingual_parents": [
+                "На каком языке ребёнку легче рассказывать про свой день — и в каких ситуациях?",
+                "Что помогает русскому звучать чаще: книжки, игры или «островки русского» по 5 минут?",
+            ],
+            "myth_fact": [
+                "Какая «страшилка из интернета» про речь вас больше всего тревожила — и почему?",
+                "Хотите разберём ваш случай как «миф/факт» на примере одной ситуации?",
+            ],
+            "age_norms": [
+                "Сколько новых слов/фраз появилось у вас за последние 2 недели — хотя бы примерно?",
+                "В каких ситуациях ребёнок говорит охотнее: игра, прогулка или перед сном?",
+            ],
+            "question_week": [
+                "А у вас сейчас больше переживаний про понимание, про слова или про произношение?",
+            ],
+        }
+        pool = by_rf.get(rf) or [
+            "Что сейчас самое сложное в домашних занятиях — начать или удержать интерес?",
+            "Хотите — напишите возраст и ситуацию, я подскажу мягкий первый шаг.",
+        ]
+        return _seeded_choice(pool, seed) or "А как у вас дома — что получается лучше всего?"
+
+    # pros
+    pool = [
+        "Какие критерии эффективности вы бы выбрали на 2 недели под эту задачу?",
+        "Как вы обеспечиваете перенос навыка в спонтанную речь (2–3 приёма)?",
+    ]
+    return _seeded_choice(pool, seed) or "Какая метрика прогресса у вас работает лучше всего?"
+
+
+def _hook_for_post(audience: str, rubric_format: str, seed: str, topic: str = "") -> str:
+    aud = (audience or "parents").strip().lower()
+    rf = (rubric_format or "").strip().lower()
+    t = (topic or "").strip()
+
+    if aud == "parents":
+        pool: List[str] = []
+        if rf in ("exercise_steps",) or _is_sovet_dnya_format(rf):
+            pool = [
+                "Малыш отказывается делать гимнастику и убегает от зеркала? Знакомо!",
+                "Домашние занятия превращаются в борьбу «сядь/повтори»? Давайте сделаем мягче.",
+            ]
+        elif rf == "bilingual_parents":
+            pool = [
+                "Дома стараетесь говорить по-русски, а ребёнок отвечает на другом языке? Это очень частая история.",
+                "Кажется, что русский «выпадает», хотя вы стараетесь? Давайте без паники — шаг за шагом.",
+            ]
+        elif rf == "myth_fact":
+            pool = [
+                "В интернете прочитали что-то про речь — и стало тревожно? Давайте разложим спокойно.",
+                "Слышали совет «нужно срочно…», и внутри сжалось? Разберём, что правда, а что миф.",
+            ]
+        elif rf == "age_norms":
+            pool = [
+                "Сравниваете с другими детьми и переживаете, что «мы отстаём»? Понимаю вас.",
+                "Кажется, что «у всех уже говорит», а у вас всё медленнее? Это не повод ругать себя.",
+            ]
+        elif rf == "question_week":
+            pool = [
+                "А давайте сегодня без «диагнозов» — просто один вопрос, который помогает выбрать следующий шаг.",
+            ]
+        else:
+            pool = [
+                "Устали от советов «просто больше занимайтесь»? Давайте по-человечески и без давления.",
+                "Иногда кажется, что на речь нет сил и времени? Я вас понимаю — сделаем маленький шаг.",
+            ]
+        hook = _seeded_choice(pool, seed) or "Знакомая ситуация? Давайте сделаем один маленький шаг."
+        if t:
+            return f"{hook} Сегодня — про {t}."
+        return hook
+
+    # pros
+    pool = [
+        "Бывает, что домашняя практика у семьи «сыпется» на старте: что ставим первым — мотивацию или контроль техники?",
+        "Ситуация из практики: навык есть в задании, но не переносится в спонтанную речь — знакомо?",
+    ]
+    hook = _seeded_choice(pool, seed) or "Практический разбор: маленький шаг → критерий → перенос."
+    if t:
+        return f"{hook} Фокус: {t}."
+    return hook
+
+
 # =========================
 # Sources
 # =========================
@@ -522,15 +691,18 @@ def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int, rubric_fo
 
     common_rules = (
         "Требования:\n"
-        "1) Русский язык. Нейтрально-научный, бережный тон.\n"
+        "1) Русский язык.\n"
         "2) НЕ ставь диагнозы, НЕ обещай лечения, НЕ назначай препараты.\n"
         "3) Не добавляй новых фактов. Только перефразируй.\n"
         "4) Сохрани структуру и порядок секций и списков.\n"
         "5) Не меняй названия секций и не удаляй их.\n"
         "6) Не добавляй новых разделов.\n"
         f"7) Длина тела текста (до секции «Источник»): до {max_chars} символов.\n"
-        "Секции должны быть ровно такими строками-заголовками:\n"
-        "«Суть», «Что это значит для вас», «Практика на сегодня (5–7 минут)», «Норма / когда нужен специалист», «Источник».\n"
+        "Служебные строки-заголовки секций уже заданы. Не придумывай дополнительных заголовков/отбивок.\n"
+        "Строго запрещены шаблонные отбивки внутри текста секций: «Коротко», «Итог», «Вывод», «Что это значит», «Суть:», «Коротко:».\n"
+        "Единственные заголовки — те, что уже присутствуют отдельными строками (Суть / Что это значит для вас / Практика / Норма / Источник).\n"
+        "Обязательно: в секции «Суть» первая строка — хук (жизненная ситуация или вопрос к родителю).\n"
+        "Обязательно: перед «Источник» оставь одну короткую вовлекающую строку для комментариев, в формате одной строки, начинай с «💬 » и заканчивай вопросительным знаком.\n"
         "Форматирование: только обычный текст, без HTML/Markdown.\n"
     )
 
@@ -552,9 +724,10 @@ def _build_rewrite_prompt_v2(body: str, audience: str, max_chars: int, rubric_fo
         )
     else:
         style = (
+            "Роль: эмпатичный, современный логопед, который дружелюбно общается с уставшими родителями.\n"
             "Аудитория: родители.\n"
-            "Стиль: простые слова, поддерживающий тон. Убирай канцелярит. "
-            "Если встречается термин — кратко поясни простыми словами в той же фразе.\n"
+            "Стиль: тёплый, поддерживающий, без давления и без канцелярита. "
+            "Если встречается термин — объясни простыми словами в той же фразе.\n"
         )
 
     return style + common_rules + tip_rules + "\nТЕКСТ ДЛЯ ПЕРЕФОРМУЛИРОВКИ:\n" + (body or "").strip()
@@ -723,30 +896,38 @@ def compose_post_plain_v21(
     picked_title_c = clamp_text(picked_title, 140) if picked_title else ""
     summary_c = clamp_text(summary, 240) if summary else ""
 
+    seed_key = (link or picked_title or summary or "seed").strip()
+
     # --- Суть
     if rf == "question_week":
         q = make_question_week()
-        essence = (
-            "Небольшой “вопрос недели” — чтобы мягко понять текущую ситуацию и выбрать следующий шаг.\n"
-            f"{q}"
-        )
+        hook = _hook_for_post(aud, rf, seed=seed_key)
+        essence = f"{hook}\n{q}"
         if not picked_title_c:
             picked_title_c = "Рубрика канала (вопрос для самонаблюдения)"
         if not summary_c:
             summary_c = "Формат: наблюдение, маленький шаг, без давления."
     elif is_tip:
-        # v1.7.1: Совет дня = практика + короткое пояснение (без академической теории)
+        hook = _hook_for_post(aud, rf, seed=seed_key)
         essence = (
-            "Совет дня — короткая практика на 5–7 минут: один навык, один шаг, без давления и «экзаменов».\n"
-            "Цель: поддержать речь через игру и повторяемость."
+            f"{hook}\n"
+            "Держим формат мягким: 5–7 минут, один навык, один шаг, без давления и «экзаменов»."
         )
     else:
-        essence_lines: List[str] = []
-        if picked_title_c:
-            essence_lines.append(f"Материал: {picked_title_c}")
-        if summary_c:
-            essence_lines.append(f"Коротко: {summary_c}")
-        essence = "\n".join(essence_lines).strip() or "Коротко и по делу о развитии речи."
+        if aud == "parents":
+            topic = _infer_parent_topic(picked_title, summary)
+            hook = _hook_for_post(aud, rf, seed=seed_key, topic=topic)
+            essence = (
+                f"{hook}\n"
+                "Ниже — один понятный смысл и мини-практика на сегодня (без «идеально», только по-доброму)."
+            )
+        else:
+            essence_lines: List[str] = []
+            if picked_title_c:
+                essence_lines.append(f"Материал: {picked_title_c}")
+            if summary_c:
+                essence_lines.append(f"{summary_c}")
+            essence = "\n".join(essence_lines).strip() or "Коротко и по делу о развитии речи."
 
     # --- Что это значит для вас
     if is_tip:
@@ -903,10 +1084,25 @@ def compose_post_plain_v21(
         x = norm_space(x)
         if x:
             lines.append(x)
+
+    # --- Engagement (before source & disclaimer)
+    eng_q = _default_engagement_question(aud, rf, seed=seed_key)
+    eng_q = norm_space(eng_q)
+    if eng_q and not eng_q.endswith("?"):
+        eng_q = eng_q.rstrip(".!") + "?"
+    lines.append("")
+    if eng_q:
+        lines.append(f"💬 {eng_q}")
+
     lines.append("")
     lines.append("Источник")
-    lines.append(f"🔗 {link}")
-    lines.append(f"Тип: {stype}")
+    if aud == "parents":
+        label = _source_label_for_parents(link)
+        lines.append(f"Источник: {label} | {link}")
+        lines.append("Основа: рекомендации логопедов")
+    else:
+        lines.append(f"🔗 {link}")
+        lines.append(f"Тип: {stype}")
 
     if disclaimer:
         lines.append("")
@@ -983,13 +1179,44 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             out.append(f"<b>{_escape(stripped)}</b>")
             continue
 
-        if stripped.startswith("🔗 "):
-            url = stripped[2:].strip()
-            if url.startswith(("http://", "https://")):
-                dom = safe_domain(url) or url
-                out.append(f"🔗 <a href=\"{_html.escape(url, quote=True)}\">{_escape(dom)}</a>")
-            else:
+        # Parents-friendly masked source line:
+        # "Источник: Label | https://..."
+        if stripped.startswith("Источник:") and " | " in stripped:
+            try:
+                right = stripped.split(":", 1)[1].strip()
+                label, url = right.split("|", 1)
+                label = norm_space(label)
+                url = url.strip()
+                if url.startswith(("http://", "https://")):
+                    out.append(
+                        f"Источник: <a href=\"{_html.escape(url, quote=True)}\">{_escape(label or safe_domain(url) or url)}</a>"
+                    )
+                else:
+                    out.append(_escape(stripped))
+            except Exception:
                 out.append(_escape(stripped))
+            continue
+
+        if stripped.startswith("🔗 "):
+            right = stripped[2:].strip()
+            # Support "🔗 Label | url"
+            if " | " in right:
+                label, url = right.split("|", 1)
+                label = norm_space(label)
+                url = url.strip()
+                if url.startswith(("http://", "https://")):
+                    out.append(
+                        f"🔗 <a href=\"{_html.escape(url, quote=True)}\">{_escape(label or safe_domain(url) or url)}</a>"
+                    )
+                else:
+                    out.append(_escape(stripped))
+            else:
+                url = right
+                if url.startswith(("http://", "https://")):
+                    dom = safe_domain(url) or url
+                    out.append(f"🔗 <a href=\"{_html.escape(url, quote=True)}\">{_escape(dom)}</a>")
+                else:
+                    out.append(_escape(stripped))
             continue
 
         if stripped.startswith("ℹ️ "):
@@ -1099,6 +1326,16 @@ def build_caption_plain(plain_post: str, max_bytes: int) -> str:
         if x.startswith("🔗 "):
             src_url = x[2:].strip()
             break
+        if x.startswith("Источник:") and " | " in x:
+            try:
+                right = x.split(":", 1)[1].strip()
+                _, url = right.split("|", 1)
+                url = url.strip()
+                if url.startswith(("http://", "https://")):
+                    src_url = url
+                    break
+            except Exception:
+                pass
 
     lines: List[str] = []
     if title:

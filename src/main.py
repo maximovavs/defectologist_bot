@@ -53,20 +53,20 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()  # parents|pros|both
 
-# v1.6.1: style/length knobs (Telegram caption is limited; we keep conservative targets)
+# v2.0: global hard length rule (requested)
+POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
+
+# v1.6.1: style/length knobs (legacy). We hard-cap by POST_MAX_CHARS anyway.
 PARENTS_MAX_BODY_CHARS = int(os.getenv("PARENTS_MAX_BODY_CHARS", "900"))
 PROS_MAX_BODY_CHARS = int(os.getenv("PROS_MAX_BODY_CHARS", "1050"))
 
 # v1.6.1: quality gate knobs
 MIN_MEANING_BULLETS = int(os.getenv("MIN_MEANING_BULLETS", "2"))
-MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS", "3"))
+MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS", "2"))  # requested: practice 1–2 steps
 
 # Telegram hard limits: captions are very strict (often ~1024 chars, but UTF-8 bytes matter).
 # Use bytes-limit for safety.
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
-TG_SEND_FULL_TEXT_AFTER_PHOTO = (
-    os.getenv("TG_SEND_FULL_TEXT_AFTER_PHOTO", "1").strip().lower() in ("1", "true", "yes")
-)
 
 # Optional: treat these domains as insecure TLS (comma-separated), if you want to bypass bad certs
 INSECURE_TLS_DOMAINS = [
@@ -173,10 +173,7 @@ def is_due(rubric: Dict[str, Any], now: datetime) -> bool:
 
 
 def utf8_clip(text: str, max_bytes: int, add_ellipsis: bool = True) -> str:
-    """
-    Clip by UTF-8 bytes (Telegram caption errors are often byte-based).
-    Guarantees result.encode('utf-8') <= max_bytes.
-    """
+    """Clip by UTF-8 bytes. Guarantees result.encode('utf-8') <= max_bytes."""
     s = (text or "")
     b = s.encode("utf-8")
     if len(b) <= max_bytes:
@@ -194,23 +191,17 @@ def utf8_clip(text: str, max_bytes: int, add_ellipsis: bool = True) -> str:
     out = out.rstrip(" .,:;—-")
     if add_ellipsis:
         ell = "…"
-        # ensure ellipsis fits
         while out and len((out + ell).encode("utf-8")) > max_bytes:
             out = out[:-1]
             out = out.rstrip(" .,:;—-")
         if len((out + ell).encode("utf-8")) <= max_bytes:
             out = out + ell
-    # final guard
     while len(out.encode("utf-8")) > max_bytes and out:
         out = out[:-1]
     return out.strip() or "…"
 
 
 def _is_sovet_dnya_format(rubric_format: str) -> bool:
-    """
-    v1.7.1+: 'Совет дня' must be strictly practice-oriented.
-    v1.9: also used for age inference and colleague-note variants.
-    """
     rf = (rubric_format or "").strip().lower()
     if rf in {
         "tip_day", "daily_tip", "advice_day", "tip_of_day",
@@ -222,10 +213,6 @@ def _is_sovet_dnya_format(rubric_format: str) -> bool:
 
 
 def mask_diagnostics_for_parents(text: str) -> str:
-    """
-    Hide heavy diagnostic labels in parents-facing copy (source masking).
-    We still allow mild professional terms in the colleague note.
-    """
     t = text or ""
     rep = {
         r"\bалал(ия|ии|ией|ию)\b": "речевые трудности",
@@ -245,29 +232,17 @@ def mask_diagnostics_for_parents(text: str) -> str:
 
 
 def infer_target_age(rubric_format: str, picked_title: str, summary: str, practice: List[str]) -> str:
-    """
-    Heuristic age inference. Output examples:
-      '3–5 лет' or 'от 2 лет'
-    """
     blob = " ".join([picked_title or "", summary or "", " ".join(practice or [])]).lower()
 
-    # literacy / school
     if any(k in blob for k in ["дисграф", "дислекс", "письм", "чтени", "школ", "первокласс", "1 класс", "второкласс"]):
         return "6–9 лет"
-
-    # sound setting / complex consonants
     if any(k in blob for k in ["звук р", "звук л", "шипящ", "свистящ", "ротац", "ламбдац", "постановк"]):
         return "4–7 лет"
-
-    # phrases / grammar / narratives
     if any(k in blob for k in ["фраз", "предложен", "связн", "рассказ", "согласован", "падеж", "множествен"]):
         return "3–6 лет"
-
-    # first words / delay
     if any(k in blob for k in ["первые слова", "лепет", "гулен", "не говорит", "молчит", "словар", "запуск речи"]):
         return "от 1,5 лет"
 
-    # articulation gymnastics baseline
     rf = (rubric_format or "").strip().lower()
     if _is_sovet_dnya_format(rf):
         return "3–5 лет"
@@ -402,10 +377,6 @@ def enrich_article(item: Dict[str, str]) -> Dict[str, str]:
             item["article_summary"] = sm
     return item
 
-
-# ---------------------------
-# Site-specific parsers
-# ---------------------------
 
 def _abs(base_url: str, href: str) -> str:
     href = (href or "").strip()
@@ -587,44 +558,58 @@ def rewrite_with_gemini(prompt: str) -> str:
 
 def _aud_limits(audience: str) -> int:
     a = (audience or "parents").strip().lower()
-    return PARENTS_MAX_BODY_CHARS if a == "parents" else PROS_MAX_BODY_CHARS
+    per_aud = PARENTS_MAX_BODY_CHARS if a == "parents" else PROS_MAX_BODY_CHARS
+    return min(int(per_aud), int(POST_MAX_CHARS))
 
 
 _REQUIRED_HEADINGS_V3 = [
     "Практика на сегодня (5–7 минут)",
-    "🔬 Заметка для коллег:",
     "Норма / когда нужен специалист",
     "Источник",
 ]
 
+_NAV_KEYS = [
+    "🧠 Навык:",
+    "🎯 Цель:",
+    "📌 Подсказка:",
+    "📏 Критерий прогресса:",
+]
+
 
 def _build_rewrite_prompt_v3(body: str, audience: str, max_chars: int, rubric_format: str = "") -> str:
-    a = (audience or "parents").strip().lower()
     rf = (rubric_format or "").strip().lower()
     is_tip = _is_sovet_dnya_format(rf)
 
     base_role = (
         "Роль: эмпатичный, современный логопед. Ты дружелюбно общаешься с уставшими родителями, "
-        "но при этом показываешь методическую глубину и аккуратность.\n"
+        "но пишешь точно и аккуратно.\n"
     )
 
-    # Important: forbid robot-like stubs.
     hard_bans = (
-        "ЖЁСТКИЕ запреты:\n"
+        "ЖЁСТКИЕ правила:\n"
+        "• Пиши максимально лаконично: меньше вводных слов, меньше воды.\n"
+        f"• ВЕСЬ текст поста (целиком) не длиннее {max_chars} символов.\n"
+        "• «Практика на сегодня» — 1–2 коротких шага.\n"
         "• НЕ используй шаблонные заголовки-отбивки: «Суть», «Коротко», «Что это значит для вас», «Вывод», «Итог», «Резюме», «Важно».\n"
         "• НЕ добавляй новые подзаголовки и новые разделы.\n"
         "• НЕ ставь диагнозы, НЕ обещай лечения, НЕ назначай препараты.\n"
-        "• Не добавляй новых фактов — только перефразируй то, что уже есть.\n"
+        "• Не добавляй новых фактов — только перефразируй и сожми то, что уже есть.\n"
     )
 
     structure = (
-        "Структура должна сохраниться строго:\n"
+        "Структура должна быть строго такой:\n"
         "1) Первая строка — название рубрики (как в исходнике).\n"
         "2) Вторая строка — строка возраста в формате: «👶 Возраст: ...».\n"
-        "3) Далее — вовлекающий хук (жизненная ситуация или вопрос) + мягкая польза для родителей, без отдельных подзаголовков.\n"
+        "3) Далее — хук (жизненная ситуация/вопрос) + 2–3 короткие строки пользы, без отдельных подзаголовков.\n"
         f"4) Затем идут заголовки (каждый — отдельной строкой) строго из списка: {', '.join(_REQUIRED_HEADINGS_V3)}.\n"
-        "5) В конце перед техническим дисклеймером должна быть ровно одна короткая вовлекающая строка, начинающаяся с «💬 ».\n"
-        f"6) Длина основного текста (до блока «Источник» включительно): до {max_chars} символов.\n"
+        "5) Внутри «Практика на сегодня» — 1–2 шага, нумерацией 1) 2).\n"
+        "6) Сразу после «Практика на сегодня (5–7 минут)» вставь навигационную полосу РОВНО из 4 строк:\n"
+        "🧠 Навык: (3–5 слов)\n"
+        "🎯 Цель: (3–5 слов)\n"
+        "📌 Подсказка: (3–5 слов)\n"
+        "📏 Критерий прогресса: (3–5 слов)\n"
+        "Никаких других строк в этом блоке.\n"
+        "7) В конце перед техническим дисклеймером должна быть ровно одна вовлекающая строка, начинающаяся с «💬 ».\n"
         "Форматирование: только обычный текст, без HTML/Markdown.\n"
     )
 
@@ -632,24 +617,11 @@ def _build_rewrite_prompt_v3(body: str, audience: str, max_chars: int, rubric_fo
     if is_tip:
         tip_rules = (
             "\nДоп. правило для «Совет дня»:\n"
-            "- Фокус на практике и поддержке мотивации. Никакой академической теории и классификаций.\n"
-        )
-
-    if a == "pros":
-        style = (
-            "Аудитория: специалисты (логопеды/дефектологи).\n"
-            "Стиль: профессионально, точные термины, но без канцелярита. "
-            "В блоке «🔬 Заметка для коллег:» допускается умеренная нейрофизиология/анатомия.\n"
-        )
-    else:
-        style = (
-            "Аудитория: родители.\n"
-            "Стиль: тёплый, поддерживающий, простые слова. Сложные термины — только в блоке «🔬 Заметка для коллег:».\n"
+            "- Только практика и поддержка мотивации. Никакой академической теории и классификаций.\n"
         )
 
     return (
         base_role
-        + style
         + hard_bans
         + structure
         + tip_rules
@@ -658,42 +630,103 @@ def _build_rewrite_prompt_v3(body: str, audience: str, max_chars: int, rubric_fo
     )
 
 
-def _enforce_body_limit_v3(text: str, max_chars: int) -> str:
+def _count_words_3_5(s: str) -> bool:
+    part = (s.split(":", 1)[1] if ":" in s else "").strip()
+    words = [w for w in re.split(r"\s+", part) if w]
+    return 3 <= len(words) <= 5
+
+
+def _has_required_structure_plain_v3(text: str) -> bool:
+    lines = [(x or "").rstrip("\n") for x in (text or "").splitlines()]
+    if len(lines) < 8:
+        return False
+
+    if not (len(lines) >= 2 and lines[1].strip().startswith("👶 Возраст:")):
+        return False
+
+    sset = set([x.strip() for x in lines])
+    for h in _REQUIRED_HEADINGS_V3:
+        if h not in sset:
+            return False
+
+    if not any(x.strip().startswith("💬 ") for x in lines):
+        return False
+
+    nav_lines = [x.strip() for x in lines if any(x.strip().startswith(k) for k in _NAV_KEYS)]
+    if len(nav_lines) != 4:
+        return False
+    for need, got in zip(_NAV_KEYS, nav_lines):
+        if not got.startswith(need):
+            return False
+        if not _count_words_3_5(got):
+            return False
+
+    if not any(re.match(r"^\s*1\)\s+\S+", x) for x in lines):
+        return False
+
+    return True
+
+
+def _enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
     t = (text or "").strip()
     if len(t) <= max_chars:
         return t
-    cut = t[:max_chars]
+
+    lines = [(x or "").rstrip("\n") for x in t.splitlines()]
+
+    def _looks_like_tags(line: str) -> bool:
+        s = line.strip()
+        return s.startswith("#") or (" #" in s)
+
+    while lines and _looks_like_tags(lines[-1]):
+        lines.pop()
+    while lines and lines[-1].strip().startswith("ℹ️ "):
+        lines.pop()
+
+    clamped: List[str] = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if i == 0:
+            clamped.append(clamp_text(s, 90))
+            continue
+        if i == 1 and s.startswith("👶 Возраст:"):
+            clamped.append(clamp_text(s, 28))
+            continue
+        if s.startswith("💬 "):
+            clamped.append("💬 " + clamp_text(s[2:].strip(), 120))
+            continue
+        if s.startswith("• "):
+            clamped.append("• " + clamp_text(s[2:].strip(), 120))
+            continue
+        if re.match(r"^\d+\)\s+", s):
+            n, rest = s.split(")", 1)
+            clamped.append(f"{n}) {clamp_text(rest.strip(), 140)}")
+            continue
+        if s.startswith(("✅", "⚠️")):
+            clamped.append(s[0] + clamp_text(s[1:].strip(), 160))
+            continue
+        if s.startswith("🔗 "):
+            clamped.append(s)
+            continue
+        if any(s == h for h in _REQUIRED_HEADINGS_V3) or any(s.startswith(k) for k in _NAV_KEYS):
+            clamped.append(s)
+            continue
+        clamped.append(clamp_text(line, 220))
+
+    out = "\n".join(clamped).strip()
+    if len(out) <= max_chars:
+        return out
+
+    cut = out[:max_chars]
     if "\n" in cut:
         cut = cut[:cut.rfind("\n")].rstrip()
     return (cut.rstrip(" .,:;—-") + "…").strip()
 
 
-def _has_required_structure_plain_v3(text: str) -> bool:
-    lines = [(x or "").strip() for x in (text or "").splitlines() if (x or "").strip() != "" or True]
-    if len(lines) < 4:
-        return False
-    # line 2 must be age
-    if len(lines) >= 2:
-        if not lines[1].strip().startswith("👶 Возраст:"):
-            return False
-    s = set([x.strip() for x in (text or "").splitlines()])
-    for h in _REQUIRED_HEADINGS_V3:
-        if h not in s:
-            return False
-    # engagement line
-    if not any(x.strip().startswith("💬 ") for x in (text or "").splitlines()):
-        return False
-    return True
-
-
 def rewrite_if_enabled_plain(full_plain_text: str, audience: str, rubric_format: str = "") -> Tuple[str, bool, str]:
-    """
-    Returns: (rewritten_or_raw, used_rewrite, note)
-    Requested behavior:
-      - if rewrite breaks structure -> fallback to raw, do NOT fail quality.
-    """
     if REWRITE_PROVIDER == "none":
-        return full_plain_text, False, "rewrite:none"
+        final_raw = _enforce_total_chars_keep_structure(full_plain_text, POST_MAX_CHARS)
+        return final_raw, False, "rewrite:none"
 
     max_chars = _aud_limits(audience)
     prompt = _build_rewrite_prompt_v3(full_plain_text, audience, max_chars, rubric_format=rubric_format)
@@ -702,10 +735,11 @@ def rewrite_if_enabled_plain(full_plain_text: str, audience: str, rubric_format:
         if REWRITE_PROVIDER in ("groq", "auto"):
             try:
                 out = rewrite_with_groq(prompt)
-                out = _enforce_body_limit_v3(out, max_chars + 700)  # keep some room for source/disclaimer/tags
+                out = _enforce_total_chars_keep_structure(out, max_chars)
                 if not _has_required_structure_plain_v3(out):
                     print("[WARN] rewrite broke structure (groq) -> fallback to raw")
-                    return full_plain_text, False, "rewrite:fallback_raw_structure"
+                    raw2 = _enforce_total_chars_keep_structure(full_plain_text, max_chars)
+                    return raw2, False, "rewrite:fallback_raw_structure"
                 return out, True, "rewrite:groq"
             except Exception as e:
                 if REWRITE_PROVIDER == "groq":
@@ -717,21 +751,24 @@ def rewrite_if_enabled_plain(full_plain_text: str, audience: str, rubric_format:
 
         if REWRITE_PROVIDER in ("gemini", "auto"):
             out = rewrite_with_gemini(prompt)
-            out = _enforce_body_limit_v3(out, max_chars + 700)
+            out = _enforce_total_chars_keep_structure(out, max_chars)
             if not _has_required_structure_plain_v3(out):
                 print("[WARN] rewrite broke structure (gemini) -> fallback to raw")
-                return full_plain_text, False, "rewrite:fallback_raw_structure"
+                raw2 = _enforce_total_chars_keep_structure(full_plain_text, max_chars)
+                return raw2, False, "rewrite:fallback_raw_structure"
             return out, True, "rewrite:gemini"
 
     except Exception as e:
         print(f"[WARN] rewrite failed ({REWRITE_PROVIDER}): {e}")
-        return full_plain_text, False, "rewrite:fallback_raw_error"
+        raw2 = _enforce_total_chars_keep_structure(full_plain_text, max_chars)
+        return raw2, False, "rewrite:fallback_raw_error"
 
-    return full_plain_text, False, "rewrite:fallback_raw_unknown"
+    raw2 = _enforce_total_chars_keep_structure(full_plain_text, max_chars)
+    return raw2, False, "rewrite:fallback_raw_unknown"
 
 
 # =========================
-# Post template v3.0 (parents + pros) + quality gate
+# Post template v3.1 + quality gate
 # =========================
 
 def make_question_week() -> str:
@@ -747,21 +784,19 @@ def make_question_week() -> str:
 
 def make_engagement_question(audience: str, age_tag: str, rubric_format: str) -> str:
     a = (audience or "parents").strip().lower()
-    rf = (rubric_format or "").strip().lower()
     if a == "pros":
         qs = [
-            "Какие подсказки/опоры у вас лучше всего срабатывают для удержания мотивации на домашке?",
-            "Какой критерий прогресса вы бы выбрали на ближайшие 2 недели для этого навыка?",
-            "Какие варианты усложнения вы добавляете, когда базовая форма уже стабилизировалась?",
+            "Какой критерий прогресса взяли бы на 2 недели?",
+            "Какая подсказка чаще срабатывает: вербальная или визуальная?",
+            "Как вы снижаете отказы на домашке?",
         ]
     else:
         qs = [
-            "А ваш ребёнок любит корчить рожицы перед зеркалом — или скорее убегает? Как у вас обычно получается “включить игру”?",
-            "Если попробуете сегодня — что окажется самым лёгким: повторять за вами или дуть в игре? Напишите пару слов в комментариях.",
-            "Какая часть даётся сложнее всего: начать, удержать внимание или закончить спокойно? Расскажите, я подскажу мягкий первый шаг.",
+            "Что даётся сложнее: начать или закончить спокойно?",
+            "Что проще: повторять за вами или играть с выдохом?",
+            "Что влияет сильнее: время суток или формат игры?",
         ]
     q = random.choice(qs)
-    # small personalization with age
     if age_tag and "лет" in age_tag and a != "pros":
         q = q.replace("сегодня", f"сегодня (для возраста {age_tag})")
     return q
@@ -774,12 +809,10 @@ def _quality_gate(
     hook: str,
     meaning: List[str],
     practice: List[str],
-    colleague_note: str,
     norm_lines: List[str],
     age_tag: str,
 ) -> Tuple[bool, str]:
     rf = (rubric_format or "").strip().lower()
-    aud = (audience or "parents").strip().lower()
 
     if not link or not link.startswith(("http://", "https://")):
         return False, "quality_gate:no_source_link"
@@ -788,7 +821,7 @@ def _quality_gate(
         return False, "quality_gate:no_age_tag"
 
     hook_len = len(norm_space(hook))
-    if rf != "question_week" and hook_len < 80:
+    if rf != "question_week" and hook_len < 70:
         return False, f"quality_gate:weak_hook_len:{hook_len}"
     if rf == "question_week" and hook_len < 50:
         return False, f"quality_gate:weak_hook_len:{hook_len}"
@@ -801,46 +834,50 @@ def _quality_gate(
     if len(p) < MIN_PRACTICE_STEPS:
         return False, f"quality_gate:practice_steps_lt_{MIN_PRACTICE_STEPS}:{len(p)}"
 
-    if not norm_space(colleague_note):
-        return False, "quality_gate:no_colleague_note"
-
     nl = "\n".join([norm_space(x) for x in norm_lines if norm_space(x)])
     if "✅" not in nl or "⚠️" not in nl:
         return False, "quality_gate:norm_block_missing_markers"
 
-    if aud == "pros" and rf in ("pro_friendly", "case_digest"):
-        blob = " ".join(p).lower()
-        if not any(k in blob for k in ["критер", "чек", "контрол", "план", "перенос", "подсказ"]):
-            return False, "quality_gate:pros_practice_too_generic"
-
     return True, "ok"
 
 
-def make_colleague_note(rubric_format: str, practice: List[str], picked_title: str, summary: str) -> str:
-    rf = (rubric_format or "").strip().lower()
+def make_nav_strip(rubric_format: str, picked_title: str, summary: str, practice: List[str]) -> List[str]:
     blob = " ".join([picked_title or "", summary or "", " ".join(practice or [])]).lower()
+    rf = (rubric_format or "").strip().lower()
 
-    # Breathing / airflow
-    if any(k in blob for k in ["дуем", "выдох", "пузы", "перыш", "ватн", "воздуш", "дых"]):
-        return "Упражнение тренирует регуляцию воздушной струи и длительность фонационного выдоха; это поддерживает слоговую структуру и стабильность речевого темпа."
+    if rf == "bilingual_parents" or any(k in blob for k in ["билингв", "два языка", "код", "переключ"]):
+        return [
+            "🧠 Навык: переключение без тревоги",
+            "🎯 Цель: сеть русского языка",
+            "📌 Подсказка: повторяйте мягко по-русски",
+            "📏 Критерий прогресса: русская фраза в быту",
+        ]
 
-    # Articulation / lips-tongue
-    if any(k in blob for k in ["лопаточ", "часик", "язык", "губ", "зеркал", "артикуляц"]):
-        return "Практика направлена на развитие артикуляционной моторики и кинестетического контроля (язык/губы); это создаёт базу для более точной коартикуляции и постановки звуков."
+    if any(k in blob for k in ["дуем", "выдох", "пузы", "перыш", "ватн", "дых"]):
+        return [
+            "🧠 Навык: ровный длительный выдох",
+            "🎯 Цель: контроль воздушной струи",
+            "📌 Подсказка: играйте, считайте выдох",
+            "📏 Критерий прогресса: выдох 5–7 секунд",
+        ]
 
-    # Vocabulary / grammar
-    if any(k in blob for k in ["глагол", "кто что делает", "словар", "категор", "описан", "предложен"]):
-        return "Задание усиливает лексико‑семантические связи и грамматическое программирование высказывания (глагольная валентность/согласование), что повышает связность фразы."
+    if any(k in blob for k in ["зеркал", "артикуляц", "язык", "губ", "лопаточ", "часик"]):
+        return [
+            "🧠 Навык: координация язык губы",
+            "🎯 Цель: точная коартикуляция звуков",
+            "📌 Подсказка: медленно, без давления",
+            "📏 Критерий прогресса: движения ровные стабильно",
+        ]
 
-    # Bilingual
-    if rf == "bilingual_parents" or any(k in blob for k in ["билингв", "два языка", "переключ", "код"]):
-        return "Мягкое моделирование фразы поддерживает формирование двуязычных лексических сетей без усиления тревоги; важен перенос навыка в естественные контексты обоих языков."
+    return [
+        "🧠 Навык: глаголы в короткой фразе",
+        "🎯 Цель: лексика и грамматика",
+        "📌 Подсказка: моделируйте фразу, хвалите",
+        "📏 Критерий прогресса: 2–3 слова самостоятельно",
+    ]
 
-    # Default
-    return "Короткая ежедневная практика усиливает нейропластичность: частые повторения с положительным подкреплением быстрее закрепляют моторно‑речевые программы и перенос в спонтанную речь."
 
-
-def compose_post_plain_v30(
+def compose_post_plain_v31(
     rubric_title: str,
     rubric_format: str,
     audience: str,
@@ -848,20 +885,6 @@ def compose_post_plain_v30(
     picked: Dict[str, str],
     title_suffix: str,
 ) -> Tuple[str, Dict[str, Any]]:
-    """
-    Produces STRICT PLAIN TEXT (no HTML/Markdown). Then rewrite (optional) with fallback on raw.
-    Template v3.0:
-      1) Title
-      2) 👶 Возраст: ...
-      3) Hook paragraph (no "Суть/Коротко/Что это значит...")
-      4) Bullets with benefits
-      5) Практика...
-      6) 🔬 Заметка для коллег:
-      7) Норма / когда нужен специалист
-      8) Источник
-      9) 💬 engagement question
-      10) ℹ️ disclaimer + hashtags
-    """
     link = picked.get("canonical") or picked.get("link", "")
     picked_title = picked.get("picked_title") or picked.get("title") or ""
     summary = picked.get("picked_summary") or picked.get("summary") or ""
@@ -872,7 +895,6 @@ def compose_post_plain_v30(
     rf = (rubric_format or "").strip().lower()
     is_tip = _is_sovet_dnya_format(rf)
 
-    # Mask heavy diagnostics in parents-facing preview text
     safe_title = picked_title
     safe_summary = summary
     if aud == "parents":
@@ -882,134 +904,60 @@ def compose_post_plain_v30(
     picked_title_c = clamp_text(safe_title, 140) if safe_title else ""
     summary_c = clamp_text(safe_summary, 240) if safe_summary else ""
 
-    # --- Practice (defines age too)
     if is_tip:
         practice = [
-            "2 минуты «Эхо»: вы говорите слог/короткое слово, ребёнок повторяет (похвала за попытку).",
-            "2 минуты «Кто что делает?»: 6–10 глаголов по картинкам/предметам (прыгает, моет, рисует…).",
-            "1 минута «Дуем в игре»: пузыри/ватный шарик/перышко (ровный выдох).",
-            "Вариант по возрасту: 3–4 года — 3–5 повторов; 5–6 лет — 6–10 повторов; 7+ — добавьте короткую фразу.",
-        ]
-    elif rf == "exercise_steps":
-        practice = [
-            "Перед зеркалом: «Лопаточка» — 5 раз по 5 секунд.",
-            "«Часики» — 10 плавных движений вправо-влево.",
-            "1 минута: дуем на ватный шарик/мыльные пузыри (в игре).",
-            "В конце — короткая похвала за попытки, без “переделывай”.",
+            "2 минуты «Эхо»: слог/слово → повтор (хвалим попытку).",
+            "2 минуты «Кто что делает?»: 6–10 глаголов по картинкам.",
+            "1 минута «Дуем»: пузыри/ватный шарик/перышко.",
         ]
     elif rf == "bilingual_parents":
         practice = [
-            "Игра “Два варианта”: повторите фразу ребёнка по-русски (спокойно, без оценок), затем спросите «как по-русски?».",
-            "5 минут “островка русского”: книжка/картинки/комментирование действий дома.",
-            "В конце дня: ребёнок выбирает 3 предмета и называет их по-русски (можно с подсказкой).",
-        ]
-    elif rf == "question_week":
-        practice = [
-            "Запишите 3 примера фраз ребёнка (как есть) и ситуации, где они прозвучали.",
-            "Отметьте: понимает ли ребёнок просьбы без жестов (2–3 примера).",
-            "Выберите 1 мини-игру на речь на 5 минут (картинки/описание предмета/пузыри).",
+            "Игра «Два варианта»: ребёнок → вы по-русски → ребёнок.",
+            "5 минут «островка русского»: книжка/картинки/комментирование.",
+            "В конце дня: 3 предмета назвать по-русски.",
         ]
     elif rf == "age_norms":
         practice = [
-            "5 минут “описательной речи”: предмет → цвет/форма/назначение/действие.",
-            "Игра “Кто что делает?”: 10 глаголов по картинкам (прыгает, рисует, моет…).",
-            "Если ребёнок билингв — дайте ответить, затем мягко повторите модель по-русски.",
-        ]
-    elif rf == "myth_fact":
-        practice = [
-            "Выберите 1 ситуацию для спокойного “моделирования”: повторите фразу ребёнка правильно, без оценки.",
-            "5 минут игры на словарь (категории: еда/одежда/игрушки).",
-            "В конце — один открытый вопрос: «Что было самым интересным?»",
-        ]
-    elif rf in ("pro_friendly", "case_digest") and aud != "parents":
-        practice = [
-            "Сформулируйте цель на 2 недели и 1–2 измеримых критерия (частота/точность/самоконтроль).",
-            "Соберите мини-протокол: стимул → подсказка → самостоятельное выполнение → перенос в спонтанную речь.",
-            "Подготовьте короткий чек-лист для родителей (до 6 пунктов) + как фиксировать прогресс (1 минуту в день).",
+            "5 минут описания: предмет → цвет/форма/назначение/действие.",
+            "Игра «Кто что делает?»: 10 глаголов по картинкам.",
+            "Если билингв — ответить, затем мягко повторить по-русски.",
         ]
     else:
         practice = [
-            "5 минут артикуляционной гимнастики (в игре, перед зеркалом).",
-            "5 минут словарной игры: категории/противоположности/описание предметов.",
-            "1 минута дыхательной игры (пузыри/ватный шарик/перышко).",
+            "5 минут артикуляции в игре перед зеркалом.",
+            "5 минут словаря: категории/описание предметов.",
+            "1 минута дыхательной игры: пузыри/ватный шарик.",
         ]
+
+    practice = [x for x in practice if norm_space(x)][:2]
 
     age_tag = infer_target_age(rf, picked_title_c, summary_c, practice)
 
-    # --- Hook + meaning (no robot headings)
-    if rf == "question_week":
-        q = make_question_week()
+    if aud == "parents":
         hook = (
-            f"Замечаете, что в речи ребёнка есть “затыки” или вы сомневаетесь, нормально ли это для возраста? "
-            f"Давайте без давления — через один понятный вопрос.\n{q}"
+            "Малыш убегает от зеркала и не хочет заниматься? Давайте превратим это в игру на 5–7 минут — "
+            "без борьбы и без «переделывай»."
         )
-        meaning = [
-            "Так вы увидите реальную картину (не по ощущениям), и станет яснее, что тренировать в первую очередь.",
-            "Даже 5 минут в день помогают, если шаги стабильные и добрые — без «экзаменов».",
-        ]
     else:
-        if aud == "parents":
-            hook = (
-                "Малыш отказывается делать гимнастику и убегает от зеркала? Знакомая ситуация! "
-                "Давайте превратим это в маленькую игру на 5–7 минут — без борьбы и без «переделывай»."
-            )
-        else:
-            hook = (
-                "Нужна короткая, воспроизводимая практика, которую легко перенести в домашку без сопротивления? "
-                "Ниже — компактный протокол на 5–7 минут + методическая логика."
-            )
+        hook = "Нужна короткая домашка без сопротивления? Ниже — простой протокол и критерий прогресса."
 
+    meaning = [
+        "Регулярность важнее идеальности.",
+        "Комфорт → мотивация → точность.",
+    ]
+    if rf == "age_norms":
         meaning = [
-            "Регулярность важнее идеальности: короткие ежедневные шаги дают устойчивее результат.",
-            "Сначала комфорт и желание говорить, потом точность — так меньше сопротивления и больше повторов.",
-            "Если ребёнок устал — заканчиваем раньше, чтобы не закреплять отрицательный опыт.",
+            "Норма — ориентир, не «экзамен».",
+            "Смотрите динамику 2–4 недели.",
         ]
 
-        # adapt by rubric
-        if rf == "bilingual_parents":
-            meaning = [
-                "Смешивание языков часто бывает частью нормы — важнее динамика и желание общаться.",
-                "Мягкое моделирование фразы по-русски помогает без давления и «запретов».",
-                "Регулярный «островок русского» лучше редких “марафонов”.",
-            ]
-        elif rf == "age_norms":
-            meaning = [
-                "Возрастные нормы — ориентир, а не «экзамен»: диапазон вариантов широкий.",
-                "Смотрите динамику 2–4 недели: растёт ли понимание, инициатива общения, новые слова/фразы.",
-                "Если сомневаетесь — фиксируйте примеры и обсуждайте по фактам, так спокойнее.",
-            ]
-        elif rf == "myth_fact":
-            meaning = [
-                "Мифы пугают, а нам важны наблюдаемые признаки и динамика, а не «страшные слова».",
-                "Обычно полезнее поддерживать коммуникацию и регулярную практику, чем искать один «симптом».",
-                "Если тревожно — лучше оценивать ситуацию комплексно и мягко.",
-            ]
-        elif rf in ("pro_friendly", "case_digest") and aud != "parents":
-            meaning = [
-                "Стройте связку: задача → критерий → шаги → контроль (2–4 недели), затем проверяйте перенос.",
-                "Опирайтесь на мотивацию: простая структура занятия снижает отказ и повышает число повторов.",
-                "Отдельно фиксируйте контекст и качество подсказок (вербальные/визуальные/тактильные).",
-            ]
+    norm_lines = [
+        "✅ Норма: есть понимание речи и постепенный прогресс.",
+        "⚠️ Обсудить со специалистом: регресс или нет прогресса 4–6 недель.",
+    ]
 
-    # --- Colleague note (methodical value)
-    colleague_note = make_colleague_note(rf, practice, picked_title_c, summary_c)
-
-    # --- Norm block
-    if rf in ("pro_friendly", "case_digest") and aud != "parents":
-        norm_lines = [
-            "✅ Норма: сохранён контакт, понимание инструкций, позитивная динамика по критериям в 2–4 недели.",
-            "⚠️ Обсудить со специалистом: регресс навыков, стойкое отсутствие прогресса при регулярной практике 4–6 недель, выраженные трудности понимания.",
-        ]
-    else:
-        norm_lines = [
-            "✅ Норма: ребёнок понимает обращённую речь, общается (жестами/словами), и есть постепенный прогресс по неделям.",
-            "⚠️ Обсудить со специалистом: если ребёнок часто не понимает простые просьбы, резко “теряет” навыки или прогресса нет при регулярной практике 4–6 недель.",
-        ]
-
-    # --- Source block (masked for parents)
     factcheck = picked.get("fact_check") or ""
     stype = picked.get("source_type") or source_type_label_from_factcheck(factcheck)
-
     src_label = friendly_source_label(link)
 
     if aud == "parents":
@@ -1019,18 +967,15 @@ def compose_post_plain_v30(
             f"🔗 {link}",
         ]
     else:
-        # pros can see title and type
         title_line = clamp_text(picked_title, 160) if picked_title else ""
         if title_line:
             source_lines = [f"Материал: {title_line}", f"Тип: {stype}", f"🔗 {link}"]
         else:
             source_lines = [f"Тип: {stype}", f"🔗 {link}"]
 
-    # --- Engagement (before disclaimer)
-    engage = make_engagement_question(aud, age_tag, rf)
-    engage_line = f"💬 {norm_space(engage)}"
+    engage_line = f"💬 {norm_space(make_engagement_question(aud, age_tag, rf))}"
 
-    ok, q_reason = _quality_gate(rf, aud, link, hook, meaning, practice, colleague_note, norm_lines, age_tag)
+    ok, q_reason = _quality_gate(rf, aud, link, hook, meaning, practice, norm_lines, age_tag)
     meta: Dict[str, Any] = {
         "ok": ok,
         "reason": q_reason,
@@ -1042,14 +987,13 @@ def compose_post_plain_v30(
     if not ok:
         return "", meta
 
-    # Strict plain text structure
     lines: List[str] = []
     lines.append(f"{rubric_title} {title_suffix}".strip())
     lines.append(f"👶 Возраст: {age_tag}".strip())
     lines.append("")
     lines.append(hook.strip())
     lines.append("")
-    for x in meaning:
+    for x in meaning[:2]:
         x = norm_space(x)
         if x:
             lines.append(f"• {x}")
@@ -1060,8 +1004,8 @@ def compose_post_plain_v30(
         if x:
             lines.append(f"{i}) {x}")
     lines.append("")
-    lines.append("🔬 Заметка для коллег:")
-    lines.append(norm_space(colleague_note))
+    for nav_line in make_nav_strip(rf, picked_title_c, summary_c, practice):
+        lines.append(nav_line)
     lines.append("")
     lines.append("Норма / когда нужен специалист")
     for x in norm_lines:
@@ -1072,25 +1016,28 @@ def compose_post_plain_v30(
     lines.append("Источник")
     for x in source_lines:
         lines.append(norm_space(x))
-
     lines.append("")
     lines.append(engage_line)
 
-    if disclaimer:
-        lines.append("")
-        lines.append(f"ℹ️ {norm_space(disclaimer)}")
-    if tags:
-        lines.append("")
-        lines.append(tags)
-
     raw_plain = "\n".join(lines).strip()
+    raw_plain = _enforce_total_chars_keep_structure(raw_plain, POST_MAX_CHARS)
 
-    # Rewrite with requested fallback behavior
+    if disclaimer:
+        candidate = (raw_plain + "\n\n" + f"ℹ️ {norm_space(disclaimer)}").strip()
+        if len(candidate) <= POST_MAX_CHARS:
+            raw_plain = candidate
+
+    if tags:
+        candidate = (raw_plain + "\n\n" + tags).strip()
+        if len(candidate) <= POST_MAX_CHARS:
+            raw_plain = candidate
+
     final_plain, used_rewrite, note = rewrite_if_enabled_plain(raw_plain, aud, rubric_format=rf)
+    final_plain = _enforce_total_chars_keep_structure(final_plain, POST_MAX_CHARS)
+
     meta["rewrite_used"] = used_rewrite
     meta["rewrite_note"] = note
 
-    # Absolute guard
     if not _has_required_structure_plain_v3(final_plain):
         print("[WARN] final structure broken unexpectedly -> force raw")
         final_plain = raw_plain
@@ -1115,19 +1062,7 @@ def _strip_html_tags(s: str) -> str:
     return _html.unescape(s)
 
 
-def _looks_like_html(s: str) -> bool:
-    return bool(re.search(r"</?(b|i|a)\b", s or ""))
-
-
 def render_plain_to_telegram_html(plain_text: str) -> str:
-    """
-    Convert our strict plain post to Telegram HTML:
-      - First line as <b>title</b>
-      - Age line bolded
-      - Headings as <b>Heading</b>
-      - Link line "🔗 URL" as clickable <a href="URL">domain</a>
-      - Disclaimer line starting with "ℹ️ " italicized
-    """
     lines = (plain_text or "").splitlines()
     if not lines:
         return ""
@@ -1168,14 +1103,6 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
 
 
 def parse_plain_sections_v3(plain_post: str) -> Tuple[str, str, Dict[str, List[str]], List[str]]:
-    """
-    Parse strict v3.0 post.
-    Returns: (title, age, sections_dict, pre_practice_lines)
-      - title = first line
-      - age = second line (without prefix)
-      - sections: keys are headings in _REQUIRED_HEADINGS_V3 plus Norm/Source/Practice
-      - pre_practice_lines: lines between age line and "Практика..." heading
-    """
     lines = (plain_post or "").splitlines()
     title = (lines[0].strip() if lines else "").strip()
     age = ""
@@ -1188,7 +1115,7 @@ def parse_plain_sections_v3(plain_post: str) -> Tuple[str, str, Dict[str, List[s
 
     headings = set(_REQUIRED_HEADINGS_V3 + ["Норма / когда нужен специалист", "Источник", "Практика на сегодня (5–7 минут)"])
 
-    for i, line in enumerate(lines[2:], start=2):
+    for line in lines[2:]:
         s = line.strip()
         if s in headings:
             cur = s
@@ -1204,26 +1131,16 @@ def parse_plain_sections_v3(plain_post: str) -> Tuple[str, str, Dict[str, List[s
 
 
 def build_card_theses_from_plain_v3(plain_post: str) -> Tuple[List[str], str]:
-    """
-    Card must show exactly 3 short theses derived from the post:
-      1) key benefit
-      2) practice
-      3) when to a specialist
-    Also returns age tag.
-    """
     _, age, sec, pre = parse_plain_sections_v3(plain_post)
 
     def _benefit() -> str:
-        # prefer first bullet line in pre_practice
         for x in pre:
             s = x.strip()
             if s.startswith("•"):
                 return s.lstrip("•").strip()
-        # else first sentence of hook (first non-empty pre line)
         for x in pre:
             s = x.strip()
             if s:
-                # take first sentence
                 m = re.split(r"(?<=[.!?])\s+", s)
                 return m[0].strip()
         return "Маленький шаг сегодня — больше спокойствия завтра."
@@ -1232,9 +1149,9 @@ def build_card_theses_from_plain_v3(plain_post: str) -> Tuple[List[str], str]:
         arr = sec.get("Практика на сегодня (5–7 минут)", []) or []
         for x in arr:
             s = x.strip()
-            s = re.sub(r"^\d+\)\s*", "", s)
-            if s:
-                return s
+            s2 = re.sub(r"^\d+\)\s*", "", s)
+            if s2 and s != s2:
+                return s2
         return "Сделайте один маленький шаг (5 минут) — в игре."
 
     def _specialist() -> str:
@@ -1255,71 +1172,8 @@ def build_card_theses_from_plain_v3(plain_post: str) -> Tuple[List[str], str]:
     return [f"💡 {a}", f"🧩 {b}", f"⚠️ {c}"], age
 
 
-def build_caption_plain_v3(plain_post: str, max_bytes: int) -> str:
-    """
-    Build a compact caption that keeps required semantics and fits max_bytes (UTF-8 bytes).
-    """
-    title, age, sec, pre = parse_plain_sections_v3(plain_post)
-
-    # Take 1 hook line and 1 bullet (if exists)
-    hook_line = ""
-    for x in pre:
-        s = x.strip()
-        if s and not s.startswith("•") and not s.startswith("💬"):
-            hook_line = s
-            break
-
-    bullet_line = ""
-    for x in pre:
-        s = x.strip()
-        if s.startswith("•"):
-            bullet_line = s
-            break
-
-    practice_lines = [x.strip() for x in (sec.get("Практика на сегодня (5–7 минут)", []) or []) if re.match(r"^\d+\)\s+", x.strip())]
-    norm_lines = [x.strip() for x in (sec.get("Норма / когда нужен специалист", []) or []) if x.strip().startswith(("✅", "⚠️"))]
-    source_lines = [x.strip() for x in (sec.get("Источник", []) or []) if x.strip()]
-    src_url = ""
-    for x in source_lines:
-        if x.startswith("🔗 "):
-            src_url = x[2:].strip()
-            break
-
-    lines: List[str] = []
-    if title:
-        lines.append(title)
-    if age:
-        lines.append(f"👶 Возраст: {age}")
-    lines.append("")
-    if hook_line:
-        lines.append(clamp_text(hook_line, 220))
-    if bullet_line:
-        lines.append(clamp_text(bullet_line, 180))
-    lines.append("")
-    lines.append("Практика на сегодня (5–7 минут)")
-    for x in practice_lines[:max(MIN_PRACTICE_STEPS, 3)]:
-        lines.append(clamp_text(x, 175))
-    lines.append("")
-    lines.append("Норма / когда нужен специалист")
-    for x in norm_lines[:2]:
-        lines.append(clamp_text(x, 210))
-    lines.append("")
-    lines.append("Источник")
-    if src_url:
-        lines.append(f"🔗 {src_url}")
-    else:
-        lines.append("🔗 (см. полный текст)")
-
-    caption = "\n".join(lines).strip()
-    return utf8_clip(caption, max_bytes=max_bytes, add_ellipsis=True)
-
-
-def render_caption_html_from_plain(plain_caption: str) -> str:
-    return render_plain_to_telegram_html(plain_caption)
-
-
 # =========================
-# Card rendering
+# Card rendering (same as before)
 # =========================
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
@@ -1339,9 +1193,6 @@ def _hex_to_rgb(h: str) -> Tuple[int, int, int]:
 
 
 def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any], age_tag: str = "") -> Path:
-    """
-    v1.9: renders an image card. If age_tag provided, render it as small line under title.
-    """
     theme = (branding or {}).get("card_theme", "minimal") or "minimal"
     theme = str(theme).strip().lower()
 
@@ -1476,12 +1327,10 @@ def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]
             lines2.append(" ".join(cur))
         return lines2
 
-    # Title
     for ln in wrap(rubric_title, f_title, max_w)[:3]:
         draw.text((x_text, y_text), ln, fill=title_color, font=f_title)
         y_text += 68
 
-    # Age line under title (small)
     if age_tag:
         y_text += 2
         age_line = fit_one_line(f"👶 {age_tag}", f_age, max_w)
@@ -1490,10 +1339,8 @@ def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]
 
     y_text += 10
 
-    # v1.7+: if subtitle is a list -> render exactly 3 theses (one line each)
     if isinstance(subtitle, (list, tuple)):
-        theses = [norm_space(str(x)) for x in subtitle if norm_space(str(x))]
-        theses = theses[:3]
+        theses = [norm_space(str(x)) for x in subtitle if norm_space(str(x))][:3]
         f_th = _load_font(36 if theme != "scientific" else 34)
         for t in theses:
             one = fit_one_line(t, f_th, max_w)
@@ -1501,7 +1348,6 @@ def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]
                 draw.text((x_text, y_text), one, fill=sub_color, font=f_th)
                 y_text += 52
     else:
-        # legacy
         f_sub = _load_font(32 if theme != "scientific" else 30)
         sub_txt = str(subtitle or "")
         for ln in wrap(sub_txt, f_sub, max_w)[:3]:
@@ -1512,13 +1358,11 @@ def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]
     if footer:
         draw.text((panel[0] + 28, panel[3] - 48), footer, fill=footer_color, font=f_small)
 
-    # ---- subtitle_key FIX: stable hash input even when subtitle is list/tuple ----
     if isinstance(subtitle, (list, tuple)):
         subtitle_key = " | ".join([norm_space(str(x)) for x in subtitle if norm_space(str(x))])
     else:
         subtitle_key = norm_space(str(subtitle or ""))
     subtitle_key = subtitle_key[:320]
-    # ---------------------------------------------------------------------------
 
     out = STATE_DIR / f"card_{sha1(theme + rubric_title + subtitle_key + age_tag)[:10]}.png"
     img.save(out)
@@ -1526,7 +1370,7 @@ def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]
 
 
 # =========================
-# Telegram sending with “safe send”
+# Telegram sending (NO-DUP)
 # =========================
 
 def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1549,10 +1393,6 @@ def _tg_error_description(resp_text: str) -> str:
 
 
 def _safe_retry_plain_text(data: Dict[str, Any], caption_max_bytes: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Remove parse_mode and strip markup (HTML/Markdown) from text/caption.
-    For captions, also enforce UTF-8 bytes limit.
-    """
     data2 = dict(data)
     data2.pop("parse_mode", None)
 
@@ -1568,12 +1408,6 @@ def _safe_retry_plain_text(data: Dict[str, Any], caption_max_bytes: Optional[int
 
 
 def tg_request_safe(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Requested behavior:
-      - if Telegram returns 400 (Bad Request), retry once without markup (plain text),
-        and log the reason.
-      - extra hardening: if caption too long even after retry, clip more and retry once more.
-    """
     try:
         return tg_request(method, data=data, files=files)
     except requests.exceptions.HTTPError as e:
@@ -1589,7 +1423,6 @@ def tg_request_safe(method: str, data: Dict[str, Any], files: Optional[Dict[str,
             desc = _tg_error_description(text)
             print(f"[WARN] Telegram 400 on {method}. Will retry plain. Description: {desc}")
 
-            # 1) plain retry
             try:
                 data_plain = _safe_retry_plain_text(data)
                 return tg_request(method, data=data_plain, files=files)
@@ -1603,7 +1436,6 @@ def tg_request_safe(method: str, data: Dict[str, Any], files: Optional[Dict[str,
                     text2 = ""
                 desc2 = _tg_error_description(text2)
 
-                # 2) If caption too long, clip more and retry once more
                 if status2 == 400 and "caption is too long" in (desc2 or "").lower() and "caption" in data:
                     smaller = min(780, TG_CAPTION_MAX_BYTES)
                     print(f"[WARN] Telegram still says caption too long. Retrying with smaller caption bytes={smaller}.")
@@ -1622,97 +1454,29 @@ def send_message(chat_id: str, html_text: str) -> None:
     tg_request_safe("sendMessage", data=data)
 
 
-def send_photo(chat_id: str, photo_path: Path, caption_html: str, caption_plain_fallback: Optional[str] = None) -> None:
-    """
-    Robust sendPhoto:
-      - try HTML caption if it fits and looks like HTML
-      - fallback to plain caption
-      - if Telegram says caption too long -> progressively shrink caption
-      - as last resort: send without caption (and rely on full text message after)
-    """
-    plain_fb = caption_plain_fallback or _strip_html_tags(caption_html or "")
-    plain_fb = plain_fb or ""
-
-    # Prepare candidates (caption, parse_mode)
-    candidates: List[Tuple[str, Optional[str], str]] = []
-
-    # 1) HTML caption only if it fits bytes and contains safe tags
-    cap_html = (caption_html or "").strip()
-    if cap_html and _looks_like_html(cap_html) and len(cap_html.encode("utf-8")) <= TG_CAPTION_MAX_BYTES:
-        candidates.append((cap_html, TELEGRAM_PARSE_MODE or "HTML", "html"))
-
-    # 2) Plain caption (full limit)
-    cap_plain = utf8_clip(plain_fb, max_bytes=TG_CAPTION_MAX_BYTES, add_ellipsis=True)
-    candidates.append((cap_plain, None, "plain"))
-
-    # 3) Smaller plain captions (for stubborn Telegram limits)
-    for mb in [min(780, TG_CAPTION_MAX_BYTES), 650, 520, 400]:
-        candidates.append((utf8_clip(plain_fb, max_bytes=mb, add_ellipsis=True), None, f"plain_{mb}"))
-
-    # 4) No caption fallback
-    candidates.append(("", None, "no_caption"))
-
-    last_err: Optional[Exception] = None
-
-    for cap, pm, label in candidates:
-        data: Dict[str, Any] = {"chat_id": chat_id}
-        if cap:
-            data["caption"] = cap
-        if pm and cap:
-            data["parse_mode"] = pm
-
-        try:
-            with photo_path.open("rb") as f:
-                tg_request("sendPhoto", data=data, files={"photo": f})
-            return
-        except requests.exceptions.HTTPError as e:
-            last_err = e
-            resp = getattr(e, "response", None)
-            status = getattr(resp, "status_code", None)
-            txt = ""
-            try:
-                txt = (resp.text or "") if resp is not None else ""
-            except Exception:
-                txt = ""
-            desc = _tg_error_description(txt)
-
-            if status == 400:
-                # we keep trying next candidate (this is expected for parse errors / caption length)
-                print(f"[WARN] sendPhoto failed (attempt={label}) 400: {desc}")
-                continue
-
-            # non-400: stop immediately
-            raise
-
-    # If all attempts failed, raise last error
-    if last_err:
-        raise last_err
-
-
 def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
-    """
-    Variant B (requested):
-      1) Photo with SHORT caption (robust against TG caption limits)
-      2) Full text as separate message (HTML)
-    """
-    # Headroom for HTML tags in caption (avoid exceeding TG_CAPTION_MAX_BYTES)
-    cap_html_base_bytes = max(200, TG_CAPTION_MAX_BYTES - 160)
+    plain_bytes = len((plain_post or "").encode("utf-8"))
 
-    caption_plain_for_html = build_caption_plain_v3(plain_post, max_bytes=cap_html_base_bytes)
-    caption_html = render_caption_html_from_plain(caption_plain_for_html)
-
-    caption_plain_fallback = build_caption_plain_v3(plain_post, max_bytes=TG_CAPTION_MAX_BYTES)
+    if plain_bytes <= TG_CAPTION_MAX_BYTES:
+        try:
+            data: Dict[str, Any] = {"chat_id": chat_id, "caption": html_full_post}
+            if TELEGRAM_PARSE_MODE:
+                data["parse_mode"] = TELEGRAM_PARSE_MODE
+            with card_path.open("rb") as f:
+                tg_request_safe("sendPhoto", data=data, files={"photo": f})
+            return
+        except Exception as e:
+            print(f"[WARN] sendPhoto(full caption) failed -> fallback to photo+text. Reason: {e}")
 
     try:
-        send_photo(chat_id, card_path, caption_html, caption_plain_fallback=caption_plain_fallback)
+        with card_path.open("rb") as f:
+            tg_request_safe("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": f})
     except Exception as e:
-        # Do not fail the whole run: fallback to text-only
-        print(f"[ERROR] sendPhoto failed окончательно, fallback to sendMessage only. Reason: {e}")
+        print(f"[ERROR] sendPhoto(no caption) failed окончательно, fallback to sendMessage only. Reason: {e}")
         send_message(chat_id, html_full_post)
         return
 
-    if TG_SEND_FULL_TEXT_AFTER_PHOTO:
-        send_message(chat_id, html_full_post)
+    send_message(chat_id, html_full_post)
 
 
 def _slug(s: str) -> str:
@@ -1720,6 +1484,10 @@ def _slug(s: str) -> str:
     s = re.sub(r"[^\w\-]+", "-", s, flags=re.UNICODE)
     s = re.sub(r"-{2,}", "-", s).strip("-")
     return s[:60] or "item"
+
+
+def _dry_send_mode(plain_post: str) -> str:
+    return "photo_caption_full" if len((plain_post or "").encode("utf-8")) <= TG_CAPTION_MAX_BYTES else "photo_then_text"
 
 
 def write_dry_run_outputs(
@@ -1735,23 +1503,23 @@ def write_dry_run_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     base = f"{idx:02d}_{_slug(aud)}_{_slug(rubric_id or rubric_title)}"
 
-    # card
     card_out = out_dir / f"{base}.png"
     try:
         shutil.copyfile(card_path, card_out)
     except Exception:
         Image.open(card_path).save(card_out)
 
-    # caption (same logic as sender)
-    cap_html_base_bytes = max(200, TG_CAPTION_MAX_BYTES - 160)
-    caption_plain_for_html = build_caption_plain_v3(plain_post, max_bytes=cap_html_base_bytes)
-    caption_html = render_caption_html_from_plain(caption_plain_for_html)
-    caption_plain_full = build_caption_plain_v3(plain_post, max_bytes=TG_CAPTION_MAX_BYTES)
+    mode = _dry_send_mode(plain_post)
 
     (out_dir / f"{base}.plain.txt").write_text(plain_post, encoding="utf-8")
     (out_dir / f"{base}.full.html.txt").write_text(html_full_post, encoding="utf-8")
-    (out_dir / f"{base}.caption.plain.txt").write_text(caption_plain_full, encoding="utf-8")
-    (out_dir / f"{base}.caption.html.txt").write_text(caption_html, encoding="utf-8")
+
+    if mode == "photo_caption_full":
+        (out_dir / f"{base}.caption.html.txt").write_text(html_full_post, encoding="utf-8")
+        (out_dir / f"{base}.caption.plain.txt").write_text(plain_post, encoding="utf-8")
+    else:
+        (out_dir / f"{base}.caption.html.txt").write_text("", encoding="utf-8")
+        (out_dir / f"{base}.caption.plain.txt").write_text("", encoding="utf-8")
 
     meta = {
         "idx": idx,
@@ -1759,7 +1527,9 @@ def write_dry_run_outputs(
         "rubric_id": rubric_id,
         "rubric_title": rubric_title,
         "card": str(card_out),
-        "caption_bytes_max": TG_CAPTION_MAX_BYTES,
+        "send_mode": mode,
+        "tg_caption_max_bytes": TG_CAPTION_MAX_BYTES,
+        "post_max_chars": POST_MAX_CHARS,
     }
     (out_dir / f"{base}.meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1979,7 +1749,7 @@ def run() -> None:
                 continue
 
             title = rubric.get("title", "Рубрика")
-            plain_post, meta = compose_post_plain_v30(title, rubric.get("format", ""), aud, channel_cfg, picked, title_suffix)
+            plain_post, meta = compose_post_plain_v31(title, rubric.get("format", ""), aud, channel_cfg, picked, title_suffix)
 
             if not meta.get("ok", False) or not plain_post:
                 draft_entry = {
@@ -2020,9 +1790,8 @@ def run() -> None:
                 bump_weekly(stats, week_key, "passed", 1)
 
             canon = picked.get("canonical") or picked.get("link", "")
-            if not DRY_RUN:
-                if canon:
-                    used_canon.add(canon)
+            if not DRY_RUN and canon:
+                used_canon.add(canon)
                 tkey = norm_title_key(picked.get("picked_title") or picked.get("title") or "")
                 if tkey:
                     used_titles.add(tkey)
@@ -2040,7 +1809,7 @@ def run() -> None:
         "Done. "
         f"Posted: {posted}. Audience: {AUDIENCE}. Rewrite: {REWRITE_PROVIDER}. Week: {week_key}. "
         f"Parse: {TELEGRAM_PARSE_MODE}. CaptionMaxBytes: {TG_CAPTION_MAX_BYTES}. "
-        f"FullTextAfterPhoto: {int(TG_SEND_FULL_TEXT_AFTER_PHOTO)}"
+        f"PostMaxChars: {POST_MAX_CHARS}. "
         f"{' [DRY_RUN]' if DRY_RUN else ''}"
     )
 

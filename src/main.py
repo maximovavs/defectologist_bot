@@ -8,6 +8,7 @@ import random
 import hashlib
 import shutil
 import math
+import textwrap
 import html as _html
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1063,9 +1064,23 @@ def _strip_html_tags(s: str) -> str:
 
 
 def render_plain_to_telegram_html(plain_text: str) -> str:
+    """
+    Convert our strict plain post to Telegram HTML:
+      - First line as <b>title</b>
+      - Age line bolded
+      - Headings as <b>Heading</b>
+      - Any URL is hidden behind anchor text (no raw URL shown)
+      - Disclaimer line starting with "ℹ️ " italicized
+    """
     lines = (plain_text or "").splitlines()
     if not lines:
         return ""
+
+    def _link_anchor(url: str, prefix: str = "🔗 ") -> str:
+        # Parents must never see raw URL (may contain scary words)
+        label = "Читать оригинальный материал"
+        href = _html.escape(url, quote=True)
+        return f"{prefix}<a href=\"{href}\">{_escape(label)}</a>"
 
     out: List[str] = []
     for idx, raw in enumerate(lines):
@@ -1084,13 +1099,17 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             out.append(f"<b>{_escape(stripped)}</b>")
             continue
 
+        # Hide links: both our canonical '🔗 URL' lines and accidental raw URLs
         if stripped.startswith("🔗 "):
             url = stripped[2:].strip()
             if url.startswith(("http://", "https://")):
-                dom = safe_domain(url) or url
-                out.append(f"🔗 <a href=\"{_html.escape(url, quote=True)}\">{_escape(dom)}</a>")
+                out.append(_link_anchor(url, prefix="🔗 "))
             else:
                 out.append(_escape(stripped))
+            continue
+
+        if stripped.startswith(("http://", "https://")):
+            out.append(_link_anchor(stripped, prefix="🔗 "))
             continue
 
         if stripped.startswith("ℹ️ "):
@@ -1341,12 +1360,53 @@ def render_image_card(rubric_title: str, subtitle: Any, branding: Dict[str, Any]
 
     if isinstance(subtitle, (list, tuple)):
         theses = [norm_space(str(x)) for x in subtitle if norm_space(str(x))][:3]
-        f_th = _load_font(36 if theme != "scientific" else 34)
-        for t in theses:
-            one = fit_one_line(t, f_th, max_w)
-            if one:
-                draw.text((x_text, y_text), one, fill=sub_color, font=f_th)
-                y_text += 52
+
+        # --- NEW: wrap long theses to multiple lines using textwrap (requested) ---
+        base_font_size = 36 if theme != "scientific" else 34
+        f_th = _load_font(base_font_size)
+
+        def wrap_lines(txt: str, width_chars: int) -> List[str]:
+            t = norm_space(txt)
+            if not t:
+                return []
+            lines_local = textwrap.wrap(
+                t,
+                width=width_chars,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            w = width_chars
+            while any(draw.textlength(ln, font=f_th) > max_w for ln in lines_local) and w > 18:
+                w -= 2
+                lines_local = textwrap.wrap(
+                    t,
+                    width=w,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            return lines_local
+
+        wrapped_all: List[List[str]] = [wrap_lines(t, 42) for t in theses]
+        total_lines = sum(len(x) for x in wrapped_all)
+
+        available_h = (panel[3] - 70) - y_text  # bottom padding
+
+        def line_h(font_sz: int) -> int:
+            return int(font_sz * 1.25)
+
+        while total_lines * line_h(base_font_size) > available_h and base_font_size > 26:
+            base_font_size -= 2
+            f_th = _load_font(base_font_size)
+            wrapped_all = [wrap_lines(t, 42) for t in theses]
+            total_lines = sum(len(x) for x in wrapped_all)
+
+        lh = line_h(base_font_size)
+        for lines_th in wrapped_all:
+            for ln in lines_th:
+                draw.text((x_text, y_text), ln, fill=sub_color, font=f_th)
+                y_text += lh
+            y_text += int(lh * 0.35)  # gap between theses
+        # --- END NEW ---
     else:
         f_sub = _load_font(32 if theme != "scientific" else 30)
         sub_txt = str(subtitle or "")

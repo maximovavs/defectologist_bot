@@ -1,0 +1,49 @@
+name: Interactive Bot (manual smoke test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: "Сколько минут держать long-polling (только для проверки; Actions не подходит для постоянной работы)"
+        type: choice
+        required: false
+        default: "10"
+        options:
+          - "5"
+          - "10"
+          - "20"
+          - "30"
+
+jobs:
+  run_interactive_bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      TZ: "Asia/Nicosia"
+      RUN_MINUTES: ${{ github.event.inputs.run_minutes || '10' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "aiogram>=3.4.0"
+
+      - name: Smoke run (long-polling with timeout)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_DRAFTS_CHAT_ID: ${{ secrets.TELEGRAM_DRAFTS_CHAT_ID }}
+          TELEGRAM_CHANNEL_LINK: ${{ secrets.TELEGRAM_CHANNEL_LINK || '' }}
+          LEAD_MAGNET_FILE_ID: ${{ secrets.LEAD_MAGNET_FILE_ID || '' }}
+        run: |
+          echo "NOTE: GitHub Actions не предназначен для постоянного long-polling. Это только smoke test."
+          timeout "${RUN_MINUTES}m" python -m src.bot.main || true

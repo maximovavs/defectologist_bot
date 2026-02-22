@@ -32,7 +32,7 @@ def kb_subscribe() -> InlineKeyboardMarkup:
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
-    """Check membership in TELEGRAM_CHAT_ID channel."""
+    """Subscription check via getChatMember."""
     if not TELEGRAM_CHAT_ID:
         return False
     try:
@@ -45,8 +45,9 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
 @router.message(CommandStart())
 async def start(m: Message) -> None:
     await m.answer(
-        "Привет! Я помогу вам с короткими речевыми играми на 5 минут.\n"
-        "Выберите действие ниже 👇",
+        "Привет! Я бот Logopedia.\n"
+        "Могу выдать бесплатный PDF-гайд за подписку на канал и собрать вопрос на разбор.\n\n"
+        "Выберите действие 👇",
         reply_markup=kb_main(),
     )
 
@@ -55,7 +56,7 @@ async def start(m: Message) -> None:
 async def lead_get(cb: CallbackQuery, bot: Bot) -> None:
     await cb.answer()
     if not TELEGRAM_CHAT_ID:
-        await cb.message.answer("Сейчас подписка не проверяется (не задан TELEGRAM_CHAT_ID).")
+        await cb.message.answer("Подписка сейчас не проверяется (не задан TELEGRAM_CHAT_ID).")
         return
 
     ok = await is_subscribed(bot, cb.from_user.id)
@@ -76,14 +77,17 @@ async def lead_check(cb: CallbackQuery, bot: Bot) -> None:
         await _send_lead_magnet(cb.message, bot)
     else:
         await cb.message.answer(
-            "Подписки пока не видно. Если подписались только что — подождите 5–10 секунд и проверьте ещё раз.",
+            "Подписка пока не найдена. Если вы подписались только что — подождите 5–10 секунд и проверьте ещё раз.",
             reply_markup=kb_subscribe(),
         )
 
 
 async def _send_lead_magnet(m: Message, bot: Bot) -> None:
     if not LEAD_MAGNET_FILE_ID:
-        await m.answer("Гайд скоро будет доступен. (Нужно добавить LEAD_MAGNET_FILE_ID в переменные окружения.)")
+        await m.answer(
+            "Гайд скоро будет доступен.\n"
+            "Админу: загрузите PDF в закрытый чат, получите file_id и задайте LEAD_MAGNET_FILE_ID в env."
+        )
         return
     try:
         await bot.send_document(chat_id=m.chat.id, document=LEAD_MAGNET_FILE_ID, caption="Ваш гайд 📘")
@@ -94,7 +98,10 @@ async def _send_lead_magnet(m: Message, bot: Bot) -> None:
 @router.callback_query(F.data == "qa:ask")
 async def qa_ask(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.answer("Напишите ваш вопрос одним сообщением (без личных данных). Я передам его в очередь на разбор.")
+    await cb.message.answer(
+        "Напишите ваш вопрос одним сообщением (без личных данных).\n"
+        "Я передам его в очередь на разбор."
+    )
 
 
 @router.message(Command("question"))
@@ -109,7 +116,6 @@ async def qa_collect(m: Message, bot: Bot) -> None:
     txt = (m.text or "").strip()
     if not txt or txt.startswith("/"):
         return
-
     header = f"📝 Вопрос от пользователя\nID: {m.from_user.id}\n\n"
     await bot.send_message(chat_id=TELEGRAM_DRAFTS_CHAT_ID, text=header + txt)
     await m.answer("Спасибо! Вопрос записан. Разбор появится в канале в ближайшие дни.")

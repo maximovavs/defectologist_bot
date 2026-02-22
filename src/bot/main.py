@@ -6,8 +6,8 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 
-from src.bot.settings import TELEGRAM_BOT_TOKEN
 from src.handlers.user import router as user_router
+from src.bot.settings import TELEGRAM_BOT_TOKEN
 
 
 async def main() -> None:

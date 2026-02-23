@@ -1,4 +1,4 @@
-version: 1.5
+version: 1.6
 
 quality:
   allow_domains:
@@ -9,6 +9,11 @@ quality:
     - "logopedy.ru"
     - "asha.org"
     - "pmc.ncbi.nlm.nih.gov"
+    # ✅ новые домены (билингвизм/родители-экспаты)
+    - "colorincolorado.org"
+    # ✅ если захотите PubMed RSS (через Create RSS)
+    - "pubmed.ncbi.nlm.nih.gov"
+
   deny_keywords:
     - "форум"
     - "реклама"
@@ -21,6 +26,13 @@ quality:
     - "доставка"
     - "вылечить"
     - "экстрасенс"
+    # (опционально, чтобы меньше продаваторства)
+    - "курс"
+    - "вебинар"
+    - "семинар"
+    - "платно"
+    - "скидк"
+
   boost_keywords:
     - "упраж"
     - "артикуляц"
@@ -38,6 +50,7 @@ quality:
     - "заик"
     - "дисграф"
     - "дислекс"
+
   methodical_keywords:
     - "метод"
     - "методика"
@@ -60,9 +73,12 @@ quality:
     - "заикан"
     - "дисграф"
     - "дислекс"
+
   scientific_domains:
     - "asha.org"
     - "pmc.ncbi.nlm.nih.gov"
+    # PubMed RSS feeds are also scientific (optional)
+    - "pubmed.ncbi.nlm.nih.gov"
 
 sources:
   - id: logopediya_documents_rss
@@ -75,6 +91,7 @@ sources:
     type: rss
     url: "https://logopediya.com/ppt/rss.xml"
 
+  # NOTE: требует parser: logopediya_publ (если в коде publisher нет — можно не использовать)
   - id: logopediya_publications_latest
     name: "Logopediya.com — Публикации (последние)"
     type: html_site
@@ -105,6 +122,8 @@ sources:
     url: "https://logopedy.ru/portal/logoped-literature/logoped-article.html"
     parser: "logopedy_articles"
 
+  # ---------- ASHA / English sources (bilingual + evidence) ----------
+
   - id: asha_multilingual_public
     name: "ASHA — Public (multilingual & late language emergence)"
     type: static
@@ -112,9 +131,63 @@ sources:
       - "https://www.asha.org/public/speech/development/learning-more-than-one-language/"
       - "https://www.asha.org/practice-portal/clinical-topics/late-language-emergence/"
 
+  - id: asha_public_speech_sound_disorders
+    name: "ASHA — Public (speech sound disorders + early identification)"
+    type: static
+    urls:
+      - "https://www.asha.org/public/speech/disorders/speech-sound-disorders/"
+      - "https://www.asha.org/public/Early-Identification-of-Speech-Language-and-Hearing-Disorders/"
+
+  - id: asha_practice_portal_articulation_phonology
+    name: "ASHA — Practice Portal (Articulation & Phonology)"
+    type: static
+    urls:
+      - "https://www.asha.org/practice-portal/clinical-topics/articulation-and-phonology/"
+
+  - id: asha_practice_portal_multilingual_service_delivery
+    name: "ASHA — Practice Portal (Multilingual Service Delivery)"
+    type: static
+    urls:
+      - "https://www.asha.org/practice-portal/professional-issues/multilingual-service-delivery/"
+
+  # ---------- Colorín Colorado (bilingual = superpower) ----------
+
+  - id: colorin_bilingual_parents
+    name: "Colorín Colorado — bilingual acquisition (parents-friendly)"
+    type: static
+    urls:
+      - "https://www.colorincolorado.org/article/bilingual-acquisition"
+      - "https://www.colorincolorado.org/article/learning-two-languages"
+      - "https://www.colorincolorado.org/being-bilingual-superpower-workshop-activities"
+
+  # ---------- PMC / science (bilingual, code-switching) ----------
+
   - id: pmc_bilingual_science
     name: "PubMed Central — bilingual development reviews"
     type: static
     urls:
       - "https://pmc.ncbi.nlm.nih.gov/articles/PMC6168212/"
       - "https://pmc.ncbi.nlm.nih.gov/articles/PMC8866745/"
+
+  - id: pmc_code_switching_exposure_children
+    name: "PMC — exposure to code-switching and child language performance"
+    type: static
+    urls:
+      - "https://pmc.ncbi.nlm.nih.gov/articles/PMC7816522/"
+
+  - id: pmc_code_switching_parents_infants
+    name: "PMC — code-switching in parents’ speech to bilingual infants"
+    type: static
+    urls:
+      - "https://pmc.ncbi.nlm.nih.gov/articles/PMC12168312/"
+
+  # ---------- OPTIONAL (advanced): PubMed RSS feeds (no login required) ----------
+  # Как получить ссылку:
+  # 1) В PubMed выполните поиск (например: bilingual child language development review)
+  # 2) Нажмите "Create RSS" под строкой поиска, выберите limit=10–15, скопируйте XML URL
+  # 3) Вставьте URL ниже и добавьте этот source_id в rubrics.yml (для субботы "Методическая копилка")
+  #
+  # - id: pubmed_rss_bilingual_updates
+  #   name: "PubMed RSS — bilingual child language (updates)"
+  #   type: rss
+  #   url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/<TOKEN>/?limit=10&utm_campaign=pubmed-2&fc=<STAMP>"

@@ -1,4 +1,4 @@
-name: Logoped Channel Bot v1.5
+name: Logoped Channel Bot v2.2
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "DRY_RUN=1 (не публиковать, сохранить artifacts/**)"
+        description: "DRY_RUN=1 (не публиковать, сохранить .state/dry_run/**)"
         required: false
         default: "0"
 
@@ -14,11 +14,10 @@ jobs:
   post:
     runs-on: ubuntu-latest
 
-    # ✅ job-level env — виден во всех шагах
     env:
       TZ: "Asia/Nicosia"
       REWRITE_PROVIDER: "auto"
-      AUDIENCE: "parents"
+      AUDIENCE: "both"          # ✅ иначе pros-рубрики никогда не выйдут
       INSECURE_TLS_DOMAINS: "logorina.ru"
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
 
@@ -35,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run Publisher
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -50,5 +49,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dryrun-artifacts
-          path: artifacts/**
+          path: .state/dry_run/**
           if-no-files-found: warn

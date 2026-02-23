@@ -1,4 +1,4 @@
-version: 2.2
+version: 2.3
 
 channel:
   locale: "ru-RU"
@@ -33,7 +33,11 @@ audiences:
         kind: advice
         cadence: "WEEKLY"
         byweekday: ["MO"]
-        sources: ["logopediya_documents_rss", "logopediya_ppt_rss", "logorina_latest", "logopedy_articles_latest"]
+        sources:
+          - "logopediya_documents_rss"
+          - "logopediya_ppt_rss"
+          - "logorina_latest"
+          - "logopedy_articles_latest"
         format: "tip_of_day"
         media: ["image_card"]
 
@@ -43,47 +47,65 @@ audiences:
         kind: advice
         cadence: "WEEKLY"
         byweekday: ["TU"]
-        sources: ["logorina_latest", "logopedy_articles_latest"]
+        sources:
+          - "logorina_latest"
+          - "logopedy_articles_latest"
         format: "exercise_steps"
         media: ["image_card"]
 
-      # СРЕДА: Миф/Факт
+      # СРЕДА: Миф/Факт (добавили ASHA Practice Portal про мультиязычное сопровождение)
       - id: myth_fact
         title: "Миф / Факт"
         kind: digest
         cadence: "WEEKLY"
         byweekday: ["WE"]
-        sources: ["asha_multilingual_public", "pmc_bilingual_science"]
+        sources:
+          - "asha_multilingual_public"
+          - "asha_practice_portal_multilingual_service_delivery"
+          - "pmc_bilingual_science"
+          - "pmc_code_switching_exposure_children"
+          - "pmc_code_switching_parents_infants"
         format: "myth_fact"
         media: ["image_card"]
 
-      # ЧЕТВЕРГ: Русский за границей
+      # ЧЕТВЕРГ: Русский за границей (добавили Colorín Colorado для родительского тона)
       - id: bilingual_corner
         title: "Русский за границей"
         kind: bilingual
         cadence: "WEEKLY"
         byweekday: ["TH"]
-        sources: ["asha_multilingual_public", "pmc_bilingual_science", "logoportal_latest"]
+        sources:
+          - "asha_multilingual_public"
+          - "asha_practice_portal_multilingual_service_delivery"
+          - "colorin_bilingual_parents"
+          - "pmc_bilingual_science"
+          - "logoportal_latest"
         format: "bilingual_parents"
         media: ["image_card"]
 
-      # ПЯТНИЦА: Вопрос недели (позже замените на аудио-пятницу tts_audio)
+      # ПЯТНИЦА: Вопрос недели (временно; позже замените на tts_audio)
       - id: question_week
         title: "Вопрос недели"
         kind: question_week
         cadence: "WEEKLY"
         byweekday: ["FR"]
-        sources: ["asha_multilingual_public"]
+        sources:
+          - "asha_multilingual_public"
+          - "colorin_bilingual_parents"
         format: "question_week"
         media: ["image_card"]
 
-      # ВОСКРЕСЕНЬЕ: Возрастная норма (как в исходном ТЗ)
+      # ВОСКРЕСЕНЬЕ: Возрастная норма (оставляем российские + добавляем ASHA Public по SSD/early id)
       - id: age_norms
         title: "Возрастная норма"
         kind: norms
         cadence: "WEEKLY"
         byweekday: ["SU"]
-        sources: ["logopediya_documents_rss", "logoportal_latest"]
+        sources:
+          - "logopediya_documents_rss"
+          - "logoportal_latest"
+          - "asha_public_speech_sound_disorders"
+          - "asha_multilingual_public"
         format: "age_norms"
         media: ["image_card"]
 
@@ -100,12 +122,17 @@ audiences:
   pros:
     title_suffix: "• для специалистов"
     rubrics:
-      # СУББОТА: Методическая копилка (как в исходном ТЗ)
+      # СУББОТА: Методическая копилка (добавили ASHA Practice Portal по артикуляции/фонологии)
       - id: method_piggybank
         title: "Методическая копилка"
         kind: digest
         cadence: "WEEKLY"
         byweekday: ["SA"]
-        sources: ["logomag_lib_latest", "logoportal_latest", "logopedy_articles_latest"]
+        sources:
+          - "logomag_lib_latest"
+          - "logoportal_latest"
+          - "logopedy_articles_latest"
+          - "asha_practice_portal_articulation_phonology"
+          - "asha_practice_portal_multilingual_service_delivery"
         format: "pro_friendly"
         media: ["image_card"]

@@ -1,4 +1,4 @@
-version: 1.5
+version: 2.2
 
 channel:
   locale: "ru-RU"
@@ -12,43 +12,42 @@ branding:
   card_accent: "#4A90E2"
 
 publishing:
-  max_posts_per_run: 3
-  max_posts_per_audience_per_run: 2
+  # ✅ чтобы была ровно 1 рубрика в день
+  max_posts_per_run: 1
+  max_posts_per_audience_per_run: 1
+
   drafts_mode: "post_to_drafts_chat"   # skip | post_to_drafts_chat
   drafts_chat_id_env: "TELEGRAM_DRAFTS_CHAT_ID"
-  dashboard_chat: "main"    # main | drafts
+
+  # defense-in-depth (хотфикс в коде все равно принудительно шлёт dashboard в drafts)
+  dashboard_chat: "drafts"    # main | drafts
   dashboard_title: "Quality dashboard недели"
 
 audiences:
   parents:
     title_suffix: "• для родителей"
     rubrics:
+      # ПОНЕДЕЛЬНИК: Совет логопеда
       - id: tip_of_day
         title: "Совет логопеда дня"
         kind: advice
-        cadence: "DAILY"
+        cadence: "WEEKLY"
+        byweekday: ["MO"]
         sources: ["logopediya_documents_rss", "logopediya_ppt_rss", "logorina_latest", "logopedy_articles_latest"]
         format: "tip_of_day"
         media: ["image_card"]
 
-      - id: quality_dashboard
-        title: "Quality dashboard"
-        kind: dashboard
-        cadence: "WEEKLY"
-        byweekday: ["SU"]
-        sources: []
-        format: "quality_dashboard"
-        media: ["text_only"]
-
+      # ВТОРНИК: Игры
       - id: play_and_speak
         title: "Играем и говорим"
         kind: advice
         cadence: "WEEKLY"
-        byweekday: ["TU", "SA"]
+        byweekday: ["TU"]
         sources: ["logorina_latest", "logopedy_articles_latest"]
         format: "exercise_steps"
         media: ["image_card"]
 
+      # СРЕДА: Миф/Факт
       - id: myth_fact
         title: "Миф / Факт"
         kind: digest
@@ -58,6 +57,7 @@ audiences:
         format: "myth_fact"
         media: ["image_card"]
 
+      # ЧЕТВЕРГ: Русский за границей
       - id: bilingual_corner
         title: "Русский за границей"
         kind: bilingual
@@ -67,41 +67,45 @@ audiences:
         format: "bilingual_parents"
         media: ["image_card"]
 
-      - id: age_norms
-        title: "Возрастная норма"
-        kind: norms
-        cadence: "WEEKLY"
-        byweekday: ["FR"]
-        sources: ["logopediya_documents_rss", "logoportal_latest"]
-        format: "age_norms"
-        media: ["image_card"]
-
+      # ПЯТНИЦА: Вопрос недели (позже замените на аудио-пятницу tts_audio)
       - id: question_week
         title: "Вопрос недели"
         kind: question_week
         cadence: "WEEKLY"
-        byweekday: ["SU"]
+        byweekday: ["FR"]
         sources: ["asha_multilingual_public"]
         format: "question_week"
         media: ["image_card"]
 
+      # ВОСКРЕСЕНЬЕ: Возрастная норма (как в исходном ТЗ)
+      - id: age_norms
+        title: "Возрастная норма"
+        kind: norms
+        cadence: "WEEKLY"
+        byweekday: ["SU"]
+        sources: ["logopediya_documents_rss", "logoportal_latest"]
+        format: "age_norms"
+        media: ["image_card"]
+
+      # Технический отчёт (всегда в drafts), не должен "съедать" лимит постов дня
+      - id: quality_dashboard
+        title: "Quality dashboard"
+        kind: dashboard
+        cadence: "WEEKLY"
+        byweekday: ["SU"]
+        sources: []
+        format: "quality_dashboard"
+        media: ["text_only"]
+
   pros:
     title_suffix: "• для специалистов"
     rubrics:
+      # СУББОТА: Методическая копилка (как в исходном ТЗ)
       - id: method_piggybank
         title: "Методическая копилка"
         kind: digest
         cadence: "WEEKLY"
-        byweekday: ["SU"]
+        byweekday: ["SA"]
         sources: ["logomag_lib_latest", "logoportal_latest", "logopedy_articles_latest"]
         format: "pro_friendly"
-        media: ["image_card"]
-
-      - id: case_digest
-        title: "Кейс-дайджест (анонимно)"
-        kind: digest
-        cadence: "WEEKLY"
-        byweekday: ["MO"]
-        sources: ["logoportal_latest", "logomag_lib_latest"]
-        format: "case_digest"
         media: ["image_card"]

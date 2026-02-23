@@ -11,6 +11,7 @@ Publisher (cron/GitHub Actions)
   Он отправляется ТОЛЬКО в TELEGRAM_DRAFTS_CHAT_ID.
   Если TELEGRAM_DRAFTS_CHAT_ID не задан — job падает (fail-closed).
 - Основные посты отправляются в TELEGRAM_CHAT_ID (который workflow может подменять: main/drafts/test).
+- Ротация рубрик: cadence/byweekday из config/rubrics.yml строго учитываются.
 """
 
 import os
@@ -45,16 +46,15 @@ STATE_DIR = ROOT / ".state"
 ASSETS_DIR = ROOT / "assets"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/2.1.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/2.2.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()               # main publish target (can be overridden by workflow)
-TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip() # technical channel (dashboard, questions, etc.)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()               # publish target (workflow may override)
+TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip() # technical channel
 
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
 
-# Telegram HTML parse mode (we rely on <a href=\"\"> links to hide scary URLs)
 TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()  # HTML | Markdown | ""
 
 REWRITE_PROVIDER = os.getenv("REWRITE_PROVIDER", "auto").strip().lower()  # none|auto|groq|gemini
@@ -67,9 +67,6 @@ POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 PARENTS_MAX_BODY_CHARS = int(os.getenv("PARENTS_MAX_BODY_CHARS", "900"))
 PROS_MAX_BODY_CHARS = int(os.getenv("PROS_MAX_BODY_CHARS", "1050"))
 
-MIN_MEANING_BULLETS = int(os.getenv("MIN_MEANING_BULLETS", "2"))
-MIN_PRACTICE_STEPS = int(os.getenv("MIN_PRACTICE_STEPS", "2"))
-
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 
 INSECURE_TLS_DOMAINS = [
@@ -80,10 +77,10 @@ INSECURE_TLS_DOMAINS = [
 
 
 # =========================
-# Services imports (you already have these in src/services/)
+# Services imports (already in repo)
 # =========================
 
-from src.services.image_builder import render_image_card  # PIL card builder with textwrap wrapping
+from src.services.image_builder import render_image_card  # card builder with textwrap wrapping
 from src.services.llm_generator import (
     enforce_total_chars_keep_structure as _enforce_total_chars_keep_structure,
     has_required_structure_plain_v3 as _has_required_structure_plain_v3,
@@ -123,6 +120,29 @@ def iso_week_key(dt: datetime) -> str:
     return f"{y}-W{w:02d}"
 
 
+def is_due(rubric: Dict[str, Any], now: datetime) -> bool:
+    """
+    Weekly matrix support (cadence/byweekday):
+      - byweekday acts as a filter ALWAYS if present (even when cadence=DAILY).
+      - cadence:
+          DAILY  -> eligible every day (subject to byweekday)
+          WEEKLY -> eligible only on byweekday; if byweekday absent -> eligible every day (avoid in config)
+    """
+    cadence = (rubric.get("cadence") or "DAILY").upper()
+    byweekday = rubric.get("byweekday") or []
+
+    if byweekday:
+        map_wd = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+        if map_wd[now.weekday()] not in set(byweekday):
+            return False
+
+    if cadence == "DAILY":
+        return True
+    if cadence == "WEEKLY":
+        return True  # already filtered by byweekday if provided
+    return False
+
+
 def safe_domain(url: str) -> str:
     try:
         return (urlparse(url).netloc or "").lower()
@@ -147,33 +167,6 @@ def norm_title_key(s: str) -> str:
     s = re.sub(r"\b(логопед|логопедия|логопедический|упражнение|упражнения)\b", "", s).strip()
     s = re.sub(r"\s+", " ", s).strip()
     return s[:180]
-
-
-def utf8_clip(text: str, max_bytes: int, add_ellipsis: bool = True) -> str:
-    s = (text or "")
-    b = s.encode("utf-8")
-    if len(b) <= max_bytes:
-        return s
-    cut = b[:max_bytes]
-    while cut:
-        try:
-            out = cut.decode("utf-8")
-            break
-        except UnicodeDecodeError:
-            cut = cut[:-1]
-    else:
-        return "…"
-
-    out = out.rstrip(" .,:;—-")
-    if add_ellipsis:
-        ell = "…"
-        while out and len((out + ell).encode("utf-8")) > max_bytes:
-            out = out[:-1].rstrip(" .,:;—-")
-        if len((out + ell).encode("utf-8")) <= max_bytes:
-            out = out + ell
-    while len(out.encode("utf-8")) > max_bytes and out:
-        out = out[:-1]
-    return out.strip() or "…"
 
 
 # =========================
@@ -248,25 +241,6 @@ def extract_article_summary(soup: BeautifulSoup) -> str:
     return norm_space(" ".join(paras))[:420]
 
 
-def is_scientific_or_methodical(domain: str, title: str, summary: str, quality_cfg: Dict[str, Any]) -> Tuple[bool, str]:
-    scientific_domains = [d.lower() for d in (quality_cfg.get("scientific_domains") or [])]
-    if any(domain == d or domain.endswith("." + d) for d in scientific_domains):
-        return True, "scientific_domain"
-    blob = f"{title}\n{summary}".lower()
-    kws = [k.lower() for k in (quality_cfg.get("methodical_keywords") or [])]
-    hits = sum(1 for k in kws if k and k in blob)
-    if hits >= 2:
-        return True, f"methodical_kw_hits:{hits}"
-    return False, f"not_methodical_hits:{hits}"
-
-
-def source_type_label_from_factcheck(factcheck_reason: str) -> str:
-    r = (factcheck_reason or "").lower()
-    if "scientific_domain" in r:
-        return "научный/академический источник"
-    return "методический/профессиональный материал"
-
-
 def enrich_article(item: Dict[str, str]) -> Dict[str, str]:
     link = item.get("link", "")
     canon, soup = get_canonical_and_soup(link)
@@ -281,6 +255,77 @@ def enrich_article(item: Dict[str, str]) -> Dict[str, str]:
     return item
 
 
+# ---------------------------
+# html_site parsers
+# ---------------------------
+
+def _abs(base_url: str, href: str) -> str:
+    href = (href or "").strip()
+    if not href:
+        return ""
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return urljoin(base_url, href)
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    return urljoin(base_url, href)
+
+
+def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: Optional[str] = None) -> List[Dict[str, str]]:
+    pat = re.compile(href_re) if href_re else None
+    out: List[Dict[str, str]] = []
+    for a in soup.select(selector):
+        href = _abs(base_url, a.get("href", ""))
+        if not href:
+            continue
+        if pat and not pat.search(href):
+            continue
+        title = norm_space(a.get_text(" ", strip=True))
+        if not title or len(title) < 8:
+            continue
+        out.append({"title": title, "link": href, "summary": ""})
+    # dedupe
+    seen: set[str] = set()
+    uniq: List[Dict[str, str]] = []
+    for it in out:
+        if it["link"] in seen:
+            continue
+        seen.add(it["link"])
+        uniq.append(it)
+    return uniq
+
+
+def parse_logorina_news(url: str, html_text: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    return _collect_links(url, soup, "article a, div.news a, a", r"/news/[\w\-]+/?$")[:80]
+
+
+def parse_logomag_lib(url: str, html_text: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    return _collect_links(url, soup, "main a, div.content a, a", r"/lib/[^\"']+")[:80]
+
+
+def parse_logoportal_articles(url: str, html_text: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    return _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")[:80]
+
+
+def parse_logopedy_articles(url: str, html_text: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    items = _collect_links(url, soup, "div.content a, main a, a", r"logoped-article|logoped-literature|portal/[^#]+")
+    items.sort(key=lambda x: len(x["title"]), reverse=True)
+    return items[:80]
+
+
+SITE_PARSERS = {
+    "logorina_news": parse_logorina_news,
+    "logomag_lib": parse_logomag_lib,
+    "logoportal_articles": parse_logoportal_articles,
+    "logopedy_articles": parse_logopedy_articles,
+}
+
+
 def fetch_rss(url: str) -> List[Dict[str, str]]:
     d = feedparser.parse(url)
     out: List[Dict[str, str]] = []
@@ -293,10 +338,32 @@ def fetch_rss(url: str) -> List[Dict[str, str]]:
     return out
 
 
+def fetch_static(urls: List[str]) -> List[Dict[str, str]]:
+    return [{"title": "", "link": u, "summary": ""} for u in (urls or [])]
+
+
+def fetch_html_site(url: str, parser_name: str) -> List[Dict[str, str]]:
+    r = requests.get(url, headers=HEADERS, timeout=30, verify=_verify_for_url(url))
+    r.raise_for_status()
+    parser = SITE_PARSERS.get(parser_name)
+    if not parser:
+        raise ValueError(f"Unknown site parser: {parser_name}")
+    items = parser(url, r.text)
+    # dedupe by link
+    uniq: Dict[str, Dict[str, str]] = {}
+    for it in items:
+        uniq[it["link"]] = it
+    return list(uniq.values())
+
+
 def fetch_source(src: Source) -> List[Dict[str, str]]:
     if src.type == "rss":
         return fetch_rss(src.url or "")
-    raise ValueError(f"Unsupported source type in this trimmed publisher: {src.type}")
+    if src.type == "html_site":
+        return fetch_html_site(src.url or "", src.parser or "")
+    if src.type == "static":
+        return fetch_static(src.urls or [])
+    raise ValueError(f"Unsupported source type: {src.type}")
 
 
 # =========================
@@ -318,28 +385,37 @@ def save_state(name: str, data: Any) -> None:
 
 
 # =========================
-# Post (minimal v3.1)
+# Post composition (minimal but rubric-aware)
 # =========================
-
-def _is_sovet_dnya_format(rubric_format: str) -> bool:
-    rf = (rubric_format or "").strip().lower()
-    return ("совет" in rf) or ("tip" in rf and "day" in rf)
-
 
 def make_nav_strip(rubric_format: str) -> List[str]:
     rf = (rubric_format or "").strip().lower()
-    if rf == "bilingual_parents":
+    if rf in ("bilingual_parents", "myth_fact"):
         return [
-            "🧠 Навык: переключение без тревоги",
-            "🎯 Цель: сеть русского языка",
-            "📌 Подсказка: повторяйте мягко по-русски",
-            "📏 Критерий прогресса: русская фраза в быту",
+            "🧠 Навык: уверенная русская фраза",
+            "🎯 Цель: устойчивость билингва",
+            "📌 Подсказка: мягко моделируйте",
+            "📏 Критерий прогресса: фраза без подсказки",
+        ]
+    if rf in ("age_norms",):
+        return [
+            "🧠 Навык: понимание и фразы",
+            "🎯 Цель: возрастная динамика",
+            "📌 Подсказка: наблюдайте 2–4 недели",
+            "📏 Критерий прогресса: новые слова/фразы",
+        ]
+    if rf in ("exercise_steps", "games_vocab"):
+        return [
+            "🧠 Навык: слова и действия",
+            "🎯 Цель: лексика и грамматика",
+            "📌 Подсказка: хвалите попытку",
+            "📏 Критерий прогресса: 2–3 слова самостоятельно",
         ]
     return [
-        "🧠 Навык: глаголы в короткой фразе",
-        "🎯 Цель: лексика и грамматика",
-        "📌 Подсказка: моделируйте фразу, хвалите",
-        "📏 Критерий прогресса: 2–3 слова самостоятельно",
+        "🧠 Навык: речь в короткой фразе",
+        "🎯 Цель: связность и точность",
+        "📌 Подсказка: коротко, без давления",
+        "📏 Критерий прогресса: легче говорит сам",
     ]
 
 
@@ -351,6 +427,10 @@ def friendly_source_label(url: str) -> str:
         return "Материалы Logopedy.ru"
     if "logoportal" in dom:
         return "Материалы Logoportal"
+    if "asha" in dom:
+        return "ASHA (multilingual)"
+    if "ncbi" in dom or "pubmed" in dom:
+        return "PubMed/PMC"
     return dom
 
 
@@ -377,38 +457,56 @@ def compose_post_plain_v31(
     title_suffix: str,
 ) -> Tuple[str, Dict[str, Any]]:
     link = picked.get("canonical") or picked.get("link", "")
+    picked_title = picked.get("article_title") or picked.get("title") or ""
+    summary = picked.get("article_summary") or picked.get("summary") or ""
+
     disclaimer = channel_cfg.get("disclaimer", "") or ""
     tags = " ".join(channel_cfg.get("hashtags", []) or []).strip()
 
     aud = (audience or "parents").strip().lower()
     rf = (rubric_format or "").strip().lower()
 
-    if aud == "parents":
-        hook = "Малыш избегает занятий? Сделаем это игрой на 5–7 минут — без борьбы и «переделывай»."
+    # Hooks vary by rubric
+    if rf == "myth_fact":
+        hook = "Миф о билингвизме звучит убедительно — но часто он просто пугает родителей. Разберём спокойно, по фактам."
+    elif rf == "age_norms":
+        hook = "Возрастные нормы — это ориентир, а не экзамен. Важно смотреть на динамику и контекст."
+    elif rf == "bilingual_parents":
+        hook = "Русский за границей — не про «идеальность», а про устойчивые привычки и тёплую практику в быту."
+    elif rf == "exercise_steps":
+        hook = "Сделаем 5–7 минут речи игрой: коротко, легко, без «переделывай»."
     else:
-        hook = "Короткий протокол на 5–7 минут + критерий прогресса."
+        hook = "Короткая практика на 5–7 минут помогает, если делать её мягко и регулярно."
 
+    # Practice: 2 steps max (as per your prompt rule)
     practice = [
         "2–3 минуты: повтор слога/слова в игре (хвалим попытку).",
         "2–3 минуты: 6–10 глаголов по картинкам (кто что делает?).",
-    ][:2]
+    ]
 
-    age_tag = "3–6 лет" if not _is_sovet_dnya_format(rf) else "3–5 лет"
+    age_tag = "3–6 лет"
+    if "age" in (picked.get("notes") or "").lower():
+        age_tag = "6–9 лет"
 
     src_label = friendly_source_label(link)
-    source_lines = [f"Источник: {src_label}", "Основа: рекомендации логопедов", f"🔗 {link}"]
+    source_lines = [
+        f"Источник: {src_label}",
+        "Основа: рекомендации логопедов",
+        f"🔗 {link}",
+    ]
 
     lines: List[str] = []
     lines.append(f"{rubric_title} {title_suffix}".strip())
     lines.append(f"👶 Возраст: {age_tag}".strip())
     lines.append("")
     lines.append(hook)
-    lines.append("")
-    lines.append("• Регулярность важнее идеальности.")
-    lines.append("• Комфорт → мотивация → точность.")
+    if picked_title:
+        lines.append(clamp_text(picked_title, 150))
+    if summary:
+        lines.append(clamp_text(summary, 220))
     lines.append("")
     lines.append("Практика на сегодня (5–7 минут)")
-    for i, x in enumerate(practice, start=1):
+    for i, x in enumerate(practice[:2], start=1):
         lines.append(f"{i}) {x}")
     lines.append("")
     lines.extend(make_nav_strip(rf))
@@ -425,6 +523,7 @@ def compose_post_plain_v31(
     raw_plain = "\n".join(lines).strip()
     raw_plain = _enforce_total_chars_keep_structure(raw_plain, POST_MAX_CHARS)
 
+    # Add disclaimer/tags only if they fit
     if disclaimer:
         cand = (raw_plain + "\n\n" + f"ℹ️ {norm_space(disclaimer)}").strip()
         if len(cand) <= POST_MAX_CHARS:
@@ -437,7 +536,7 @@ def compose_post_plain_v31(
     final_plain, used, note = _rewrite_if_enabled(raw_plain, aud, rf)
     final_plain = _enforce_total_chars_keep_structure(final_plain, POST_MAX_CHARS)
 
-    meta: Dict[str, Any] = {"ok": True, "age": age_tag, "rewrite_used": used, "rewrite_note": note}
+    meta: Dict[str, Any] = {"ok": True, "rewrite_used": used, "rewrite_note": note}
     if not _has_required_structure_plain_v3(final_plain):
         final_plain = raw_plain
         meta["rewrite_used"] = False
@@ -506,12 +605,14 @@ def build_card_theses_from_plain_v3(plain_post: str) -> Tuple[List[str], str]:
     age = ""
     if len(lines) >= 2 and lines[1].strip().startswith("👶 Возраст:"):
         age = lines[1].split(":", 1)[1].strip()
+
     bullets = [ln.strip() for ln in lines if ln.strip().startswith("• ")][:2]
     warn = ""
     for ln in lines:
         if ln.strip().startswith("⚠️"):
             warn = ln.strip()
             break
+
     a = clamp_text(bullets[0][2:].strip() if bullets else "Короткая практика без давления.", 92)
     b = clamp_text(bullets[1][2:].strip() if len(bullets) > 1 else "5 минут в игре — каждый день.", 92)
     c = clamp_text(warn.lstrip("⚠️").strip() if warn else "Если нет прогресса 4–6 недель — специалист.", 92)
@@ -531,18 +632,15 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
     return r.json()
 
 
-def tg_request_safe(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    return tg_request(method, data=data, files=files)
-
-
 def send_message(chat_id: str, html_text: str) -> None:
     data = {"chat_id": chat_id, "text": html_text}
     if TELEGRAM_PARSE_MODE:
         data["parse_mode"] = TELEGRAM_PARSE_MODE
-    tg_request_safe("sendMessage", data=data)
+    tg_request("sendMessage", data=data)
 
 
 def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
+    # If full post fits caption bytes -> send photo with caption; else photo + separate text.
     plain_bytes = len((plain_post or "").encode("utf-8"))
 
     if plain_bytes <= TG_CAPTION_MAX_BYTES:
@@ -551,13 +649,13 @@ def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_ful
             if TELEGRAM_PARSE_MODE:
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
             with card_path.open("rb") as f:
-                tg_request_safe("sendPhoto", data=data, files={"photo": f})
+                tg_request("sendPhoto", data=data, files={"photo": f})
             return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] sendPhoto(full caption) failed -> fallback photo+text: {e}")
 
     with card_path.open("rb") as f:
-        tg_request_safe("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": f})
+        tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": f})
     send_message(chat_id, html_full_post)
 
 
@@ -620,99 +718,117 @@ def run() -> None:
     now = get_local_now(tzname)
     week_key = iso_week_key(now)
 
-    sources, quality_cfg = load_sources()
-
+    sources, _quality_cfg = load_sources()
     used_canon = set(load_state("used_canonical.json", []))
     used_titles = set(load_state("used_titles.json", []))
 
     pub_cfg = rub_cfg.get("publishing", {}) or {}
-    max_posts = int(pub_cfg.get("max_posts_per_run", 3))
+    max_posts = int(pub_cfg.get("max_posts_per_run", 1))
 
     stats = load_weekly_stats()
 
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
-    aud_cfg = audiences_cfg.get("parents", {}) or {}
-    rubrics = aud_cfg.get("rubrics", []) or []
+    if AUDIENCE == "both":
+        aud_list = ["parents", "pros"]
+    elif AUDIENCE in ("parents", "pros"):
+        aud_list = [AUDIENCE]
+    else:
+        aud_list = ["parents"]
 
     posted = 0
 
-    for rubric in rubrics:
+    for aud in aud_list:
         if posted >= max_posts:
             break
 
-        # HOTFIX: dashboard tech only
-        if (rubric.get("format") or "").strip().lower() == "quality_dashboard":
-            dash_title = pub_cfg.get("dashboard_title", "Quality dashboard недели")
-            dashboard_html = format_dashboard(stats, week_key, dash_title)
+        aud_cfg = audiences_cfg.get(aud, {}) or {}
+        title_suffix = (aud_cfg.get("title_suffix", "") or "").strip()
+        rubrics = aud_cfg.get("rubrics", []) or []
 
-            if not TELEGRAM_DRAFTS_CHAT_ID:
-                raise RuntimeError("TELEGRAM_DRAFTS_CHAT_ID is missing. Refusing to post quality dashboard to public channel.")
+        for rubric in rubrics:
+            if posted >= max_posts:
+                break
+
+            # ✅ respect schedule
+            if not is_due(rubric, now):
+                continue
+
+            # ✅ HOTFIX: dashboard always to drafts
+            if (rubric.get("format") or "").strip().lower() == "quality_dashboard":
+                dash_title = pub_cfg.get("dashboard_title", "Quality dashboard недели")
+                dashboard_html = format_dashboard(stats, week_key, dash_title)
+
+                if not TELEGRAM_DRAFTS_CHAT_ID:
+                    raise RuntimeError(
+                        "TELEGRAM_DRAFTS_CHAT_ID is missing. Refusing to post quality dashboard to public channel."
+                    )
+
+                if DRY_RUN:
+                    print("[DRY_RUN] dashboard would be posted to DRAFTS chat only.")
+                else:
+                    send_message(TELEGRAM_DRAFTS_CHAT_ID, dashboard_html)
+
+                time.sleep(0.4)
+                continue
+
+            # collect items
+            all_items: List[Dict[str, str]] = []
+            for sid in rubric.get("sources", []) or []:
+                src = sources.get(sid)
+                if not src:
+                    continue
+                try:
+                    all_items.extend(fetch_source(src))
+                except Exception as e:
+                    print(f"[WARN] source {sid} failed: {e}")
+
+            # pick first not used
+            picked = None
+            for it0 in all_items[:80]:
+                it = enrich_article(dict(it0))
+                canon = it.get("canonical") or it.get("link", "")
+                if not canon or canon in used_canon:
+                    continue
+                raw_title = it.get("article_title") or it.get("title") or ""
+                tkey = norm_title_key(raw_title)
+                if tkey and tkey in used_titles:
+                    continue
+                picked = it
+                break
+
+            if not picked:
+                continue
+
+            title = rubric.get("title", "Рубрика")
+            plain_post, meta = compose_post_plain_v31(title, rubric.get("format", ""), aud, channel_cfg, picked, title_suffix)
+            html_full_post = render_plain_to_telegram_html(plain_post)
+
+            theses, age_tag = build_card_theses_from_plain_v3(plain_post)
+            card = render_image_card(title, theses, branding, age_tag=age_tag)
 
             if DRY_RUN:
-                print("[DRY_RUN] dashboard would be posted to DRAFTS chat only.")
+                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                out_dir = STATE_DIR / "dry_run" / ts
+                out_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(card, out_dir / f"{posted+1:02d}_{aud}_card.png")
+                (out_dir / f"{posted+1:02d}_{aud}_plain.txt").write_text(plain_post, encoding="utf-8")
+                (out_dir / f"{posted+1:02d}_{aud}_html.txt").write_text(html_full_post, encoding="utf-8")
             else:
-                send_message(TELEGRAM_DRAFTS_CHAT_ID, dashboard_html)
-            time.sleep(0.5)
-            continue
+                if not TELEGRAM_CHAT_ID:
+                    raise RuntimeError("TELEGRAM_CHAT_ID is missing (publish target).")
+                send_post_with_card(TELEGRAM_CHAT_ID, card, plain_post, html_full_post)
 
-        # collect items
-        all_items: List[Dict[str, str]] = []
-        for sid in rubric.get("sources", []) or []:
-            src = sources.get(sid)
-            if not src:
-                continue
-            try:
-                all_items.extend(fetch_source(src))
-            except Exception as e:
-                print(f"[WARN] source {sid} failed: {e}")
+                canon = picked.get("canonical") or picked.get("link", "")
+                if canon:
+                    used_canon.add(canon)
+                tkey = norm_title_key(picked.get("article_title") or picked.get("title") or "")
+                if tkey:
+                    used_titles.add(tkey)
 
-        # pick first not used (trimmed selection for sprint)
-        picked = None
-        for it0 in all_items[:30]:
-            it = enrich_article(dict(it0))
-            canon = it.get("canonical") or it.get("link", "")
-            if not canon or canon in used_canon:
-                continue
-            raw_title = it.get("article_title") or it.get("title") or ""
-            tkey = norm_title_key(raw_title)
-            if tkey and tkey in used_titles:
-                continue
-            picked = it
-            break
+                bump_weekly(stats, week_key, "passed", 1)
 
-        if not picked:
-            continue
-
-        title = rubric.get("title", "Рубрика")
-        title_suffix = (aud_cfg.get("title_suffix", "") or "").strip()
-        plain_post, meta = compose_post_plain_v31(title, rubric.get("format", ""), "parents", channel_cfg, picked, title_suffix)
-        html_full_post = render_plain_to_telegram_html(plain_post)
-
-        theses, age_tag = build_card_theses_from_plain_v3(plain_post)
-        card = render_image_card(title, theses, branding, age_tag=age_tag)
-
-        if DRY_RUN:
-            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            out_dir = STATE_DIR / "dry_run" / ts
-            out_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(card, out_dir / f"{posted+1:02d}_card.png")
-            (out_dir / f"{posted+1:02d}_plain.txt").write_text(plain_post, encoding="utf-8")
-            (out_dir / f"{posted+1:02d}_html.txt").write_text(html_full_post, encoding="utf-8")
-        else:
-            if not TELEGRAM_CHAT_ID:
-                raise RuntimeError("TELEGRAM_CHAT_ID is missing (publish target)." )
-            send_post_with_card(TELEGRAM_CHAT_ID, card, plain_post, html_full_post)
-            bump_weekly(stats, week_key, "passed", 1)
-
-        canon = picked.get("canonical") or picked.get("link", "")
-        if canon and not DRY_RUN:
-            used_canon.add(canon)
-        tkey = norm_title_key(picked.get("article_title") or picked.get("title") or "")
-        if tkey and not DRY_RUN:
-            used_titles.add(tkey)
-
-        posted += 1
-        time.sleep(1.0)
+            posted += 1
+            time.sleep(1.0)
 
     if not DRY_RUN:
         save_state("used_canonical.json", sorted(list(used_canon))[-6000:])

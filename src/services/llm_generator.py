@@ -1,35 +1,56 @@
 from __future__ import annotations
 
-import os
+"""
+LLM generator for Logopedia channel.
+
+Goal:
+- Different rubric => different system instructions => different content.
+- Keep posts concise (<= POST_MAX_CHARS) and avoid hallucinations:
+  use ONLY the provided EVIDENCE text for facts/exercises.
+
+Providers:
+- groq (OpenAI-compatible endpoint)
+- gemini (Google Generative Language API)
+- auto: try groq, fallback to gemini
+- none: do not call LLM (will return empty; publisher should try another candidate or skip)
+
+This module is intentionally dependency-light (requests only).
+"""
+
 import re
-from typing import List, Tuple
-
 import requests
-
-# Exposed constants (import these from main.py)
-REQUIRED_HEADINGS_V3 = [
-    "Практика на сегодня (5–7 минут)",
-    "Норма / когда нужен специалист",
-    "Источник",
-]
-
-NAV_KEYS = [
-    "🧠 Навык:",
-    "🎯 Цель:",
-    "📌 Подсказка:",
-    "📏 Критерий прогресса:",
-]
+from typing import Dict, List, Tuple
 
 
 def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def clamp_text(s: str, max_len: int) -> str:
-    s = norm_space(s)
-    if len(s) <= max_len:
-        return s
-    return (s[:max_len].rstrip(" .,:;—-") + "…").strip()
+def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
+    """Hard truncate while trying not to cut mid-line in structured posts."""
+    t = (text or "").strip()
+    if len(t) <= max_chars:
+        return t
+    cut = t[:max_chars]
+    if "\n" in cut:
+        cut = cut[:cut.rfind("\n")].rstrip()
+    return (cut.rstrip(" .,:;—-") + "…").strip()
+
+
+def has_required_structure_plain_v3(text: str) -> bool:
+    """Parents-style structure validator."""
+    lines = [(x or "").rstrip("\n") for x in (text or "").splitlines()]
+    if len(lines) < 6:
+        return False
+    if not (lines[1].strip().startswith("👶 Возраст:")):
+        return False
+    sset = set([x.strip() for x in lines])
+    for h in ["Практика на сегодня (5–7 минут)", "Норма / когда нужен специалист", "Источник"]:
+        if h not in sset:
+            return False
+    if not any(x.strip().startswith("💬 ") for x in lines):
+        return False
+    return True
 
 
 def _is_quota_error(status: int, text: str) -> bool:
@@ -37,18 +58,16 @@ def _is_quota_error(status: int, text: str) -> bool:
     return status in (402, 429) or any(k in t for k in ["quota", "rate limit", "exceeded", "insufficient_quota", "resource_exhausted"])
 
 
-def rewrite_with_groq(prompt: str, api_key: str) -> str:
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY missing")
+def _groq_chat(prompt: str, api_key: str) -> str:
     r = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={
             "model": "llama-3.1-8b-instant",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.35,
+            "temperature": 0.25,
         },
-        timeout=45,
+        timeout=55,
     )
     if r.status_code != 200 and _is_quota_error(r.status_code, r.text):
         raise RuntimeError(f"groq_quota:{r.status_code}")
@@ -56,14 +75,12 @@ def rewrite_with_groq(prompt: str, api_key: str) -> str:
     return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
-def rewrite_with_gemini(prompt: str, api_key: str) -> str:
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY missing")
+def _gemini_generate(prompt: str, api_key: str) -> str:
     r = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
         params={"key": api_key},
         json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=45,
+        timeout=55,
     )
     if r.status_code != 200 and _is_quota_error(r.status_code, r.text):
         raise RuntimeError(f"gemini_quota:{r.status_code}")
@@ -71,203 +88,202 @@ def rewrite_with_gemini(prompt: str, api_key: str) -> str:
     return (r.json()["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
 
 
-def aud_limits(audience: str, parents_max: int, pros_max: int, post_max: int) -> int:
-    a = (audience or "parents").strip().lower()
-    per = parents_max if a == "parents" else pros_max
-    return min(int(per), int(post_max))
-
-
-def _count_words_3_5(s: str) -> bool:
-    part = (s.split(":", 1)[1] if ":" in s else "").strip()
-    words = [w for w in re.split(r"\s+", part) if w]
-    return 3 <= len(words) <= 5
-
-
-def has_required_structure_plain_v3(text: str) -> bool:
-    lines = [(x or "").rstrip("\n") for x in (text or "").splitlines()]
-    if len(lines) < 8:
-        return False
-
-    if not (len(lines) >= 2 and lines[1].strip().startswith("👶 Возраст:")):
-        return False
-
-    sset = set([x.strip() for x in lines])
-    for h in REQUIRED_HEADINGS_V3:
-        if h not in sset:
-            return False
-
-    if not any(x.strip().startswith("💬 ") for x in lines):
-        return False
-
-    nav_lines = [x.strip() for x in lines if any(x.strip().startswith(k) for k in NAV_KEYS)]
-    if len(nav_lines) != 4:
-        return False
-    for need, got in zip(NAV_KEYS, nav_lines):
-        if not got.startswith(need):
-            return False
-        if not _count_words_3_5(got):
-            return False
-
-    if not any(re.match(r"^\s*1\)\s+\S+", x) for x in lines):
-        return False
-
-    return True
-
-
-def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
-    t = (text or "").strip()
-    if len(t) <= max_chars:
-        return t
-
-    lines = [(x or "").rstrip("\n") for x in t.splitlines()]
-
-    def _looks_like_tags(line: str) -> bool:
-        s = line.strip()
-        return s.startswith("#") or (" #" in s)
-
-    while lines and _looks_like_tags(lines[-1]):
-        lines.pop()
-    while lines and lines[-1].strip().startswith("ℹ️ "):
-        lines.pop()
-
-    clamped: List[str] = []
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if i == 0:
-            clamped.append(clamp_text(s, 90))
-            continue
-        if i == 1 and s.startswith("👶 Возраст:"):
-            clamped.append(clamp_text(s, 28))
-            continue
-        if s.startswith("💬 "):
-            clamped.append("💬 " + clamp_text(s[2:].strip(), 120))
-            continue
-        if s.startswith("• "):
-            clamped.append("• " + clamp_text(s[2:].strip(), 120))
-            continue
-        if re.match(r"^\d+\)\s+", s):
-            n, rest = s.split(")", 1)
-            clamped.append(f"{n}) {clamp_text(rest.strip(), 140)}")
-            continue
-        if s.startswith(("✅", "⚠️")):
-            clamped.append(s[0] + clamp_text(s[1:].strip(), 160))
-            continue
-        if s.startswith("🔗 "):
-            clamped.append(s)  # keep link line, it will be hidden in HTML renderer
-            continue
-        if any(s == h for h in REQUIRED_HEADINGS_V3) or any(s.startswith(k) for k in NAV_KEYS):
-            clamped.append(s)
-            continue
-        clamped.append(clamp_text(line, 220))
-
-    out = "\n".join(clamped).strip()
-    if len(out) <= max_chars:
-        return out
-
-    cut = out[:max_chars]
-    if "\n" in cut:
-        cut = cut[:cut.rfind("\n")].rstrip()
-    return (cut.rstrip(" .,:;—-") + "…").strip()
-
-
-def build_rewrite_prompt_v3(body: str, max_chars: int, rubric_format: str = "") -> str:
+def _rubric_profile(rubric_format: str, audience: str) -> Dict[str, str]:
     rf = (rubric_format or "").strip().lower()
-    is_tip = ("совет" in rf) or ("tip" in rf and "day" in rf)
+    aud = (audience or "parents").strip().lower()
 
-    base_role = (
-        "Роль: эмпатичный, современный логопед. Ты дружелюбно общаешься с уставшими родителями, "
-        "но пишешь точно и аккуратно.\n"
+    if aud != "pros":
+        if rf in ("tip_of_day", "tip_day", "daily_tip"):
+            return {"name": "Совет дня", "focus": "одна конкретная мини-практика из источника + как сделать без сопротивления"}
+        if rf in ("exercise_steps", "games_vocab"):
+            return {"name": "Играем и говорим", "focus": "описание одной игры из источника, встроенной в быт (кухня/дорога), 2 шага"}
+        if rf == "myth_fact":
+            return {"name": "Миф/Факт", "focus": "1 миф о билингвизме, который опровергается источником, и короткий факт по доказательной базе"}
+        if rf == "bilingual_parents":
+            return {"name": "Русский за границей", "focus": "боли экспатов: code-switching/отказ говорить по-русски/мотивация"}
+        if rf == "question_week":
+            return {"name": "Вопрос недели", "focus": "вопрос + короткий ответ по источнику + вопрос аудитории"}
+        if rf == "age_norms":
+            return {"name": "Возрастная норма", "focus": "короткие ориентиры нормы по возрасту (из источника), 3–5 пунктов"}
+        return {"name": "Пост", "focus": "краткая адаптация из источника"}
+
+    return {"name": "Методическая копилка", "focus": "структурированное саммари: цель/методы/выводы/практическая значимость"}
+
+
+def _nav_strip_rules() -> str:
+    return (
+        "Блок навигации — РОВНО 4 строки, каждая 3–5 слов после двоеточия:\n"
+        "🧠 Навык: ...\n"
+        "🎯 Цель: ...\n"
+        "📌 Подсказка: ...\n"
+        "📏 Критерий прогресса: ...\n"
     )
 
-    hard_bans = (
-        "ЖЁСТКИЕ правила:\n"
-        "• Пиши максимально лаконично: меньше вводных слов, меньше воды.\n"
-        f"• ВЕСЬ текст поста (целиком) не длиннее {max_chars} символов.\n"
-        "• «Практика на сегодня» — 1–2 коротких шага.\n"
-        "• НЕ используй шаблонные заголовки-отбивки: «Суть», «Коротко», «Что это значит для вас», «Вывод», «Итог», «Резюме», «Важно».\n"
-        "• НЕ добавляй новые подзаголовки и новые разделы.\n"
-        "• НЕ ставь диагнозы, НЕ обещай лечения, НЕ назначай препараты.\n"
-        "• Не добавляй новых фактов — только перефразируй и сожми то, что уже есть.\n"
+
+def build_generation_prompt(
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    max_chars: int,
+) -> str:
+    prof = _rubric_profile(rubric_format, audience)
+    aud = (audience or "parents").strip().lower()
+    rf = (rubric_format or "").strip().lower()
+
+    common_rules = (
+        "Ты — логопед-редактор. Пиши по-русски. Максимально лаконично.\n"
+        f"Общий лимит: НЕ БОЛЕЕ {max_chars} символов для всего поста.\n"
+        "Запрещено ставить диагнозы. Запрещено назначать препараты/лечение.\n"
+        "Запрещено выдумывать упражнения/факты: используй ТОЛЬКО EVIDENCE ниже.\n"
+        "Если в EVIDENCE нет нужного для рубрики (упражнение/норма/миф) — верни строго одну строку: НЕТ_ДАННЫХ\n"
+        "НЕ используй HTML/Markdown. Верни только готовый текст поста.\n"
     )
 
-    structure = (
-        "Структура должна быть строго такой:\n"
-        "1) Первая строка — название рубрики (как в исходнике).\n"
-        "2) Вторая строка — строка возраста в формате: «👶 Возраст: ...».\n"
-        "3) Далее — хук (жизненная ситуация/вопрос) + 2–3 короткие строки пользы, без отдельных подзаголовков.\n"
-        f"4) Затем идут заголовки (каждый — отдельной строкой) строго из списка: {', '.join(REQUIRED_HEADINGS_V3)}.\n"
-        "5) Внутри «Практика на сегодня» — 1–2 шага, нумерацией 1) 2).\n"
-        "6) Сразу после «Практика на сегодня (5–7 минут)» вставь навигационную полосу РОВНО из 4 строк:\n"
-        "🧠 Навык: (3–5 слов)\n"
-        "🎯 Цель: (3–5 слов)\n"
-        "📌 Подсказка: (3–5 слов)\n"
-        "📏 Критерий прогресса: (3–5 слов)\n"
-        "Никаких других строк в этом блоке.\n"
-        "7) В конце перед техническим дисклеймером должна быть ровно одна вовлекающая строка, начинающаяся с «💬 ».\n"
-        "Форматирование: только обычный текст, без HTML/Markdown.\n"
-    )
-
-    tip_rules = ""
-    if is_tip:
-        tip_rules = (
-            "\nДоп. правило для «Совет дня»:\n"
-            "- Только практика и поддержка мотивации. Никакой академической теории и классификаций.\n"
+    if aud != "pros":
+        rubric_specific = (
+            f"Рубрика: {prof['name']}. Фокус: {prof['focus']}.\n"
+            "Соблюдай шаблон:\n"
+            f"{rubric_title} {title_suffix}\n"
+            "👶 Возраст: <диапазон>\n\n"
+            "Подводка 2–3 предложения (по теме рубрики), без воды.\n\n"
+            "Практика на сегодня (5–7 минут)\n"
+            "1) <шаг из источника>\n"
+            "2) <шаг из источника>\n\n"
+            + _nav_strip_rules()
+            + "\nНорма / когда нужен специалист\n"
+            "✅ Норма: <по теме рубрики, мягко>\n"
+            "⚠️ Обсудить со специалистом: <регресс или нет прогресса 4–6 недель>\n\n"
+            "Источник\n"
+            f"Источник: {source_domain}\n"
+            "Основа: <статья/гайд/обзор/чек-лист>\n"
+            f"🔗 {source_url}\n\n"
+            "💬 <вовлекающий вопрос по теме рубрики>\n"
         )
 
-    return (
-        base_role
-        + hard_bans
-        + structure
-        + tip_rules
-        + "\nТЕКСТ ДЛЯ ПЕРЕФОРМУЛИРОВКИ:\n"
-        + (body or "").strip()
+        if rf == "myth_fact":
+            rubric_specific += (
+                "\nДоп. требования для 'Миф/Факт':\n"
+                "В подводке включи две строки:\n"
+                "🔴 Миф: ...\n"
+                "🟢 Факт: ...\n"
+                "Миф должен быть опровергаем EVIDENCE.\n"
+            )
+        if rf == "age_norms":
+            rubric_specific += (
+                "\nДоп. требования для 'Возрастная норма':\n"
+                "В подводке (до Практики) дай 3–5 пунктов с возрастными ориентирами (например: 'к 3 годам...', 'к 4 годам...').\n"
+                "Ориентиры — только из EVIDENCE. Добавь фразу: 'Каждый ребёнок развивается индивидуально.'\n"
+            )
+        if rf == "question_week":
+            rubric_specific += (
+                "\nДоп. требования для 'Вопрос недели':\n"
+                "В подводке начни с '❓ Вопрос недели: ...' и далее короткий ответ по EVIDENCE.\n"
+            )
+
+        footer = ""
+        if disclaimer:
+            footer += f"\nℹ️ {norm_space(disclaimer)}\n"
+        if hashtags:
+            footer += "\n" + " ".join([h if h.startswith("#") else f"#{h}" for h in hashtags]) + "\n"
+
+        return common_rules + rubric_specific + "\nEVIDENCE:\n" + evidence_text.strip() + "\n" + footer
+
+    pros_template = (
+        f"Рубрика: {prof['name']} (для специалистов). Фокус: {prof['focus']}.\n"
+        "Соблюдай шаблон:\n"
+        f"{rubric_title} {title_suffix}\n"
+        "👩‍⚕️ Аудитория: специалисты\n\n"
+        "Коротко по материалу (4 строки):\n"
+        "• Цель: ...\n"
+        "• Методы: ...\n"
+        "• Выводы: ...\n"
+        "• Практическая значимость: ...\n\n"
+        + _nav_strip_rules()
+        + "\nИсточник\n"
+        f"Источник: {source_domain}\n"
+        "Основа: научная/методическая публикация\n"
+        f"🔗 {source_url}\n\n"
+        "💬 Какой вывод вы бы внедрили первым?\n"
     )
 
+    return common_rules + pros_template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
-def rewrite_if_enabled_plain(
-    full_plain_text: str,
-    audience: str,
+
+def generate_post_plain_from_evidence(
+    rubric_title: str,
     rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
     provider: str,
     groq_key: str,
     gemini_key: str,
-    parents_max: int,
-    pros_max: int,
-    post_max: int,
+    max_chars: int,
 ) -> Tuple[str, bool, str]:
-    if provider == "none":
-        final_raw = enforce_total_chars_keep_structure(full_plain_text, post_max)
-        return final_raw, False, "rewrite:none"
+    """Returns (plain_text, ok, note)."""
+    prov = (provider or "auto").strip().lower()
+    aud = (audience or "parents").strip().lower()
 
-    max_chars = aud_limits(audience, parents_max, pros_max, post_max)
-    prompt = build_rewrite_prompt_v3(full_plain_text, max_chars, rubric_format=rubric_format)
+    ev = (evidence_text or "").strip()
+    if len(ev) < 400:
+        return "", False, "no_evidence_short"
+
+    prompt = build_generation_prompt(
+        rubric_title=rubric_title,
+        rubric_format=rubric_format,
+        audience=aud,
+        title_suffix=title_suffix,
+        source_domain=source_domain,
+        source_url=source_url,
+        evidence_text=ev,
+        disclaimer=disclaimer,
+        hashtags=hashtags,
+        max_chars=max_chars,
+    )
+
+    def _postprocess(s: str) -> str:
+        s = (s or "").strip().replace("\r\n", "\n")
+        s = re.sub(r"^```[a-zA-Z]*\n", "", s)
+        s = re.sub(r"\n```$", "", s)
+        return enforce_total_chars_keep_structure(s, max_chars).strip()
+
+    if prov == "none":
+        return "", False, "provider:none"
 
     try:
-        if provider in ("groq", "auto"):
-            try:
-                out = rewrite_with_groq(prompt, groq_key)
-                out = enforce_total_chars_keep_structure(out, max_chars)
-                if not has_required_structure_plain_v3(out):
-                    raw2 = enforce_total_chars_keep_structure(full_plain_text, max_chars)
-                    return raw2, False, "rewrite:fallback_raw_structure"
-                return out, True, "rewrite:groq"
-            except Exception as e:
-                if provider == "groq":
-                    raise
-                if "groq_quota" in str(e):
-                    pass
+        if prov in ("auto", "groq"):
+            if not groq_key:
+                raise RuntimeError("GROQ_API_KEY missing")
+            out = _postprocess(_groq_chat(prompt, groq_key))
+            if "НЕТ_ДАННЫХ" in out:
+                return "", False, "no_data_in_source"
+            if aud != "pros" and not has_required_structure_plain_v3(out):
+                raise RuntimeError("structure_invalid_groq")
+            return out, True, "ok:groq"
+    except Exception as e:
+        groq_err = str(e)
 
-        if provider in ("gemini", "auto"):
-            out = rewrite_with_gemini(prompt, gemini_key)
-            out = enforce_total_chars_keep_structure(out, max_chars)
-            if not has_required_structure_plain_v3(out):
-                raw2 = enforce_total_chars_keep_structure(full_plain_text, max_chars)
-                return raw2, False, "rewrite:fallback_raw_structure"
-            return out, True, "rewrite:gemini"
+    try:
+        if prov in ("auto", "gemini"):
+            if not gemini_key:
+                raise RuntimeError("GEMINI_API_KEY missing")
+            out = _postprocess(_gemini_generate(prompt, gemini_key))
+            if "НЕТ_ДАННЫХ" in out:
+                return "", False, "no_data_in_source"
+            if aud != "pros" and not has_required_structure_plain_v3(out):
+                raise RuntimeError("structure_invalid_gemini")
+            return out, True, "ok:gemini"
+    except Exception as e:
+        return "", False, f"llm_failed:{groq_err} | {e}"
 
-    except Exception:
-        raw2 = enforce_total_chars_keep_structure(full_plain_text, max_chars)
-        return raw2, False, "rewrite:fallback_raw_error"
-
-    raw2 = enforce_total_chars_keep_structure(full_plain_text, max_chars)
-    return raw2, False, "rewrite:fallback_raw_unknown"
+    return "", False, f"llm_failed:{groq_err}"

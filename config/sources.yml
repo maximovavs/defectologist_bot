@@ -91,7 +91,7 @@ sources:
     type: rss
     url: "https://logopediya.com/ppt/rss.xml"
 
-  # NOTE: требует parser: logopediya_publ (если в коде publisher нет — можно не использовать)
+  # NOTE: требует parser: logopediya_publ
   - id: logopediya_publications_latest
     name: "Logopediya.com — Публикации (последние)"
     type: html_site
@@ -150,6 +150,13 @@ sources:
     urls:
       - "https://www.asha.org/practice-portal/professional-issues/multilingual-service-delivery/"
 
+  - id: asha_developmental_milestones
+    name: "ASHA — Developmental Milestones (Birth to 5)"
+    type: static
+    urls:
+      - "https://www.asha.org/public/developmental-milestones/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones/"
+
   # ---------- Colorín Colorado (bilingual = superpower) ----------
 
   - id: colorin_bilingual_parents
@@ -180,24 +187,11 @@ sources:
     type: static
     urls:
       - "https://pmc.ncbi.nlm.nih.gov/articles/PMC12168312/"
-      
-  - id: asha_developmental_milestones
-    name: "ASHA — Developmental Milestones (Birth to 5)"
-    type: static
-    urls:
-      - "https://www.asha.org/public/developmental-milestones/"
-      - "https://www.asha.org/public/developmental-milestones/communication-milestones/"
 
   # ---------- OPTIONAL (advanced): PubMed RSS feeds (no login required) ----------
-  # Как получить ссылку:
-  # 1) В PubMed выполните поиск (например: bilingual child language development review)
-  # 2) Нажмите "Create RSS" под строкой поиска, выберите limit=10–15, скопируйте XML URL
-  # 3) Вставьте URL ниже и добавьте этот source_id в rubrics.yml (для субботы "Методическая копилка")
-  #
-   - id: pubmed_rss_bilingual_updates
-     name: "PubMed RSS — bilingual child language (updates)"
-     type: rss
-     url:  https://pubmed.ncbi.nlm.nih.gov/rss/search/1jsI3JGQCWWHHeHb2fTBDdltf03aFntL4-PoLzxCwuw1i6EYCo/?limit=15&utm_campaign=pubmed-2&fc=20260301172251
-  #   url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/<TOKEN>/?limit=10&utm_campaign=pubmed-2&fc=<STAMP>"
-    
-  
+  # Если не используете — просто закомментируйте этот блок целиком.
+
+  - id: pubmed_rss_bilingual_updates
+    name: "PubMed RSS — bilingual child language (updates)"
+    type: rss
+    url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/1jsI3JGQCWWHHeHb2fTBDdltf03aFntL4-PoLzxCwuw1i6EYCo/?limit=15&utm_campaign=pubmed-2&fc=20260301172251"

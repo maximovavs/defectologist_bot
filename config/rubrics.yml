@@ -1,4 +1,4 @@
-version: 2.3
+version: 2.4
 
 channel:
   locale: "ru-RU"
@@ -19,7 +19,7 @@ publishing:
   drafts_mode: "post_to_drafts_chat"   # skip | post_to_drafts_chat
   drafts_chat_id_env: "TELEGRAM_DRAFTS_CHAT_ID"
 
-  # defense-in-depth (хотфикс в коде все равно принудительно шлёт dashboard в drafts)
+  # defense-in-depth (hotfix в коде все равно принудительно шлёт dashboard в drafts)
   dashboard_chat: "drafts"    # main | drafts
   dashboard_title: "Quality dashboard недели"
 
@@ -53,7 +53,7 @@ audiences:
         format: "exercise_steps"
         media: ["image_card"]
 
-      # СРЕДА: Миф/Факт (добавили ASHA Practice Portal про мультиязычное сопровождение)
+      # СРЕДА: Миф/Факт
       - id: myth_fact
         title: "Миф / Факт"
         kind: digest
@@ -68,7 +68,7 @@ audiences:
         format: "myth_fact"
         media: ["image_card"]
 
-      # ЧЕТВЕРГ: Русский за границей (добавили Colorín Colorado для родительского тона)
+      # ЧЕТВЕРГ: Русский за границей
       - id: bilingual_corner
         title: "Русский за границей"
         kind: bilingual
@@ -95,17 +95,17 @@ audiences:
         format: "question_week"
         media: ["image_card"]
 
-      # ВОСКРЕСЕНЬЕ: Возрастная норма (оставляем российские + добавляем ASHA Public по SSD/early id)
+      # ВОСКРЕСЕНЬЕ: Возрастная норма
+      # ✅ Milestones — ПЕРВЫМ, чтобы рубрика реально была про нормы.
       - id: age_norms
         title: "Возрастная норма"
         kind: norms
         cadence: "WEEKLY"
         byweekday: ["SU"]
         sources:
-          - "logopediya_documents_rss"
+          - "asha_developmental_milestones"
           - "logoportal_latest"
-          - "asha_public_speech_sound_disorders"
-          - "asha_multilingual_public"
+          - "logopediya_documents_rss"
         format: "age_norms"
         media: ["image_card"]
 
@@ -122,7 +122,7 @@ audiences:
   pros:
     title_suffix: "• для специалистов"
     rubrics:
-      # СУББОТА: Методическая копилка (добавили ASHA Practice Portal по артикуляции/фонологии)
+      # СУББОТА: Методическая копилка
       - id: method_piggybank
         title: "Методическая копилка"
         kind: digest

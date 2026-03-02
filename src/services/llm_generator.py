@@ -1,22 +1,13 @@
 from __future__ import annotations
-
 """
-LLM generator for Logopedia channel.
+LLM generator for Logopedia channel (v2.3.2 hotfix)
 
-Goal:
-- Different rubric => different system instructions => different content.
-- Keep posts concise (<= POST_MAX_CHARS) and avoid hallucinations:
-  use ONLY the provided EVIDENCE text for facts/exercises.
-
-Providers:
-- groq (OpenAI-compatible endpoint)
-- gemini (Google Generative Language API)
-- auto: try groq, fallback to gemini
-- none: do not call LLM (will return empty; publisher should try another candidate or skip)
-
-This module is intentionally dependency-light (requests only).
+Fixes:
+- Gemini 404: configurable model name + x-goog-api-key header (official docs).
+- Adds GEMINI_MODEL env (default: gemini-2.5-flash).
+- Strict anti-hallucination: ONLY EVIDENCE.
 """
-
+import os
 import re
 import requests
 from typing import Dict, List, Tuple
@@ -27,7 +18,6 @@ def norm_space(s: str) -> str:
 
 
 def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
-    """Hard truncate while trying not to cut mid-line in structured posts."""
     t = (text or "").strip()
     if len(t) <= max_chars:
         return t
@@ -38,11 +28,10 @@ def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
 
 
 def has_required_structure_plain_v3(text: str) -> bool:
-    """Parents-style structure validator."""
     lines = [(x or "").rstrip("\n") for x in (text or "").splitlines()]
     if len(lines) < 6:
         return False
-    if not (lines[1].strip().startswith("👶 Возраст:")):
+    if not lines[1].strip().startswith("👶 Возраст:"):
         return False
     sset = set([x.strip() for x in lines])
     for h in ["Практика на сегодня (5–7 минут)", "Норма / когда нужен специалист", "Источник"]:
@@ -58,12 +47,12 @@ def _is_quota_error(status: int, text: str) -> bool:
     return status in (402, 429) or any(k in t for k in ["quota", "rate limit", "exceeded", "insufficient_quota", "resource_exhausted"])
 
 
-def _groq_chat(prompt: str, api_key: str) -> str:
+def _groq_chat(prompt: str, api_key: str, model: str = "llama-3.1-8b-instant") -> str:
     r = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={
-            "model": "llama-3.1-8b-instant",
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.25,
         },
@@ -75,17 +64,19 @@ def _groq_chat(prompt: str, api_key: str) -> str:
     return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
-def _gemini_generate(prompt: str, api_key: str) -> str:
+def _gemini_generate(prompt: str, api_key: str, model: str) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     r = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-        params={"key": api_key},
+        url,
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=55,
     )
     if r.status_code != 200 and _is_quota_error(r.status_code, r.text):
         raise RuntimeError(f"gemini_quota:{r.status_code}")
     r.raise_for_status()
-    return (r.json()["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+    j = r.json()
+    return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
 
 
 def _rubric_profile(rubric_format: str, audience: str) -> Dict[str, str]:
@@ -93,21 +84,21 @@ def _rubric_profile(rubric_format: str, audience: str) -> Dict[str, str]:
     aud = (audience or "parents").strip().lower()
 
     if aud != "pros":
-        if rf in ("tip_of_day", "tip_day", "daily_tip"):
+        if rf in ("tip_of_day", "tip_day", "daily_tip", "tip_of_day"):
             return {"name": "Совет дня", "focus": "одна конкретная мини-практика из источника + как сделать без сопротивления"}
         if rf in ("exercise_steps", "games_vocab"):
             return {"name": "Играем и говорим", "focus": "описание одной игры из источника, встроенной в быт (кухня/дорога), 2 шага"}
         if rf == "myth_fact":
-            return {"name": "Миф/Факт", "focus": "1 миф о билингвизме, который опровергается источником, и короткий факт по доказательной базе"}
+            return {"name": "Миф/Факт", "focus": "1 миф о билингвизме, опровергнутый источником + короткий факт"}
         if rf == "bilingual_parents":
             return {"name": "Русский за границей", "focus": "боли экспатов: code-switching/отказ говорить по-русски/мотивация"}
         if rf == "question_week":
             return {"name": "Вопрос недели", "focus": "вопрос + короткий ответ по источнику + вопрос аудитории"}
         if rf == "age_norms":
-            return {"name": "Возрастная норма", "focus": "короткие ориентиры нормы по возрасту (из источника), 3–5 пунктов"}
+            return {"name": "Возрастная норма", "focus": "ориентиры нормы по возрасту (из источника), 3–5 пунктов"}
         return {"name": "Пост", "focus": "краткая адаптация из источника"}
 
-    return {"name": "Методическая копилка", "focus": "структурированное саммари: цель/методы/выводы/практическая значимость"}
+    return {"name": "Методическая копилка", "focus": "саммари: цель/методы/выводы/практическая значимость"}
 
 
 def _nav_strip_rules() -> str:
@@ -141,7 +132,7 @@ def build_generation_prompt(
         f"Общий лимит: НЕ БОЛЕЕ {max_chars} символов для всего поста.\n"
         "Запрещено ставить диагнозы. Запрещено назначать препараты/лечение.\n"
         "Запрещено выдумывать упражнения/факты: используй ТОЛЬКО EVIDENCE ниже.\n"
-        "Если в EVIDENCE нет нужного для рубрики (упражнение/норма/миф) — верни строго одну строку: НЕТ_ДАННЫХ\n"
+        "Если в EVIDENCE нет нужного для рубрики — верни строго одну строку: НЕТ_ДАННЫХ\n"
         "НЕ используй HTML/Markdown. Верни только готовый текст поста.\n"
     )
 
@@ -157,7 +148,7 @@ def build_generation_prompt(
             "2) <шаг из источника>\n\n"
             + _nav_strip_rules()
             + "\nНорма / когда нужен специалист\n"
-            "✅ Норма: <по теме рубрики, мягко>\n"
+            "✅ Норма: <по теме рубрики>\n"
             "⚠️ Обсудить со специалистом: <регресс или нет прогресса 4–6 недель>\n\n"
             "Источник\n"
             f"Источник: {source_domain}\n"
@@ -172,12 +163,11 @@ def build_generation_prompt(
                 "В подводке включи две строки:\n"
                 "🔴 Миф: ...\n"
                 "🟢 Факт: ...\n"
-                "Миф должен быть опровергаем EVIDENCE.\n"
             )
         if rf == "age_norms":
             rubric_specific += (
                 "\nДоп. требования для 'Возрастная норма':\n"
-                "В подводке (до Практики) дай 3–5 пунктов с возрастными ориентирами (например: 'к 3 годам...', 'к 4 годам...').\n"
+                "В подводке (до Практики) дай 3–5 пунктов с возрастными ориентирами.\n"
                 "Ориентиры — только из EVIDENCE. Добавь фразу: 'Каждый ребёнок развивается индивидуально.'\n"
             )
         if rf == "question_week":
@@ -211,7 +201,6 @@ def build_generation_prompt(
         f"🔗 {source_url}\n\n"
         "💬 Какой вывод вы бы внедрили первым?\n"
     )
-
     return common_rules + pros_template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
 
@@ -230,12 +219,11 @@ def generate_post_plain_from_evidence(
     gemini_key: str,
     max_chars: int,
 ) -> Tuple[str, bool, str]:
-    """Returns (plain_text, ok, note)."""
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
 
     ev = (evidence_text or "").strip()
-    if len(ev) < 400:
+    if len(ev) < 260:
         return "", False, "no_evidence_short"
 
     prompt = build_generation_prompt(
@@ -260,6 +248,7 @@ def generate_post_plain_from_evidence(
     if prov == "none":
         return "", False, "provider:none"
 
+    groq_err = ""
     try:
         if prov in ("auto", "groq"):
             if not groq_key:
@@ -277,12 +266,13 @@ def generate_post_plain_from_evidence(
         if prov in ("auto", "gemini"):
             if not gemini_key:
                 raise RuntimeError("GEMINI_API_KEY missing")
-            out = _postprocess(_gemini_generate(prompt, gemini_key))
+            model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+            out = _postprocess(_gemini_generate(prompt, gemini_key, model=model))
             if "НЕТ_ДАННЫХ" in out:
                 return "", False, "no_data_in_source"
             if aud != "pros" and not has_required_structure_plain_v3(out):
                 raise RuntimeError("structure_invalid_gemini")
-            return out, True, "ok:gemini"
+            return out, True, f"ok:gemini:{model}"
     except Exception as e:
         return "", False, f"llm_failed:{groq_err} | {e}"
 

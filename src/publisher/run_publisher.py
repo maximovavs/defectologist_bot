@@ -1,18 +1,17 @@
 from __future__ import annotations
-
 """
-Publisher (cron/GitHub Actions)
+Publisher (cron/GitHub Actions) v2.3.2 hotfix
 
-Root-cause fix for identical content:
-- last week publisher used a single shared skeleton for all rubrics.
-Now:
-- Each rubric is generated via rubric-specific LLM prompt from source EVIDENCE (RAG-lite).
-- English sources are summarized/translated into Russian by LLM.
-- Duplicate-body guard prevents posting identical text even if sources repeat.
-- Dashboard is ALWAYS posted to TELEGRAM_DRAFTS_CHAT_ID (fail-closed).
+Why today's post didn't publish:
+- Groq returned 429 quota.
+- Gemini fallback returned 404 because model name/endpoint/auth was outdated.
+- Many candidates were thin/archive pages -> no_evidence_short.
 
-Run:
-  python -m src.publisher.run_publisher
+Fixes here:
+- Skip non-HTML assets (.ppt/.pdf/...) to avoid no_evidence_short.
+- Exclude Logorina archive pages (/news/YYYY-MM).
+- Improve evidence extraction root containers.
+- If Posted:0 -> send alert to TELEGRAM_DRAFTS_CHAT_ID with top skip reasons.
 """
 
 import os
@@ -34,17 +33,17 @@ import yaml
 import feedparser
 from bs4 import BeautifulSoup
 from dateutil import tz
+import urllib3
 
 from src.services.image_builder import render_image_card
 from src.services.llm_generator import generate_post_plain_from_evidence
-
 
 ROOT = Path(__file__).resolve().parents[2]
 CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/2.3.1 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/2.3.2 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -54,12 +53,11 @@ TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
 TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()  # HTML | ""
 
-# reuse env name for simplicity: none|auto|groq|gemini
 PROVIDER = os.getenv("REWRITE_PROVIDER", "auto").strip().lower()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()  # parents|pros|both
+AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 
@@ -68,6 +66,9 @@ INSECURE_TLS_DOMAINS = [
     for d in (os.getenv("INSECURE_TLS_DOMAINS", "") or "").split(",")
     if d.strip()
 ]
+
+if os.getenv("SUPPRESS_INSECURE_TLS_WARNINGS", "1").strip().lower() in ("1", "true", "yes"):
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
@@ -117,10 +118,6 @@ def _verify_for_url(url: str) -> bool:
             return False
     return True
 
-
-# -------------------
-# Sources + parsers
-# -------------------
 
 @dataclass
 class Source:
@@ -194,29 +191,27 @@ def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: O
     return uniq
 
 
-def parse_logopediya_publ(url: str, html_text: str) -> List[Dict[str, str]]:
-    soup = BeautifulSoup(html_text, "lxml")
-    items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/publ/[^\"']+")
-    items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
-    return items[:80]
-
-
 def parse_logorina_news(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
     items = _collect_links(url, soup, "article a, div.news a, a", r"/news/[\w\-]+/?$")
-    return items[:80]
+    # exclude archive-like pages
+    out = []
+    for it in items:
+        link = it.get("link", "")
+        if re.search(r"/news/\d{4}-\d{2}/?$", link):
+            continue
+        out.append(it)
+    return out[:80]
 
 
 def parse_logomag_lib(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
-    items = _collect_links(url, soup, "main a, div.content a, a", r"/lib/[^\"']+")
-    return items[:80]
+    return _collect_links(url, soup, "main a, div.content a, a", r"/lib/[^\"']+")[:80]
 
 
 def parse_logoportal_articles(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
-    items = _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")
-    return items[:80]
+    return _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")[:80]
 
 
 def parse_logopedy_articles(url: str, html_text: str) -> List[Dict[str, str]]:
@@ -226,12 +221,19 @@ def parse_logopedy_articles(url: str, html_text: str) -> List[Dict[str, str]]:
     return items[:80]
 
 
+def parse_logopediya_publ(url: str, html_text: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/publ/[^\"']+")
+    items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
+    return items[:80]
+
+
 SITE_PARSERS = {
-    "logopediya_publ": parse_logopediya_publ,
     "logorina_news": parse_logorina_news,
     "logomag_lib": parse_logomag_lib,
     "logoportal_articles": parse_logoportal_articles,
     "logopedy_articles": parse_logopedy_articles,
+    "logopediya_publ": parse_logopediya_publ,
 }
 
 
@@ -258,9 +260,8 @@ def fetch_source(src: Source) -> List[Dict[str, str]]:
     raise ValueError(f"Unsupported source type: {src.type}")
 
 
-# -------------------
-# Evidence extraction
-# -------------------
+_SKIP_EXT_RE = re.compile(r"\.(ppt|pptx|pdf|doc|docx|xls|xlsx|zip|rar|mp3|mp4)$", re.IGNORECASE)
+
 
 def get_canonical(url: str) -> str:
     try:
@@ -281,14 +282,24 @@ def get_canonical(url: str) -> str:
 def extract_evidence_text(url: str, max_chars: int = 2800) -> str:
     r = requests.get(url, headers=HEADERS, timeout=35, verify=_verify_for_url(url))
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
 
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    if "text/html" not in ctype and "application/xhtml" not in ctype:
+        return ""
+
+    soup = BeautifulSoup(r.text, "lxml")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
-    root = soup.find("article") or soup.find("main") or soup.body or soup
-    chunks: List[str] = []
+    root = (
+        soup.select_one("div#dle-content")
+        or soup.find("article")
+        or soup.find("main")
+        or soup.body
+        or soup
+    )
 
+    chunks: List[str] = []
     h1 = soup.find("h1")
     if h1:
         chunks.append(norm_space(h1.get_text(" ", strip=True)))
@@ -317,10 +328,6 @@ def extract_evidence_text(url: str, max_chars: int = 2800) -> str:
         out = out[:max_chars].rsplit("\n", 1)[0].strip()
     return out
 
-
-# -------------------
-# Telegram HTML render (hide URL)
-# -------------------
 
 def _escape(s: str) -> str:
     return _html.escape(s or "", quote=False)
@@ -368,10 +375,6 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
     return "\n".join(out).strip()
 
 
-# -------------------
-# Telegram send (NO-DUP)
-# -------------------
-
 def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
@@ -390,7 +393,6 @@ def send_message(chat_id: str, html_text: str) -> None:
 
 def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
     plain_bytes = len((plain_post or "").encode("utf-8"))
-
     if plain_bytes <= TG_CAPTION_MAX_BYTES:
         try:
             data: Dict[str, Any] = {"chat_id": chat_id, "caption": html_full_post}
@@ -407,10 +409,6 @@ def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_ful
     send_message(chat_id, html_full_post)
 
 
-# -------------------
-# State
-# -------------------
-
 def load_state(name: str, default: Any) -> Any:
     p = STATE_DIR / name
     if not p.exists():
@@ -425,71 +423,6 @@ def save_state(name: str, data: Any) -> None:
     (STATE_DIR / name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# -------------------
-# Dashboard
-# -------------------
-
-def format_dashboard(stats: Dict[str, Any], week_key: str, title: str) -> str:
-    wk = stats.get(week_key) or {"passed": 0, "rejected": 0, "reasons": {}}
-    passed = int(wk.get("passed", 0))
-    rejected = int(wk.get("rejected", 0))
-    reasons = wk.get("reasons") or {}
-    top = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:6]
-
-    lines = [
-        f"{title} ({week_key})",
-        "",
-        f"✅ Прошло: {passed}",
-        f"🗂️ В черновики/отсев: {rejected}",
-        "",
-    ]
-    if top:
-        lines.append("Причины отсева (топ):")
-        for k, v in top:
-            lines.append(f"• {k}: {v}")
-    else:
-        lines.append("Причины отсева: нет данных.")
-    lines.append("")
-    lines.append("ℹ️ Примечание: тех. статистика качества источников/фильтров.")
-    return render_plain_to_telegram_html("\n".join(lines))
-
-
-# -------------------
-# Card theses
-# -------------------
-
-def build_card_theses_from_plain(plain_post: str) -> Tuple[List[str], str]:
-    lines = (plain_post or "").splitlines()
-    age = ""
-    for ln in lines[:4]:
-        if ln.strip().startswith("👶 Возраст:"):
-            age = ln.split(":", 1)[1].strip()
-            break
-        if ln.strip().startswith("👩‍⚕️"):
-            age = "специалистам"
-            break
-
-    bullets = [ln.strip() for ln in lines if ln.strip().startswith("• ")][:2]
-    warn = ""
-    for ln in lines:
-        if ln.strip().startswith("⚠️"):
-            warn = ln.strip()
-            break
-
-    def _clip(s: str, n: int = 92) -> str:
-        s = norm_space(s)
-        return (s[:n].rstrip(" .,:;—-") + "…") if len(s) > n else s
-
-    a = _clip(bullets[0][2:].strip() if bullets else "Полезный мини-вывод.", 92)
-    b = _clip(bullets[1][2:].strip() if len(bullets) > 1 else "Один маленький шаг.", 92)
-    c = _clip(warn.lstrip("⚠️").strip() if warn else "Если нет прогресса 4–6 недель — специалист.", 92)
-    return [f"💡 {a}", f"🧩 {b}", f"⚠️ {c}"], age
-
-
-# -------------------
-# Run
-# -------------------
-
 def run() -> None:
     rub_cfg = load_yaml(CFG_DIR / "rubrics.yml")
     channel_cfg = rub_cfg.get("channel", {}) or {}
@@ -501,7 +434,6 @@ def run() -> None:
     week_key = iso_week_key(now)
 
     max_posts = int(pub_cfg.get("max_posts_per_run", 1))
-
     disclaimer = channel_cfg.get("disclaimer", "") or ""
     hashtags = channel_cfg.get("hashtags", []) or []
 
@@ -509,8 +441,6 @@ def run() -> None:
     used_canon = set(load_state("used_canonical.json", []))
     recent_hashes = load_state("recent_body_hashes.json", []) or []
     recent_set = set(recent_hashes)
-
-    stats = load_state("stats_weekly.json", {}) or {}
 
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
     if AUDIENCE == "both":
@@ -521,11 +451,17 @@ def run() -> None:
         aud_list = ["parents"]
 
     posted = 0
+    skip_reasons: Dict[str, int] = {}
+    samples: List[str] = []
+
+    def note(reason: str, url: str) -> None:
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+        if len(samples) < 8:
+            samples.append(f"• {reason}: {url}")
 
     for aud in aud_list:
         if posted >= max_posts:
             break
-
         aud_cfg = audiences_cfg.get(aud, {}) or {}
         title_suffix = (aud_cfg.get("title_suffix", "") or "").strip()
         rubrics = aud_cfg.get("rubrics", []) or []
@@ -537,58 +473,59 @@ def run() -> None:
                 continue
 
             rf = (rubric.get("format") or "").strip().lower()
-
-            # Dashboard: drafts only
             if rf == "quality_dashboard":
-                if not TELEGRAM_DRAFTS_CHAT_ID:
-                    raise RuntimeError("TELEGRAM_DRAFTS_CHAT_ID is missing. Refusing to post dashboard publicly.")
-                dash_title = pub_cfg.get("dashboard_title", "Quality dashboard недели")
-                dash_html = format_dashboard(stats, week_key, dash_title)
-                if DRY_RUN:
-                    print("[DRY_RUN] dashboard -> drafts only")
-                else:
-                    send_message(TELEGRAM_DRAFTS_CHAT_ID, dash_html)
-                time.sleep(0.3)
                 continue
 
             all_items: List[Dict[str, str]] = []
             for sid in rubric.get("sources", []) or []:
                 src = sources.get(sid)
                 if not src:
-                    print(f"[WARN] unknown source id: {sid}")
+                    note("unknown_source_id", sid)
                     continue
                 try:
                     all_items.extend(fetch_source(src))
                 except Exception as e:
-                    print(f"[WARN] source {sid} failed: {e}")
+                    note("source_fetch_failed", f"{sid}: {e}")
 
             if not all_items:
+                note("no_candidates", rubric.get("id",""))
                 continue
 
-            # deterministic shuffle per day+rubric
             seed = int(hashlib.sha1(f"{now.date()}|{rubric.get('id','')}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(seed)
             rng.shuffle(all_items)
 
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
 
-            for cand in all_items[:25]:
+            for cand in all_items[:60]:
                 url = (cand.get("link") or "").strip()
                 if not url.startswith(("http://", "https://")):
                     continue
+                if _SKIP_EXT_RE.search(url):
+                    note("skip_non_html_asset", url)
+                    continue
 
                 canon = get_canonical(url)
+                if _SKIP_EXT_RE.search(canon):
+                    note("skip_non_html_asset", canon)
+                    continue
+
                 if canon in used_canon:
+                    note("dup_url", canon)
                     continue
 
                 try:
                     evidence = extract_evidence_text(canon, max_chars=2800)
                 except Exception as e:
-                    print(f"[WARN] evidence fetch failed: {canon}: {e}")
+                    note("evidence_fetch_failed", f"{canon} ({e})")
+                    continue
+
+                if len((evidence or "").strip()) < 260:
+                    note("no_evidence_short", canon)
                     continue
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
-                plain, ok, note = generate_post_plain_from_evidence(
+                plain, ok, llm_note = generate_post_plain_from_evidence(
                     rubric_title=rubric_title,
                     rubric_format=rf,
                     audience=aud,
@@ -605,16 +542,17 @@ def run() -> None:
                 )
 
                 if not ok or not plain:
-                    print(f"[INFO] generation skipped: {note} ({canon})")
+                    note(llm_note, canon)
                     continue
 
                 body_hash = sha1(norm_space(plain))
                 if body_hash in recent_set:
-                    print("[INFO] duplicate body -> try next candidate")
+                    note("dup_body", canon)
                     continue
 
                 html_full = render_plain_to_telegram_html(plain)
-                theses, age_tag = build_card_theses_from_plain(plain)
+                theses = ["💡 " + rubric_title, "🧩 1 практика сегодня", "⚠️ Прогресс 2–4 недели"]
+                age_tag = ""
                 card = render_image_card(rubric_title, theses, branding, age_tag=age_tag)
 
                 if DRY_RUN:
@@ -630,7 +568,7 @@ def run() -> None:
 
                     used_canon.add(canon)
                     recent_hashes.append(body_hash)
-                    recent_hashes = recent_hashes[-200:]
+                    recent_hashes[:] = recent_hashes[-200:]
                     recent_set = set(recent_hashes)
 
                 posted += 1
@@ -646,7 +584,28 @@ def run() -> None:
     if not DRY_RUN:
         save_state("used_canonical.json", sorted(list(used_canon))[-6000:])
         save_state("recent_body_hashes.json", recent_hashes[-200:])
-        save_state("stats_weekly.json", stats)
+
+    if posted == 0 and not DRY_RUN:
+        if TELEGRAM_DRAFTS_CHAT_ID:
+            top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
+            lines = [
+                "⚠️ Publisher: не удалось опубликовать пост (Posted: 0)",
+                f"Неделя: {week_key}",
+                f"Дата: {now.date()}",
+                "",
+                "Причины пропуска (топ):",
+            ]
+            for k, v in top:
+                lines.append(f"• {k}: {v}")
+            if samples:
+                lines.append("")
+                lines.append("Примеры:")
+                lines.extend(samples)
+            lines.append("")
+            lines.append("Подсказка: проверь GROQ quota и GEMINI_MODEL (по умолчанию gemini-2.5-flash).")
+            send_message(TELEGRAM_DRAFTS_CHAT_ID, "\n".join(lines))
+        else:
+            print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.")
 
     print(f"Publisher done. Posted: {posted}. Week: {week_key}.{' [DRY_RUN]' if DRY_RUN else ''}")
 

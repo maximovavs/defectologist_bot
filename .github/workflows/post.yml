@@ -1,4 +1,4 @@
-name: Logoped Channel Bot v2.2
+name: Logoped Channel Bot v2.4
 
 on:
   schedule:
@@ -9,6 +9,14 @@ on:
         description: "DRY_RUN=1 (не публиковать, сохранить .state/dry_run/**)"
         required: false
         default: "0"
+      audience:
+        description: "AUDIENCE: parents | pros | both"
+        required: false
+        default: "both"
+      provider:
+        description: "REWRITE_PROVIDER: auto | groq | gemini"
+        required: false
+        default: "auto"
 
 jobs:
   post:
@@ -16,10 +24,31 @@ jobs:
 
     env:
       TZ: "Asia/Nicosia"
-      REWRITE_PROVIDER: "auto"
-      AUDIENCE: "both"          # ✅ иначе pros-рубрики никогда не выйдут
-      INSECURE_TLS_DOMAINS: "logorina.ru"
+      # управлялки через manual dispatch (если это schedule — дефолты ниже)
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
+      AUDIENCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.audience || 'both' }}
+      REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
+
+      # важно для logorina.ru (плохой TLS)
+      INSECURE_TLS_DOMAINS: "logorina.ru"
+      SUPPRESS_INSECURE_TLS_WARNINGS: "1"
+
+      # Patch 2.0 — анти-лимиты (Groq backoff + throttle)
+      LLM_MAX_RETRIES: "5"
+      LLM_CALL_DELAY_SEC: "2"
+      LLM_BACKOFF_MIN: "15"
+      LLM_BACKOFF_MAX: "120"
+
+      # Модели (можно менять без кода)
+      GROQ_MODEL: "llama-3.3-70b-versatile"
+      GEMINI_MODEL: "gemini-2.5-flash"
+
+      # Telegram рендеринг ссылок
+      TELEGRAM_PARSE_MODE: "HTML"
+
+      # общий лимит поста (совпадает с кодом)
+      POST_MAX_CHARS: "1000"
+      TG_CAPTION_MAX_BYTES: "950"
 
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +57,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
         run: |

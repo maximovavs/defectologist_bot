@@ -1,23 +1,31 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v2.3.2 hotfix
+Publisher (cron/GitHub Actions) v2.4.0 — Patch 2.0 integrated
 
-Why today's post didn't publish:
-- Groq returned 429 quota.
-- Gemini fallback returned 404 because model name/endpoint/auth was outdated.
-- Many candidates were thin/archive pages -> no_evidence_short.
+What was broken before:
+- Groq hit 429 and publisher silently exhausted candidates.
+- Gemini fallback could be blocked by region or model mismatch.
+- Prompts were effectively too generic -> content looked the same across days.
 
-Fixes here:
-- Skip non-HTML assets (.ppt/.pdf/...) to avoid no_evidence_short.
-- Exclude Logorina archive pages (/news/YYYY-MM).
-- Improve evidence extraction root containers.
-- If Posted:0 -> send alert to TELEGRAM_DRAFTS_CHAT_ID with top skip reasons.
+What is fixed here:
+1) Publisher passes day_key (MO/TU/WE/TH/FR/SA/SU) into LLM generator.
+   LLM generator enforces different templates/validation per weekday.
+2) Publisher is async-runner (asyncio.run) to support LLM backoff (asyncio.sleep),
+   and avoid creating a new event loop per candidate.
+3) If Posted:0 -> sends alert to TELEGRAM_DRAFTS_CHAT_ID with top skip reasons.
+4) Content hygiene:
+   - skip non-HTML assets (.ppt/.pdf/...)
+   - exclude Logorina archive pages (/news/YYYY-MM)
+   - better evidence extraction roots
+
+Run:
+  python -m src.publisher.run_publisher
 """
 
+import asyncio
 import os
 import re
 import json
-import time
 import random
 import hashlib
 import shutil
@@ -25,7 +33,7 @@ import html as _html
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urljoin
 
 import requests
@@ -36,14 +44,19 @@ from dateutil import tz
 import urllib3
 
 from src.services.image_builder import render_image_card
-from src.services.llm_generator import generate_post_plain_from_evidence
+from src.services.llm_generator import generate_post_plain_from_evidence_async
+
+
+# =========================
+# Paths / env
+# =========================
 
 ROOT = Path(__file__).resolve().parents[2]
 CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/2.3.2 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/2.4.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -53,6 +66,7 @@ TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
 TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()  # HTML | ""
 
+# Backward-compatible env name: controls provider routing: auto|groq|gemini|none
 PROVIDER = os.getenv("REWRITE_PROVIDER", "auto").strip().lower()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -70,6 +84,10 @@ INSECURE_TLS_DOMAINS = [
 if os.getenv("SUPPRESS_INSECURE_TLS_WARNINGS", "1").strip().lower() in ("1", "true", "yes"):
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+# =========================
+# Helpers
+# =========================
 
 def load_yaml(path: Path) -> Dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -92,12 +110,16 @@ def iso_week_key(dt: datetime) -> str:
     return f"{y}-W{w:02d}"
 
 
+def weekday_key(dt: datetime) -> str:
+    # Monday=0..Sunday=6
+    return ["MO", "TU", "WE", "TH", "FR", "SA", "SU"][dt.weekday()]
+
+
 def is_due(rubric: Dict[str, Any], now: datetime) -> bool:
     cadence = (rubric.get("cadence") or "DAILY").upper()
     byweekday = rubric.get("byweekday") or []
     if byweekday:
-        map_wd = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
-        if map_wd[now.weekday()] not in set(byweekday):
+        if weekday_key(now) not in set(byweekday):
             return False
     return cadence in ("DAILY", "WEEKLY")
 
@@ -118,6 +140,10 @@ def _verify_for_url(url: str) -> bool:
             return False
     return True
 
+
+# =========================
+# Sources
+# =========================
 
 @dataclass
 class Source:
@@ -153,6 +179,10 @@ def fetch_rss(url: str) -> List[Dict[str, str]]:
 def fetch_static(urls: List[str]) -> List[Dict[str, str]]:
     return [{"title": "", "link": u, "summary": ""} for u in (urls or [])]
 
+
+# ---------------------------
+# Site-specific parsers
+# ---------------------------
 
 def _abs(base_url: str, href: str) -> str:
     href = (href or "").strip()
@@ -194,10 +224,10 @@ def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: O
 def parse_logorina_news(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
     items = _collect_links(url, soup, "article a, div.news a, a", r"/news/[\w\-]+/?$")
-    # exclude archive-like pages
     out = []
     for it in items:
         link = it.get("link", "")
+        # exclude archive-like pages
         if re.search(r"/news/\d{4}-\d{2}/?$", link):
             continue
         out.append(it)
@@ -259,6 +289,10 @@ def fetch_source(src: Source) -> List[Dict[str, str]]:
         return fetch_html_site(src.url or "", src.parser or "")
     raise ValueError(f"Unsupported source type: {src.type}")
 
+
+# =========================
+# Evidence extraction
+# =========================
 
 _SKIP_EXT_RE = re.compile(r"\.(ppt|pptx|pdf|doc|docx|xls|xlsx|zip|rar|mp3|mp4)$", re.IGNORECASE)
 
@@ -329,6 +363,10 @@ def extract_evidence_text(url: str, max_chars: int = 2800) -> str:
     return out
 
 
+# =========================
+# Plain -> Telegram HTML rendering (hide raw URL)
+# =========================
+
 def _escape(s: str) -> str:
     return _html.escape(s or "", quote=False)
 
@@ -375,6 +413,10 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
     return "\n".join(out).strip()
 
 
+# =========================
+# Telegram send
+# =========================
+
 def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
@@ -392,6 +434,11 @@ def send_message(chat_id: str, html_text: str) -> None:
 
 
 def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
+    """
+    NO-DUP send:
+      - If caption fits, try caption.
+      - Otherwise send photo without caption + full text as message.
+    """
     plain_bytes = len((plain_post or "").encode("utf-8"))
     if plain_bytes <= TG_CAPTION_MAX_BYTES:
         try:
@@ -409,6 +456,10 @@ def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_ful
     send_message(chat_id, html_full_post)
 
 
+# =========================
+# State
+# =========================
+
 def load_state(name: str, default: Any) -> Any:
     p = STATE_DIR / name
     if not p.exists():
@@ -423,7 +474,11 @@ def save_state(name: str, data: Any) -> None:
     (STATE_DIR / name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def run() -> None:
+# =========================
+# Main run
+# =========================
+
+async def amain() -> None:
     rub_cfg = load_yaml(CFG_DIR / "rubrics.yml")
     channel_cfg = rub_cfg.get("channel", {}) or {}
     branding = rub_cfg.get("branding", {}) or {}
@@ -432,6 +487,7 @@ def run() -> None:
     tzname = channel_cfg.get("timezone", "Asia/Nicosia")
     now = get_local_now(tzname)
     week_key = iso_week_key(now)
+    day = weekday_key(now)
 
     max_posts = int(pub_cfg.get("max_posts_per_run", 1))
     disclaimer = channel_cfg.get("disclaimer", "") or ""
@@ -462,6 +518,7 @@ def run() -> None:
     for aud in aud_list:
         if posted >= max_posts:
             break
+
         aud_cfg = audiences_cfg.get(aud, {}) or {}
         title_suffix = (aud_cfg.get("title_suffix", "") or "").strip()
         rubrics = aud_cfg.get("rubrics", []) or []
@@ -474,6 +531,7 @@ def run() -> None:
 
             rf = (rubric.get("format") or "").strip().lower()
             if rf == "quality_dashboard":
+                # dashboard handled elsewhere; do not consume daily post budget here
                 continue
 
             all_items: List[Dict[str, str]] = []
@@ -488,16 +546,17 @@ def run() -> None:
                     note("source_fetch_failed", f"{sid}: {e}")
 
             if not all_items:
-                note("no_candidates", rubric.get("id",""))
+                note("no_candidates", rubric.get("id", ""))
                 continue
 
+            # deterministic shuffle per day/rubric/audience
             seed = int(hashlib.sha1(f"{now.date()}|{rubric.get('id','')}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(seed)
             rng.shuffle(all_items)
 
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
 
-            for cand in all_items[:60]:
+            for cand in all_items[:70]:
                 url = (cand.get("link") or "").strip()
                 if not url.startswith(("http://", "https://")):
                     continue
@@ -525,7 +584,8 @@ def run() -> None:
                     continue
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
-                plain, ok, llm_note = generate_post_plain_from_evidence(
+
+                plain, ok, llm_note = await generate_post_plain_from_evidence_async(
                     rubric_title=rubric_title,
                     rubric_format=rf,
                     audience=aud,
@@ -539,6 +599,7 @@ def run() -> None:
                     groq_key=GROQ_API_KEY,
                     gemini_key=GEMINI_API_KEY,
                     max_chars=POST_MAX_CHARS,
+                    day_key=day,
                 )
 
                 if not ok or not plain:
@@ -552,8 +613,7 @@ def run() -> None:
 
                 html_full = render_plain_to_telegram_html(plain)
                 theses = ["💡 " + rubric_title, "🧩 1 практика сегодня", "⚠️ Прогресс 2–4 недели"]
-                age_tag = ""
-                card = render_image_card(rubric_title, theses, branding, age_tag=age_tag)
+                card = render_image_card(rubric_title, theses, branding, age_tag="")
 
                 if DRY_RUN:
                     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -572,7 +632,7 @@ def run() -> None:
                     recent_set = set(recent_hashes)
 
                 posted += 1
-                time.sleep(1.0)
+                await asyncio.sleep(1.0)
                 break
 
             if posted >= max_posts:
@@ -590,8 +650,8 @@ def run() -> None:
             top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
             lines = [
                 "⚠️ Publisher: не удалось опубликовать пост (Posted: 0)",
-                f"Неделя: {week_key}",
-                f"Дата: {now.date()}",
+                f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
+                f"AUDIENCE={AUDIENCE} | PROVIDER={PROVIDER}",
                 "",
                 "Причины пропуска (топ):",
             ]
@@ -602,12 +662,16 @@ def run() -> None:
                 lines.append("Примеры:")
                 lines.extend(samples)
             lines.append("")
-            lines.append("Подсказка: проверь GROQ quota и GEMINI_MODEL (по умолчанию gemini-2.5-flash).")
+            lines.append("Пустые/захардкоженные шаблоны НЕ публиковались.")
             send_message(TELEGRAM_DRAFTS_CHAT_ID, "\n".join(lines))
         else:
             print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.")
 
     print(f"Publisher done. Posted: {posted}. Week: {week_key}.{' [DRY_RUN]' if DRY_RUN else ''}")
+
+
+def run() -> None:
+    asyncio.run(amain())
 
 
 if __name__ == "__main__":

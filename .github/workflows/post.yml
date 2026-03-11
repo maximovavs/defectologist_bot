@@ -24,6 +24,8 @@ jobs:
 
     env:
       TZ: "Asia/Nicosia"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
       # управлялки через manual dispatch (если это schedule — дефолты ниже)
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
       AUDIENCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.audience || 'both' }}

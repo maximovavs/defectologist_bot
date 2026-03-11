@@ -1,22 +1,16 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v2.4.0 — Patch 2.0 integrated
-
-What was broken before:
-- Groq hit 429 and publisher silently exhausted candidates.
-- Gemini fallback could be blocked by region or model mismatch.
-- Prompts were effectively too generic -> content looked the same across days.
+Publisher (cron/GitHub Actions) v2.4.1 — Patch 2.1 integrated
 
 What is fixed here:
-1) Publisher passes day_key (MO/TU/WE/TH/FR/SA/SU) into LLM generator.
-   LLM generator enforces different templates/validation per weekday.
-2) Publisher is async-runner (asyncio.run) to support LLM backoff (asyncio.sleep),
-   and avoid creating a new event loop per candidate.
+1) Publisher passes day_key (MO/TU/WE/TH/FR/SA/SU) into async LLM generator.
+2) Publisher runs via asyncio.run() to support Groq backoff/throttle in async code.
 3) If Posted:0 -> sends alert to TELEGRAM_DRAFTS_CHAT_ID with top skip reasons.
 4) Content hygiene:
    - skip non-HTML assets (.ppt/.pdf/...)
    - exclude Logorina archive pages (/news/YYYY-MM)
    - better evidence extraction roots
+5) Telegram HTML rendering is tolerant to ":" / "-" in generated structural headings.
 
 Run:
   python -m src.publisher.run_publisher
@@ -56,7 +50,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/2.4.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/2.4.1 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -89,6 +83,19 @@ if os.getenv("SUPPRESS_INSECURE_TLS_WARNINGS", "1").strip().lower() in ("1", "tr
 # Helpers
 # =========================
 
+DASH_CHARS = r"\-—–"
+SEP = rf"(?:\s*:\s*|\s*[{DASH_CHARS}]\s*)"
+
+AGE_LINE_RE = re.compile(rf"^👶\s*Возраст{SEP}.+\S$", re.IGNORECASE)
+AUDIENCE_LINE_RE = re.compile(rf"^👩‍⚕️\s*Аудитория{SEP}.+\S$", re.IGNORECASE)
+PRACTICE_HEADER_RE = re.compile(
+    rf"^Практика на сегодня\s*\(\s*5\s*[{DASH_CHARS}]\s*7\s*минут\s*\)\s*:?\s*$",
+    re.IGNORECASE,
+)
+NORM_HEADER_RE = re.compile(r"^Норма\s*/\s*когда нужен специалист\s*:?\s*$", re.IGNORECASE)
+SOURCE_HEADER_RE = re.compile(rf"^Источник(?:{SEP}.+\S)?\s*$", re.IGNORECASE)
+
+
 def load_yaml(path: Path) -> Dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
@@ -118,9 +125,8 @@ def weekday_key(dt: datetime) -> str:
 def is_due(rubric: Dict[str, Any], now: datetime) -> bool:
     cadence = (rubric.get("cadence") or "DAILY").upper()
     byweekday = rubric.get("byweekday") or []
-    if byweekday:
-        if weekday_key(now) not in set(byweekday):
-            return False
+    if byweekday and weekday_key(now) not in set(byweekday):
+        return False
     return cadence in ("DAILY", "WEEKLY")
 
 
@@ -192,7 +198,7 @@ def _abs(base_url: str, href: str) -> str:
         return "https:" + href
     if href.startswith("/"):
         return urljoin(base_url, href)
-    if href.startswith("http://") or href.startswith("https://"):
+    if href.startswith(("http://", "https://")):
         return href
     return urljoin(base_url, href)
 
@@ -227,7 +233,6 @@ def parse_logorina_news(url: str, html_text: str) -> List[Dict[str, str]]:
     out = []
     for it in items:
         link = it.get("link", "")
-        # exclude archive-like pages
         if re.search(r"/news/\d{4}-\d{2}/?$", link):
             continue
         out.append(it)
@@ -371,6 +376,23 @@ def _escape(s: str) -> str:
     return _html.escape(s or "", quote=False)
 
 
+def _is_structural_heading(line: str) -> bool:
+    st = (line or "").strip()
+    if not st:
+        return False
+    if AGE_LINE_RE.match(st):
+        return True
+    if AUDIENCE_LINE_RE.match(st):
+        return True
+    if PRACTICE_HEADER_RE.match(st):
+        return True
+    if NORM_HEADER_RE.match(st):
+        return True
+    if SOURCE_HEADER_RE.match(st):
+        return True
+    return False
+
+
 def render_plain_to_telegram_html(plain_text: str) -> str:
     lines = (plain_text or "").splitlines()
     if not lines:
@@ -381,8 +403,6 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
         href = _html.escape(url, quote=True)
         return f'{prefix}<a href="{href}">{_escape(label)}</a>'
 
-    headings = {"Практика на сегодня (5–7 минут)", "Норма / когда нужен специалист", "Источник"}
-
     out: List[str] = []
     for idx, raw in enumerate(lines):
         s = raw.rstrip("\n")
@@ -391,12 +411,11 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
         if idx == 0 and st:
             out.append(f"<b>{_escape(st)}</b>")
             continue
-        if st.startswith(("👶 Возраст:", "👩‍⚕️")):
+
+        if _is_structural_heading(st):
             out.append(f"<b>{_escape(st)}</b>")
             continue
-        if st in headings:
-            out.append(f"<b>{_escape(st)}</b>")
-            continue
+
         if st.startswith("🔗 "):
             url = st[2:].strip()
             if url.startswith(("http://", "https://")):
@@ -404,6 +423,7 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             else:
                 out.append(_escape(st))
             continue
+
         if st.startswith("ℹ️ "):
             out.append(f"<i>{_escape(st)}</i>")
             continue
@@ -531,7 +551,6 @@ async def amain() -> None:
 
             rf = (rubric.get("format") or "").strip().lower()
             if rf == "quality_dashboard":
-                # dashboard handled elsewhere; do not consume daily post budget here
                 continue
 
             all_items: List[Dict[str, str]] = []
@@ -549,7 +568,6 @@ async def amain() -> None:
                 note("no_candidates", rubric.get("id", ""))
                 continue
 
-            # deterministic shuffle per day/rubric/audience
             seed = int(hashlib.sha1(f"{now.date()}|{rubric.get('id','')}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(seed)
             rng.shuffle(all_items)

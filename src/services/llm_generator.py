@@ -3,15 +3,15 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 2.0 — Исправление LLM-провайдеров и логики промптов
+Patch 2.1 — Tolerant validator for weekday templates
 
 Что делает этот модуль:
 1) Groq: устойчивость к 429 (rate limit) через exponential backoff + jitter,
    + общий throttle между любыми LLM-вызовами.
 2) Gemini: корректный вызов через x-goog-api-key. Если ловим региональную блокировку
-   ("User location is not supported") — Gemini отключается на весь прогон, и дальше 100% на Groq.
+   ("User location is not supported") — Gemini отключается на весь прогон, и дальше fallback остаётся на Groq.
 3) Промпты НЕ универсальные: разные шаблоны по дню недели (MO/TU/WE/TH/FR/SA/SU).
-4) Запрет на заглушки/повторяющиеся клише: если модель возвращает banned-фразу — считаем ответ невалидным.
+4) Validator теперь tolerant: проверяет смысловую структуру, а не точные двоеточия/тире/формат заголовков.
 5) Антигаллюцинации: ТОЛЬКО EVIDENCE. Если данных недостаточно — модель обязана вернуть строку "НЕТ_ДАННЫХ".
 
 Совместимость:
@@ -25,7 +25,7 @@ import os
 import random
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Pattern, Tuple
 
 import requests
 
@@ -33,6 +33,10 @@ import requests
 # -----------------------
 # Text helpers
 # -----------------------
+
+DASH_CHARS = r"\-—–"
+SEP = rf"(?:\s*:\s*|\s*[{DASH_CHARS}]\s*)"
+
 
 def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
@@ -48,69 +52,163 @@ def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
     return (cut.rstrip(" .,:;—-") + "…").strip()
 
 
+def _nonempty_lines(text: str) -> List[str]:
+    return [x.strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
+
+
+def _normalize_scan_text(text: str) -> str:
+    return norm_space(text).replace("ё", "е").lower()
+
+
+def _line_matches(line: str, pattern: Pattern[str]) -> bool:
+    return bool(pattern.match((line or "").strip()))
+
+
+def _has_any_line(lines: List[str], pattern: Pattern[str]) -> bool:
+    return any(_line_matches(line, pattern) for line in lines)
+
+
+def _find_first_index(lines: List[str], pattern: Pattern[str]) -> int:
+    for idx, line in enumerate(lines):
+        if _line_matches(line, pattern):
+            return idx
+    return -1
+
+
+def _count_bullet_like_lines(lines: List[str]) -> int:
+    bullet_re = re.compile(r"^(?:[•▪◦·*]|[\-—–]|\d+[.)])\s+\S+", re.IGNORECASE)
+    return sum(1 for line in lines if bullet_re.match(line))
+
+
 # -----------------------
 # Output validators
 # -----------------------
 
 BANNED_PHRASES = [
-    # явная заглушка из прошлых версий
     "Короткая практика без давления",
 ]
 
+AGE_LINE_RE = re.compile(rf"^👶\s*Возраст{SEP}.+\S$", re.IGNORECASE)
+AUDIENCE_LINE_RE = re.compile(rf"^👩‍⚕️\s*Аудитория{SEP}.+\S$", re.IGNORECASE)
+
+PRACTICE_HEADER_RE = re.compile(
+    rf"^Практика на сегодня\s*\(\s*5\s*[{DASH_CHARS}]\s*7\s*минут\s*\)\s*:?\s*$",
+    re.IGNORECASE,
+)
+
+NORM_HEADER_RE = re.compile(
+    r"^Норма\s*/\s*когда нужен специалист\s*:?\s*$",
+    re.IGNORECASE,
+)
+
+SOURCE_LINE_RE = re.compile(
+    rf"^Источник(?:{SEP}.+\S)?\s*$",
+    re.IGNORECASE,
+)
+
+COMMENT_LINE_RE = re.compile(r"^💬\s*\S.*$", re.IGNORECASE)
+
+MYTH_LINE_RE = re.compile(rf"^🔴\s*Миф{SEP}.+\S$", re.IGNORECASE)
+FACT_LINE_RE = re.compile(rf"^🟢\s*Факт{SEP}.+\S$", re.IGNORECASE)
+
+WORD_EXAMPLES_RE = re.compile(rf"^Примеры слов{SEP}.+\S$", re.IGNORECASE)
+
+WEEK_QUESTION_RE = re.compile(rf"^❓\s*Вопрос недели{SEP}.+\S$", re.IGNORECASE)
+ANSWER_LINE_RE = re.compile(rf"^Ответ{SEP}.+\S$", re.IGNORECASE)
+
+PRO_GOAL_RE = re.compile(rf"^•\s*Цель{SEP}.+\S$", re.IGNORECASE)
+PRO_SAMPLE_RE = re.compile(rf"^•\s*Клиническая выборка{SEP}.+\S$", re.IGNORECASE)
+PRO_METHODS_RE = re.compile(rf"^•\s*Методы{SEP}.+\S$", re.IGNORECASE)
+PRO_CONCLUSIONS_RE = re.compile(rf"^•\s*Выводы{SEP}.+\S$", re.IGNORECASE)
+PRO_APPLICABILITY_RE = re.compile(rf"^•\s*Практическая применимость{SEP}.+\S$", re.IGNORECASE)
+
+NAV_SKILL_RE = re.compile(rf"^🧠\s*Навык{SEP}.+\S$", re.IGNORECASE)
+NAV_GOAL_RE = re.compile(rf"^🎯\s*Цель{SEP}.+\S$", re.IGNORECASE)
+NAV_HINT_RE = re.compile(rf"^📌\s*Подсказка{SEP}.+\S$", re.IGNORECASE)
+NAV_METRIC_RE = re.compile(rf"^📏\s*Критерий прогресса{SEP}.+\S$", re.IGNORECASE)
+
 
 def _contains_banned(text: str) -> Optional[str]:
-    blob = text or ""
+    blob = _normalize_scan_text(text or "")
     for ph in BANNED_PHRASES:
-        if ph and ph in blob:
+        probe = _normalize_scan_text(ph)
+        if probe and probe in blob:
             return ph
     return None
 
 
-def _has_nav_strip(text: str) -> bool:
-    lines = [x.strip() for x in (text or "").splitlines()]
-    need = ["🧠 Навык:", "🎯 Цель:", "📌 Подсказка:", "📏 Критерий прогресса:"]
-    return all(any(ln.startswith(n) for ln in lines) for n in need)
+def _has_nav_strip(lines: List[str]) -> bool:
+    nav_lines = [
+        line for line in lines
+        if line.startswith("🧠") or line.startswith("🎯") or line.startswith("📌") or line.startswith("📏")
+    ]
+    if len(nav_lines) != 4:
+        return False
+
+    return (
+        any(_line_matches(line, NAV_SKILL_RE) for line in nav_lines)
+        and any(_line_matches(line, NAV_GOAL_RE) for line in nav_lines)
+        and any(_line_matches(line, NAV_HINT_RE) for line in nav_lines)
+        and any(_line_matches(line, NAV_METRIC_RE) for line in nav_lines)
+    )
 
 
 def _has_common_blocks_parents(text: str) -> bool:
-    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
-    if len(lines) < 10:
+    lines = _nonempty_lines(text)
+    if len(lines) < 9:
         return False
-    if not lines[1].startswith("👶 Возраст:"):
+
+    if not _has_any_line(lines, AGE_LINE_RE):
         return False
-    sset = set(lines)
-    for h in ["Практика на сегодня (5–7 минут)", "Норма / когда нужен специалист", "Источник"]:
-        if h not in sset:
-            return False
-    if not _has_nav_strip(text):
+
+    practice_idx = _find_first_index(lines, PRACTICE_HEADER_RE)
+    if practice_idx == -1:
         return False
-    if not any(ln.startswith("💬 ") for ln in lines):
+
+    norm_idx = _find_first_index(lines, NORM_HEADER_RE)
+    if norm_idx == -1 or norm_idx < practice_idx:
         return False
+
+    if not _has_any_line(lines, SOURCE_LINE_RE):
+        return False
+
+    if not _has_nav_strip(lines):
+        return False
+
+    if not _has_any_line(lines, COMMENT_LINE_RE):
+        return False
+
     return True
 
 
 def _has_common_blocks_pros(text: str) -> bool:
-    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
-    if len(lines) < 10:
+    lines = _nonempty_lines(text)
+    if len(lines) < 9:
         return False
-    if not lines[1].startswith("👩‍⚕️ Аудитория:"):
+
+    if not _has_any_line(lines, AUDIENCE_LINE_RE):
         return False
-    need = [
-        "• Цель:",
-        "• Клиническая выборка:",
-        "• Методы:",
-        "• Выводы:",
-        "• Практическая применимость:",
+
+    required = [
+        PRO_GOAL_RE,
+        PRO_SAMPLE_RE,
+        PRO_METHODS_RE,
+        PRO_CONCLUSIONS_RE,
+        PRO_APPLICABILITY_RE,
     ]
-    for req in need:
-        if not any(ln.startswith(req) for ln in lines):
+    for pattern in required:
+        if not _has_any_line(lines, pattern):
             return False
-    if "Источник" not in lines:
+
+    if not _has_any_line(lines, SOURCE_LINE_RE):
         return False
-    if not _has_nav_strip(text):
+
+    if not _has_nav_strip(lines):
         return False
-    if not any(ln.startswith("💬 ") for ln in lines):
+
+    if not _has_any_line(lines, COMMENT_LINE_RE):
         return False
+
     return True
 
 
@@ -131,52 +229,57 @@ def _validate_by_day(text: str, audience: str, day_key: str, rubric_format: str)
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
 
+    lines = _nonempty_lines(out)
+
     if aud == "pros":
         if not _has_common_blocks_pros(out):
             return False, "structure_invalid_pros"
         return True, "ok"
 
-    # parents
     if not _has_common_blocks_parents(out):
         return False, "structure_invalid_parents"
 
-    lines = [x.strip() for x in out.splitlines() if x.strip()]
-
-    # Day-specific constraints
     if dk == "WE" or rf == "myth_fact":
-        if not any(ln.startswith("🔴 Миф:") for ln in lines):
+        if not _has_any_line(lines, MYTH_LINE_RE):
             return False, "missing_myth_line"
-        if not any(ln.startswith("🟢 Факт:") for ln in lines):
+        if not _has_any_line(lines, FACT_LINE_RE):
             return False, "missing_fact_line"
 
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        # must contain examples of words
-        if not any(ln.startswith("Примеры слов:") for ln in lines):
+        if not _has_any_line(lines, WORD_EXAMPLES_RE):
             return False, "missing_word_examples"
 
     if dk == "FR" or rf == "question_week":
-        if not any(ln.startswith("❓ Вопрос недели:") for ln in lines):
+        if not _has_any_line(lines, WEEK_QUESTION_RE):
             return False, "missing_week_question"
-        if not any(ln.startswith("Ответ:") for ln in lines):
+        if not _has_any_line(lines, ANSWER_LINE_RE):
             return False, "missing_answer"
 
     if dk == "SU" or rf == "age_norms":
-        # ensure norms bullet points exist before Practice and include disclaimer phrase
-        intro: List[str] = []
-        for ln in lines[2:]:
-            if ln == "Практика на сегодня (5–7 минут)":
-                break
-            intro.append(ln)
-        bullets = [ln for ln in intro if ln.startswith("•")]
-        if len(bullets) < 3:
+        practice_idx = _find_first_index(lines, PRACTICE_HEADER_RE)
+        if practice_idx == -1:
+            return False, "missing_practice_header"
+
+        before_practice = lines[:practice_idx]
+        bullets_count = _count_bullet_like_lines(before_practice)
+        if bullets_count < 3:
             return False, "missing_norms_bullets"
-        if "Каждый ребёнок развивается индивидуально." not in "\n".join(intro):
+
+        before_blob = "\n".join(before_practice).replace("ё", "е").lower()
+        if "каждый ребенок развивается индивидуально" not in before_blob:
             return False, "missing_individual_disclaimer"
 
     if dk == "TH" or rf == "bilingual_parents":
-        # should mention bilingual / code-switching etc somewhere
-        blob = " ".join(lines).lower()
-        if not any(k in blob for k in ["билинг", "двуязы", "код", "code-switch", "переключ"]):
+        blob = " ".join(lines).replace("ё", "е").lower()
+        bilingual_keys = [
+            "билинг",
+            "двуязы",
+            "код",
+            "code-switch",
+            "code switch",
+            "переключ",
+        ]
+        if not any(key in blob for key in bilingual_keys):
             return False, "missing_bilingual_focus"
 
     return True, "ok"
@@ -190,9 +293,9 @@ def _validate_by_day(text: str, audience: str, day_key: str, rubric_format: str)
 LLM_CALL_DELAY_SEC = float(os.getenv("LLM_CALL_DELAY_SEC", "2.0"))
 
 # Groq retries
-LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))  # 3–5
-LLM_BACKOFF_MIN = float(os.getenv("LLM_BACKOFF_MIN", "15"))  # first wait ~15–30s
-LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))  # cap
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
+LLM_BACKOFF_MIN = float(os.getenv("LLM_BACKOFF_MIN", "15"))
+LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))
 
 # Models
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
@@ -217,7 +320,9 @@ async def _throttle() -> None:
 
 def _is_quota_error(status: int, text: str) -> bool:
     t = (text or "").lower()
-    return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
+    return status == 429 or any(
+        key in t for key in ["too many requests", "rate limit", "quota", "resource_exhausted"]
+    )
 
 
 def _is_gemini_region_block(text: str) -> bool:
@@ -228,6 +333,7 @@ def _is_gemini_region_block(text: str) -> bool:
 async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: int = 70) -> requests.Response:
     def _do() -> requests.Response:
         return requests.post(url, headers=headers, json=payload, timeout=timeout)
+
     return await asyncio.to_thread(_do)
 
 
@@ -255,13 +361,12 @@ async def groq_chat(prompt: str, api_key: str) -> str:
         txt = resp.text or ""
         last_err = f"{resp.status_code}: {txt[:240]}"
         if _is_quota_error(resp.status_code, txt):
-            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)  # 15–30s
+            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
             wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-            wait = wait * random.uniform(0.85, 1.15)  # jitter
+            wait = wait * random.uniform(0.85, 1.15)
             await asyncio.sleep(wait)
             continue
 
-        # any other error -> fail fast
         resp.raise_for_status()
 
     raise RuntimeError(f"groq_failed_after_retries:{last_err}")
@@ -304,7 +409,7 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
 
 def _nav_strip_rules() -> str:
     return (
-        "Блок навигации — РОВНО 4 строки (каждая 3–5 слов после двоеточия):\n"
+        "Блок навигации — РОВНО 4 строки (каждая 3–5 слов после метки; после метки допустимы ':' или '-').\n"
         "🧠 Навык: ...\n"
         "🎯 Цель: ...\n"
         "📌 Подсказка: ...\n"
@@ -321,6 +426,8 @@ def _common_rules(max_chars: int) -> str:
         "Запрещено выдумывать упражнения/нормы/факты: используй ТОЛЬКО EVIDENCE ниже.\n"
         "Если EVIDENCE не подходит рубрике — верни строго одну строку: НЕТ_ДАННЫХ\n"
         "НЕ используй HTML/Markdown.\n"
+        "После служебных меток допустимы ':' или '-'.\n"
+        "Запрещено использовать фразу: Короткая практика без давления.\n"
     )
 
 
@@ -347,7 +454,6 @@ def build_generation_prompt(
     rules = _common_rules(max_chars)
     nav = _nav_strip_rules()
 
-    # Fallback if day_key is not provided: infer day from rubric_format
     if not dk:
         if aud == "pros":
             dk = "SA"
@@ -365,7 +471,6 @@ def build_generation_prompt(
             dk = "MO"
 
     if aud == "pros":
-        # Saturday: method piggybank for pros
         template = (
             f"{rubric_title} {title_suffix}\n"
             "👩‍⚕️ Аудитория: специалисты\n\n"
@@ -384,11 +489,9 @@ def build_generation_prompt(
         )
         return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
-    # Parents templates by weekday
     header = f"{rubric_title} {title_suffix}\n👶 Возраст: <диапазон>\n\n"
 
     if dk == "WE":
-        # Myth / Fact
         template = (
             header +
             "🔴 Миф: <популярное заблуждение, опровергаемое EVIDENCE>\n"
@@ -409,7 +512,6 @@ def build_generation_prompt(
         )
 
     elif dk == "TU":
-        # Games: бытовая игра + примеры слов
         template = (
             header +
             "Суть игры: <1–2 предложения строго по EVIDENCE>\n"
@@ -430,7 +532,6 @@ def build_generation_prompt(
         )
 
     elif dk == "TH":
-        # Bilingual corner
         template = (
             header +
             "Тема: <code-switching/отказ говорить по-русски/акцент — по EVIDENCE>\n"
@@ -451,7 +552,6 @@ def build_generation_prompt(
         )
 
     elif dk == "FR":
-        # Question week
         template = (
             header +
             "❓ Вопрос недели: <короткий вопрос по теме EVIDENCE>\n"
@@ -471,7 +571,6 @@ def build_generation_prompt(
         )
 
     elif dk == "SU":
-        # Age norms
         template = (
             header +
             "Ориентиры нормы (3–5 пунктов):\n"
@@ -494,7 +593,6 @@ def build_generation_prompt(
         )
 
     else:
-        # MO + fallback: advice day
         template = (
             header +
             "Один конкретный мини-приём из EVIDENCE + как сделать без сопротивления.\n\n"
@@ -594,8 +692,12 @@ async def generate_post_plain_from_evidence_async(
             if ok:
                 return out, True, "ok:groq"
 
-            # One more attempt to fix structure (still uses backoff/throttle)
-            out2 = postprocess(await groq_chat(prompt + "\n\nПОВТОРИ. Строго соблюдай шаблон. Никакой воды.", groq_key))
+            out2 = postprocess(
+                await groq_chat(
+                    prompt + "\n\nПОВТОРИ. Строго соблюдай смысловую структуру шаблона. Допустимы ':' или '-'. Никакой воды.",
+                    groq_key,
+                )
+            )
             ok2, reason2 = validate(out2)
             if ok2:
                 return out2, True, "ok:groq_retry"
@@ -616,7 +718,6 @@ async def generate_post_plain_from_evidence_async(
                 return out, True, f"ok:gemini:{GEMINI_MODEL}"
             return "", False, f"structure_invalid_gemini:{reason}"
         except Exception as e:
-            # If Gemini blocked by region, caller will keep using Groq on next runs (flag is shared)
             return "", False, f"gemini_failed:{e} | groq={groq_err}"
 
     return "", False, f"llm_failed:groq={groq_err}"

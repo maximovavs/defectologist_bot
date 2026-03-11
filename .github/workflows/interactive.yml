@@ -30,13 +30,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # aiogram is required for interactive bot
-          pip install "aiogram>=3.7.0"
 
       - name: Smoke run (long-polling with timeout)
         env:
@@ -47,4 +46,21 @@ jobs:
           LEAD_MAGNET_FILE_ID: ${{ secrets.LEAD_MAGNET_FILE_ID || '' }}
         run: |
           echo "NOTE: GitHub Actions не предназначен для постоянного long-polling. Это только smoke test."
-          timeout "${RUN_MINUTES}m" python -m src.bot.main || true
+          echo "RUN_MINUTES=${RUN_MINUTES}"
+
+          set +e
+          # 124 — timeout exit code; SIGINT делает остановку мягче
+          timeout --signal=SIGINT "${RUN_MINUTES}m" python -m src.bot.main
+          code=$?
+          set -e
+
+          echo "Bot process exit code: ${code}"
+
+          # OK: timeout reached (124) or clean exit (0)
+          # FAIL: anything else
+          if [ "${code}" -ne 0 ] && [ "${code}" -ne 124 ]; then
+            echo "Smoke test failed: bot exited unexpectedly."
+            exit "${code}"
+          fi
+
+          echo "Smoke test completed (timeout or clean exit)."

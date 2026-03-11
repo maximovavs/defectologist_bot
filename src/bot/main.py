@@ -13,11 +13,11 @@ from src.bot.settings import TELEGRAM_BOT_TOKEN
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    log = logging.getLogger("interactive-bot")
 
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
-    # aiogram>=3.7.0: parse_mode is set via DefaultBotProperties
     bot = Bot(
         token=TELEGRAM_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -26,7 +26,13 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(user_router)
 
-    await dp.start_polling(bot)
+    log.info("Starting polling...")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # ensure aiohttp session is closed cleanly
+        await bot.session.close()
+        log.info("Bot session closed.")
 
 
 if __name__ == "__main__":

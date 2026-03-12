@@ -18,13 +18,15 @@ on:
         required: false
         default: "auto"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   post:
     runs-on: ubuntu-latest
 
     env:
       TZ: "Asia/Nicosia"
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
       # управлялки через manual dispatch (если это schedule — дефолты ниже)
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
@@ -35,28 +37,28 @@ jobs:
       INSECURE_TLS_DOMAINS: "logorina.ru"
       SUPPRESS_INSECURE_TLS_WARNINGS: "1"
 
-      # Patch 2.0 — анти-лимиты (Groq backoff + throttle)
+      # анти-лимиты (Groq backoff + throttle)
       LLM_MAX_RETRIES: "5"
       LLM_CALL_DELAY_SEC: "2"
       LLM_BACKOFF_MIN: "15"
       LLM_BACKOFF_MAX: "120"
 
-      # Модели (можно менять без кода)
+      # Модели
       GROQ_MODEL: "llama-3.3-70b-versatile"
       GEMINI_MODEL: "gemini-2.5-flash"
 
       # Telegram рендеринг ссылок
       TELEGRAM_PARSE_MODE: "HTML"
 
-      # общий лимит поста (совпадает с кодом)
+      # общий лимит поста
       POST_MAX_CHARS: "1000"
       TG_CAPTION_MAX_BYTES: "950"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"

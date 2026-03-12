@@ -14,6 +14,9 @@ on:
           - "20"
           - "30"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   run_interactive_bot:
     runs-on: ubuntu-latest
@@ -21,14 +24,13 @@ jobs:
 
     env:
       TZ: "Asia/Nicosia"
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       RUN_MINUTES: ${{ github.event.inputs.run_minutes || '10' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
@@ -50,15 +52,12 @@ jobs:
           echo "RUN_MINUTES=${RUN_MINUTES}"
 
           set +e
-          # 124 — timeout exit code; SIGINT делает остановку мягче
           timeout --signal=SIGINT "${RUN_MINUTES}m" python -m src.bot.main
           code=$?
           set -e
 
           echo "Bot process exit code: ${code}"
 
-          # OK: timeout reached (124) or clean exit (0)
-          # FAIL: anything else
           if [ "${code}" -ne 0 ] && [ "${code}" -ne 124 ]; then
             echo "Smoke test failed: bot exited unexpectedly."
             exit "${code}"

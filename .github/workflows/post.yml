@@ -57,6 +57,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Restore .state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: logoped-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            logoped-state-${{ github.ref_name }}-
+            logoped-state-
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -76,7 +85,21 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          mkdir -p .state
           python -m src.publisher.run_publisher
+
+      - name: Inspect .state
+        if: always()
+        run: |
+          echo "Contents of .state:"
+          ls -la .state || true
+
+      - name: Save .state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: logoped-state-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload dry-run artifacts
         if: ${{ env.DRY_RUN == '1' }}

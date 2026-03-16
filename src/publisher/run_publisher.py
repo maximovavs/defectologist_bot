@@ -1,37 +1,36 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v3.0.0
+Publisher (cron/GitHub Actions) v4.0.0
 
 Что изменено:
-1) LLM теперь получает weekday-aware prompt, но контент строится как abstract summary, а не сухой список.
-2) Добавлена SQLite-дедупликация публикаций:
-   - canonical URL
-   - хеш текста
-   - similarity check по тексту
-3) Если новый текст совпадает с публикацией со вчерашнего дня на >= 90%,
-   пост отклоняется и шлётся отдельный alert в техчат.
+1) LLM генерирует deep narrative summary вместо сухих тезисов.
+2) Добавлена семантическая дедупликация:
+   - exact URL
+   - exact hash по evidence/post
+   - cosine similarity по векторным представлениям evidence/post
+3) Если новый материал семантически слишком похож на уже опубликованный,
+   он пропускается. Если совпадение с недавним материалом >= порога — идёт alert в техчат.
 """
 
 import asyncio
-import os
-import re
-import json
-import random
 import hashlib
-import shutil
 import html as _html
+import os
+import random
+import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dtime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse
 
-import requests
-import yaml
 import feedparser
+import requests
+import urllib3
+import yaml
 from bs4 import BeautifulSoup
 from dateutil import tz
-import urllib3
 
 from src.services.image_builder import render_image_card
 from src.services.llm_generator import generate_post_plain_from_evidence_async
@@ -47,7 +46,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/3.0.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.0.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -62,9 +61,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
-POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1150"))
+POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.90"))
+
+SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.95"))
+RECENT_ALERT_HOURS = int(os.getenv("RECENT_ALERT_HOURS", "36"))
 
 INSECURE_TLS_DOMAINS = [
     d.strip().lower()
@@ -81,10 +82,10 @@ if os.getenv("SUPPRESS_INSECURE_TLS_WARNINGS", "1").strip().lower() in ("1", "tr
 # =========================
 
 SECTION_HEADERS = {
-    "Почему это важно",
-    "Что делать",
-    "Что это даст",
-    "Мини-практика",
+    "Проблема",
+    "Решение",
+    "Как сделать дома",
+    "Результат",
     "Источник",
     "Введение",
     "Методы",
@@ -147,9 +148,8 @@ def _escape(s: str) -> str:
     return _html.escape(s or "", quote=False)
 
 
-def _start_of_yesterday(now: datetime) -> datetime:
-    yesterday = (now - timedelta(days=1)).date()
-    return datetime.combine(yesterday, dtime.min, tzinfo=now.tzinfo)
+def _start_recent_window(now: datetime) -> datetime:
+    return now - timedelta(hours=RECENT_ALERT_HOURS)
 
 
 # =========================
@@ -259,9 +259,9 @@ def parse_logopedy_articles(url: str, html_text: str) -> List[Dict[str, str]]:
 
 def parse_logopediya_publ(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
-    items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/publ/[^\"']+")
+    items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/documents/[^\"']+|/publ/[^\"']+")
     items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
-    return items[:80]
+    return items[:120]
 
 
 SITE_PARSERS = {
@@ -319,7 +319,7 @@ def get_canonical(url: str) -> str:
         return url
 
 
-def extract_evidence_text(url: str, max_chars: int = 3200) -> str:
+def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     r = requests.get(url, headers=HEADERS, timeout=35, verify=_verify_for_url(url))
     r.raise_for_status()
 
@@ -346,10 +346,10 @@ def extract_evidence_text(url: str, max_chars: int = 3200) -> str:
 
     for el in root.select("h2, h3, p, li"):
         txt = norm_space(el.get_text(" ", strip=True))
-        if len(txt) < 25:
+        if len(txt) < 20:
             continue
         low = txt.lower()
-        if any(bad in low for bad in ["cookie", "privacy", "политик", "подпис", "реклама"]):
+        if any(bad in low for bad in ["cookie", "privacy", "политик", "подпис", "реклама", "скачать", "регистрация"]):
             continue
         chunks.append(txt)
         if sum(len(x) for x in chunks) > max_chars * 1.35:
@@ -463,39 +463,26 @@ def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_ful
     send_message(chat_id, html_full_post)
 
 
-def send_similarity_alert(
+def send_semantic_alert(
     chat_id: str,
     candidate_url: str,
     matched_url: str,
     score: float,
     audience: str,
     rubric_id: str,
+    match_field: str,
 ) -> None:
     cand = _html.escape(candidate_url, quote=True)
     hit = _html.escape(matched_url, quote=True)
     html_text = (
-        "⚠️ <b>Dedup alert</b>\n"
-        f"Новый текст отклонён: similarity >= {SIMILARITY_THRESHOLD:.2f}\n"
-        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)}\n\n"
+        "⚠️ <b>Semantic dedup alert</b>\n"
+        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
+        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | FIELD={_escape(match_field)}\n\n"
         f"Новый кандидат: <a href=\"{cand}\">{_escape(candidate_url)}</a>\n"
         f"Похож на: <a href=\"{hit}\">{_escape(matched_url)}</a>\n"
-        f"Similarity: <b>{score:.3f}</b>"
+        f"Cosine: <b>{score:.3f}</b>"
     )
     send_message(chat_id, html_text)
-
-
-# =========================
-# State
-# =========================
-
-def load_state(name: str, default: Any) -> Any:
-    p = STATE_DIR / name
-    if not p.exists():
-        return default
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return default
 
 
 # =========================
@@ -519,7 +506,7 @@ async def amain() -> None:
 
     sources = load_sources()
     store = PublicationStore(STATE_DIR / "publication_history.sqlite3")
-    yesterday_since = _start_of_yesterday(now).isoformat()
+    recent_since_iso = _start_recent_window(now).isoformat()
 
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
     if AUDIENCE == "both":
@@ -533,7 +520,8 @@ async def amain() -> None:
     skip_reasons: Dict[str, int] = {}
     samples: List[str] = []
     seen_urls_this_run: set[str] = set()
-    seen_hashes_this_run: set[str] = set()
+    seen_body_hashes_this_run: set[str] = set()
+    seen_evidence_hashes_this_run: set[str] = set()
 
     def note(reason: str, url: str) -> None:
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -580,7 +568,7 @@ async def amain() -> None:
             rng = random.Random(seed)
             rng.shuffle(all_items)
 
-            for cand in all_items[:90]:
+            for cand in all_items[:100]:
                 url = (cand.get("link") or "").strip()
                 if not url.startswith(("http://", "https://")):
                     continue
@@ -602,13 +590,51 @@ async def amain() -> None:
                     continue
 
                 try:
-                    evidence = extract_evidence_text(canon, max_chars=3200)
+                    evidence = extract_evidence_text(canon, max_chars=3600)
                 except Exception as e:
                     note("evidence_fetch_failed", f"{canon} ({e})")
                     continue
 
                 if len((evidence or "").strip()) < 260:
                     note("no_evidence_short", canon)
+                    continue
+
+                evidence_hash = sha1(norm_space(evidence))
+                if evidence_hash in seen_evidence_hashes_this_run:
+                    note("dup_evidence_same_run", canon)
+                    continue
+
+                if store.has_evidence_hash(evidence_hash):
+                    note("dup_evidence_hash_db", canon)
+                    continue
+
+                sem_source_hit = store.find_semantic_duplicate(
+                    evidence,
+                    threshold=SEMANTIC_THRESHOLD,
+                    since_iso=None,
+                    limit=500,
+                    compare="evidence",
+                )
+                if sem_source_hit:
+                    note("dup_semantic_source", canon)
+                    if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
+                        recent_hit = store.find_semantic_duplicate(
+                            evidence,
+                            threshold=SEMANTIC_THRESHOLD,
+                            since_iso=recent_since_iso,
+                            limit=120,
+                            compare="evidence",
+                        )
+                        if recent_hit:
+                            send_semantic_alert(
+                                TELEGRAM_DRAFTS_CHAT_ID,
+                                canon,
+                                recent_hit.canonical_url,
+                                recent_hit.similarity,
+                                aud,
+                                rubric_id,
+                                recent_hit.match_field,
+                            )
                     continue
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
@@ -635,45 +661,45 @@ async def amain() -> None:
                     continue
 
                 body_hash = sha1(norm_space(plain))
-                if body_hash in seen_hashes_this_run:
+                if body_hash in seen_body_hashes_this_run:
                     note("dup_body_same_run", canon)
                     continue
 
                 if store.has_body_hash(body_hash):
-                    note("dup_body_db", canon)
+                    note("dup_body_hash_db", canon)
                     continue
 
-                yesterday_hit = store.find_similar(
+                sem_body_hit = store.find_semantic_duplicate(
                     plain,
-                    threshold=SIMILARITY_THRESHOLD,
-                    since_iso=yesterday_since,
-                    limit=60,
-                )
-                if yesterday_hit:
-                    note("dup_yesterday_90", canon)
-                    if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
-                        send_similarity_alert(
-                            TELEGRAM_DRAFTS_CHAT_ID,
-                            canon,
-                            yesterday_hit.canonical_url,
-                            yesterday_hit.similarity,
-                            aud,
-                            rubric_id,
-                        )
-                    continue
-
-                historic_hit = store.find_similar(
-                    plain,
-                    threshold=SIMILARITY_THRESHOLD,
+                    threshold=SEMANTIC_THRESHOLD,
                     since_iso=None,
-                    limit=400,
+                    limit=500,
+                    compare="body",
                 )
-                if historic_hit:
-                    note("dup_similar_db", canon)
+                if sem_body_hit:
+                    note("dup_semantic_post", canon)
+                    if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
+                        recent_post_hit = store.find_semantic_duplicate(
+                            plain,
+                            threshold=SEMANTIC_THRESHOLD,
+                            since_iso=recent_since_iso,
+                            limit=120,
+                            compare="body",
+                        )
+                        if recent_post_hit:
+                            send_semantic_alert(
+                                TELEGRAM_DRAFTS_CHAT_ID,
+                                canon,
+                                recent_post_hit.canonical_url,
+                                recent_post_hit.similarity,
+                                aud,
+                                rubric_id,
+                                recent_post_hit.match_field,
+                            )
                     continue
 
                 html_full = render_plain_to_telegram_html(plain)
-                theses = ["💡 " + rubric_title, "📝 краткий разбор", "🧠 без воды и дублей"]
+                theses = ["📚 TL;DR статьи", "🧠 конкретные приемы", "🚫 без дублей"]
                 card = render_image_card(rubric_title, theses, branding, age_tag="")
 
                 if DRY_RUN:
@@ -686,10 +712,13 @@ async def amain() -> None:
                     if not TELEGRAM_CHAT_ID:
                         raise RuntimeError("TELEGRAM_CHAT_ID missing")
                     send_post_with_card(TELEGRAM_CHAT_ID, card, plain, html_full)
+
                     store.record_publication(
                         canonical_url=canon,
                         body_hash=body_hash,
                         body_text=plain,
+                        evidence_hash=evidence_hash,
+                        evidence_text=evidence,
                         posted_at=now.isoformat(),
                         audience=aud,
                         rubric_id=rubric_id,
@@ -698,7 +727,8 @@ async def amain() -> None:
                     )
 
                 seen_urls_this_run.add(canon)
-                seen_hashes_this_run.add(body_hash)
+                seen_body_hashes_this_run.add(body_hash)
+                seen_evidence_hashes_this_run.add(evidence_hash)
 
                 posted += 1
                 await asyncio.sleep(1.0)
@@ -712,7 +742,7 @@ async def amain() -> None:
 
     if posted == 0 and not DRY_RUN:
         if TELEGRAM_DRAFTS_CHAT_ID:
-            top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
+            top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:12]
             lines = [
                 "⚠️ Publisher: не удалось опубликовать пост (Posted: 0)",
                 f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",

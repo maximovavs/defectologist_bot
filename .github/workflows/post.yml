@@ -20,10 +20,12 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   post:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
 
     env:
       TZ: "Asia/Nicosia"
@@ -37,11 +39,17 @@ jobs:
       INSECURE_TLS_DOMAINS: "logorina.ru"
       SUPPRESS_INSECURE_TLS_WARNINGS: "1"
 
-      # анти-лимиты (Groq backoff + throttle)
-      LLM_MAX_RETRIES: "5"
-      LLM_CALL_DELAY_SEC: "2"
-      LLM_BACKOFF_MIN: "15"
-      LLM_BACKOFF_MAX: "120"
+      # анти-лимиты LLM
+      LLM_MAX_RETRIES: "3"
+      LLM_CALL_DELAY_SEC: "1.5"
+      LLM_BACKOFF_MIN: "8"
+      LLM_BACKOFF_MAX: "45"
+
+      # лимиты publisher run
+      MAX_RUN_SECONDS: "1500"
+      MAX_CANDIDATES_PER_RUBRIC: "25"
+      MAX_SKIPS_PER_RUBRIC: "12"
+      MAX_LLM_SECONDS_PER_CANDIDATE: "180"
 
       # Модели
       GROQ_MODEL: "llama-3.3-70b-versatile"
@@ -86,7 +94,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           mkdir -p .state
-          python -m src.publisher.run_publisher
+          python -u -m src.publisher.run_publisher
 
       - name: Inspect .state
         if: always()

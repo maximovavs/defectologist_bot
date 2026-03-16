@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.0.0
+Publisher (cron/GitHub Actions) v4.1.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -10,6 +10,12 @@ Publisher (cron/GitHub Actions) v4.0.0
    - cosine similarity по векторным представлениям evidence/post
 3) Если новый материал семантически слишком похож на уже опубликованный,
    он пропускается. Если совпадение с недавним материалом >= порога — идёт alert в техчат.
+4) Добавлены защитные лимиты:
+   - глобальный лимит времени на весь run
+   - лимит кандидатов на рубрику
+   - лимит skip-ов на рубрику
+   - таймаут на генерацию одного кандидата
+5) Добавлено подробное логирование в stdout для GitHub Actions.
 """
 
 import asyncio
@@ -19,8 +25,9 @@ import os
 import random
 import re
 import shutil
+import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -46,7 +53,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.0.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.1.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -66,6 +73,11 @@ TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 
 SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.95"))
 RECENT_ALERT_HOURS = int(os.getenv("RECENT_ALERT_HOURS", "36"))
+
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
+MAX_CANDIDATES_PER_RUBRIC = int(os.getenv("MAX_CANDIDATES_PER_RUBRIC", "25"))
+MAX_SKIPS_PER_RUBRIC = int(os.getenv("MAX_SKIPS_PER_RUBRIC", "12"))
+MAX_LLM_SECONDS_PER_CANDIDATE = int(os.getenv("MAX_LLM_SECONDS_PER_CANDIDATE", "180"))
 
 INSECURE_TLS_DOMAINS = [
     d.strip().lower()
@@ -259,7 +271,12 @@ def parse_logopedy_articles(url: str, html_text: str) -> List[Dict[str, str]]:
 
 def parse_logopediya_publ(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
-    items = _collect_links(url, soup, "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a", r"/documents/[^\"']+|/publ/[^\"']+")
+    items = _collect_links(
+        url,
+        soup,
+        "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a",
+        r"/documents/[^\"']+|/publ/[^\"']+",
+    )
     items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
     return items[:120]
 
@@ -497,6 +514,9 @@ async def amain() -> None:
 
     tzname = channel_cfg.get("timezone", "Asia/Nicosia")
     now = get_local_now(tzname)
+    run_started_monotonic = time.monotonic()
+    print(f"[START] Publisher started at {now.isoformat()}", flush=True)
+
     week_key = iso_week_key(now)
     day = weekday_key(now)
 
@@ -548,6 +568,7 @@ async def amain() -> None:
 
             rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
+            rubric_skips = 0
 
             all_items: List[Dict[str, str]] = []
             for sid in rubric.get("sources", []) or []:
@@ -568,44 +589,112 @@ async def amain() -> None:
             rng = random.Random(seed)
             rng.shuffle(all_items)
 
-            for cand in all_items[:100]:
+            print(
+                f"[RUBRIC] rubric={rubric_id} audience={aud} candidates_total={len(all_items)} max_scan={MAX_CANDIDATES_PER_RUBRIC}",
+                flush=True,
+            )
+
+            for cand in all_items[:MAX_CANDIDATES_PER_RUBRIC]:
                 url = (cand.get("link") or "").strip()
+
+                elapsed = time.monotonic() - run_started_monotonic
+                if elapsed > MAX_RUN_SECONDS:
+                    note("max_run_seconds", rubric_id)
+                    print(f"[STOP] max_run_seconds reached: {elapsed:.1f}s", flush=True)
+                    break
+
+                print(f"[CANDIDATE] rubric={rubric_id} audience={aud} url={url}", flush=True)
+
                 if not url.startswith(("http://", "https://")):
+                    rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
+
                 if _SKIP_EXT_RE.search(url):
                     note("skip_non_html_asset", url)
+                    rubric_skips += 1
+                    print(f"[SKIP] skip_non_html_asset url={url}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 canon = get_canonical(url)
                 if _SKIP_EXT_RE.search(canon):
                     note("skip_non_html_asset", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] skip_non_html_asset canon={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 if canon in seen_urls_this_run:
                     note("dup_url_same_run", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] dup_url_same_run url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 if store.has_url(canon):
                     note("dup_url_db", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] dup_url_db url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 try:
                     evidence = extract_evidence_text(canon, max_chars=3600)
                 except Exception as e:
                     note("evidence_fetch_failed", f"{canon} ({e})")
+                    rubric_skips += 1
+                    print(f"[SKIP] evidence_fetch_failed url={canon} err={e}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 if len((evidence or "").strip()) < 260:
                     note("no_evidence_short", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] no_evidence_short url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 evidence_hash = sha1(norm_space(evidence))
                 if evidence_hash in seen_evidence_hashes_this_run:
                     note("dup_evidence_same_run", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] dup_evidence_same_run url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 if store.has_evidence_hash(evidence_hash):
                     note("dup_evidence_hash_db", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] dup_evidence_hash_db url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 sem_source_hit = store.find_semantic_duplicate(
@@ -617,6 +706,11 @@ async def amain() -> None:
                 )
                 if sem_source_hit:
                     note("dup_semantic_source", canon)
+                    rubric_skips += 1
+                    print(
+                        f"[SKIP] dup_semantic_source url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
+                        flush=True,
+                    )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                         recent_hit = store.find_semantic_duplicate(
                             evidence,
@@ -635,38 +729,73 @@ async def amain() -> None:
                                 rubric_id,
                                 recent_hit.match_field,
                             )
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
-                plain, ok, llm_note = await generate_post_plain_from_evidence_async(
-                    rubric_title=rubric_title,
-                    rubric_format=rf,
-                    audience=aud,
-                    title_suffix=title_suffix,
-                    source_domain=sd,
-                    source_url=canon,
-                    evidence_text=evidence,
-                    disclaimer=disclaimer,
-                    hashtags=hashtags if aud != "pros" else [],
-                    provider=PROVIDER,
-                    groq_key=GROQ_API_KEY,
-                    gemini_key=GEMINI_API_KEY,
-                    max_chars=POST_MAX_CHARS,
-                    day_key=day,
-                )
+                try:
+                    plain, ok, llm_note = await asyncio.wait_for(
+                        generate_post_plain_from_evidence_async(
+                            rubric_title=rubric_title,
+                            rubric_format=rf,
+                            audience=aud,
+                            title_suffix=title_suffix,
+                            source_domain=sd,
+                            source_url=canon,
+                            evidence_text=evidence,
+                            disclaimer=disclaimer,
+                            hashtags=hashtags if aud != "pros" else [],
+                            provider=PROVIDER,
+                            groq_key=GROQ_API_KEY,
+                            gemini_key=GEMINI_API_KEY,
+                            max_chars=POST_MAX_CHARS,
+                            day_key=day,
+                        ),
+                        timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
+                    )
+                except asyncio.TimeoutError:
+                    note("llm_timeout", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] llm_timeout url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
 
                 if not ok or not plain:
                     note(llm_note, canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] {llm_note} url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 body_hash = sha1(norm_space(plain))
                 if body_hash in seen_body_hashes_this_run:
                     note("dup_body_same_run", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] dup_body_same_run url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 if store.has_body_hash(body_hash):
                     note("dup_body_hash_db", canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] dup_body_hash_db url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 sem_body_hit = store.find_semantic_duplicate(
@@ -678,6 +807,11 @@ async def amain() -> None:
                 )
                 if sem_body_hit:
                     note("dup_semantic_post", canon)
+                    rubric_skips += 1
+                    print(
+                        f"[SKIP] dup_semantic_post url={canon} matched={sem_body_hit.canonical_url} score={sem_body_hit.similarity:.3f}",
+                        flush=True,
+                    )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                         recent_post_hit = store.find_semantic_duplicate(
                             plain,
@@ -696,6 +830,10 @@ async def amain() -> None:
                                 rubric_id,
                                 recent_post_hit.match_field,
                             )
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
                     continue
 
                 html_full = render_plain_to_telegram_html(plain)
@@ -731,12 +869,17 @@ async def amain() -> None:
                 seen_evidence_hashes_this_run.add(evidence_hash)
 
                 posted += 1
+                print(f"[POSTED] rubric={rubric_id} audience={aud} url={canon}", flush=True)
                 await asyncio.sleep(1.0)
                 break
 
+            if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS:
+                break
             if posted >= max_posts:
                 break
 
+        if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS:
+            break
         if posted >= max_posts:
             break
 
@@ -758,9 +901,12 @@ async def amain() -> None:
                 lines.extend(samples)
             send_message(TELEGRAM_DRAFTS_CHAT_ID, "\n".join(lines))
         else:
-            print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.")
+            print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.", flush=True)
 
-    print(f"Publisher done. Posted: {posted}. Week: {week_key}.{' [DRY_RUN]' if DRY_RUN else ''}")
+    print(
+        f"Publisher done. Posted: {posted}. Week: {week_key}.{' [DRY_RUN]' if DRY_RUN else ''}",
+        flush=True,
+    )
 
 
 def run() -> None:

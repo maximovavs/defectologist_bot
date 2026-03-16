@@ -3,16 +3,18 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 3.0 — abstract summarization + anti-template leak
+Patch 4.0 — deep narrative summary + anti-water validator
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
 2) Gemini: fallback через x-goog-api-key; региональный блок выключает Gemini на весь прогон.
-3) Родительские рубрики: не сухой список, а связный abstract summary по схеме
-   Problem -> Solution -> Result/Impact.
-4) Специалисты (SA): академическая структура
+3) Родительские рубрики: narrative TL;DR с конкретикой из статьи, без общих фраз и воды.
+4) Специалисты (SA): академическая структура:
    Введение -> Методы -> Главные выводы -> Практическое применение.
-5) Жёсткий запрет на прямое цитирование и утечки шаблона.
+5) Валидатор режет:
+   - обобщающие фразы
+   - утечки шаблона
+   - слишком абстрактные посты без конкретных инструкций/примеров.
 """
 
 import asyncio
@@ -20,7 +22,7 @@ import os
 import random
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Pattern, Tuple
 
 import requests
 
@@ -47,19 +49,35 @@ def _nonempty_lines(text: str) -> List[str]:
     return [x.strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
 
 
-def _section_body(lines: List[str], headers: List[str], header: str) -> str:
-    header_set = set(headers)
-    body: List[str] = []
-    capture = False
-    for line in lines:
-        if line == header:
-            capture = True
-            continue
-        if capture and line in header_set:
-            break
-        if capture:
-            body.append(line)
-    return "\n".join(body).strip()
+def _normalize_scan_text(text: str) -> str:
+    return norm_space(text).replace("ё", "е").lower()
+
+
+def _line_matches(line: str, pattern: Pattern[str]) -> bool:
+    return bool(pattern.match((line or "").strip()))
+
+
+def _find_header_index(lines: List[str], patterns: Dict[str, Pattern[str]], key: str) -> int:
+    pat = patterns[key]
+    for idx, line in enumerate(lines):
+        if _line_matches(line, pat):
+            return idx
+    return -1
+
+
+def _extract_section(lines: List[str], order: List[str], patterns: Dict[str, Pattern[str]], key: str) -> str:
+    idx = _find_header_index(lines, patterns, key)
+    if idx == -1:
+        return ""
+
+    next_idx = len(lines)
+    current_pos = order.index(key)
+    for next_key in order[current_pos + 1:]:
+        found = _find_header_index(lines, patterns, next_key)
+        if found != -1 and found > idx:
+            next_idx = min(next_idx, found)
+
+    return "\n".join(lines[idx + 1:next_idx]).strip()
 
 
 # -----------------------
@@ -69,96 +87,190 @@ def _section_body(lines: List[str], headers: List[str], header: str) -> str:
 BANNED_PHRASES = [
     "Короткая практика без давления",
     "Один конкретный мини-приём из EVIDENCE",
-    "НЕТ_ДАННЫХ",
+    "родители часто сталкиваются с проблемой",
+    "развитие речи является важным аспектом общего развития",
+    "это может вызвать беспокойство и желание помочь ребенку",
+    "родители могут помочь детям, играя с ними в игры",
+    "также важно создать благоприятную среду",
+    "это может привести к улучшению общего развития",
+    "однако, если проблемы с речью сохраняются, необходимо обратиться к специалисту",
+    "речь очень важна",
+    "развитие речи очень важно",
 ]
 
-PARENT_HEADERS = [
-    "Почему это важно",
-    "Что делать",
-    "Что это даст",
-    "Мини-практика",
-    "Источник",
+TITLE_TEMPLATE_LEAKS = [
+    "EVIDENCE",
+    "ШАБЛОН",
+    "<диапазон>",
+    "<конкретный",
+    "<короткий",
+    "<шаг",
+    "<популярное",
+    "<1–2",
+    "<2–3",
+    "<3–5",
 ]
 
-PRO_HEADERS = [
-    "Введение",
-    "Методы",
-    "Главные выводы",
-    "Практическое применение",
-    "Источник",
+GENERIC_SOFT_PHRASES = [
+    "важный аспект",
+    "благоприятную среду",
+    "общее развитие",
+    "социальные навыки",
+    "может помочь",
+    "очень важно",
+    "в целом",
+    "как правило",
 ]
+
+PARENT_ORDER = ["problem", "solution", "home", "result", "source"]
+PRO_ORDER = ["intro", "methods", "findings", "application", "source"]
+
+PARENT_PATTERNS: Dict[str, Pattern[str]] = {
+    "problem": re.compile(r"^Проблема\s*:?\s*$", re.IGNORECASE),
+    "solution": re.compile(r"^Решение\s*:?\s*$", re.IGNORECASE),
+    "home": re.compile(r"^Как сделать дома\s*:?\s*$", re.IGNORECASE),
+    "result": re.compile(r"^Результат\s*:?\s*$", re.IGNORECASE),
+    "source": re.compile(r"^Источник\s*:?\s*$", re.IGNORECASE),
+}
+
+PRO_PATTERNS: Dict[str, Pattern[str]] = {
+    "intro": re.compile(r"^Введение\s*:?\s*$", re.IGNORECASE),
+    "methods": re.compile(r"^Методы\s*:?\s*$", re.IGNORECASE),
+    "findings": re.compile(r"^Главные выводы\s*:?\s*$", re.IGNORECASE),
+    "application": re.compile(r"^Практическое применение\s*:?\s*$", re.IGNORECASE),
+    "source": re.compile(r"^Источник\s*:?\s*$", re.IGNORECASE),
+}
+
+AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
+AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
+SOURCE_LINE_RE = re.compile(r"^Источник:\s*\S.+$", re.IGNORECASE)
+COMMENT_LINE_RE = re.compile(r"^💬\s*\S.+$", re.IGNORECASE)
+MYTH_LINE_RE = re.compile(r"^🔴\s*Миф\s*:\s*.+\S$", re.IGNORECASE)
+QUESTION_LINE_RE = re.compile(r"^❓\s*Вопрос недели\s*:\s*.+\S$", re.IGNORECASE)
+WORD_EXAMPLES_RE = re.compile(r"^Примеры слов:\s*.+\S$", re.IGNORECASE)
+ORIENTIRS_RE = re.compile(r"^Ориентиры:\s*.+\S$", re.IGNORECASE)
+
+CONCRETE_ACTION_RE = re.compile(
+    r"\b("
+    r"повторя|назов|полож|спряч|хлоп|читай|чита|попрос|сортир|покаж|найд|сравн|"
+    r"проговор|выбери|подуй|дуй|рисуй|реж|клей|тяни|ката|сложи|разложи|соедини|"
+    r"опиши|составь|веди|лови|поймай|раздели|постучи|стучи|передай|сначала|потом|затем"
+    r")\w*\b",
+    re.IGNORECASE,
+)
+QUOTED_EXERCISE_RE = re.compile(r"[«\"]([^»\"\n]{3,60})[»\"]")
+NUMBERED_STEP_RE = re.compile(r"\b\d+\s*(?:минут|шага|шагов|раза|раз)\b", re.IGNORECASE)
 
 
 def _contains_banned(text: str) -> Optional[str]:
-    blob = (text or "").replace("ё", "е").lower()
+    blob = _normalize_scan_text(text or "")
     for ph in BANNED_PHRASES:
-        if ph.replace("ё", "е").lower() in blob:
+        probe = _normalize_scan_text(ph)
+        if probe and probe in blob:
             return ph
     return None
 
 
 def _has_template_leak(text: str) -> bool:
     blob = text or ""
-    if "EVIDENCE" in blob or "ШАБЛОН" in blob:
+    if any(marker in blob for marker in TITLE_TEMPLATE_LEAKS):
         return True
     if re.search(r"<[^>\n]{2,120}>", blob):
         return True
     return False
 
 
+def _soft_generic_score(text: str) -> int:
+    blob = _normalize_scan_text(text or "")
+    score = 0
+    for frag in GENERIC_SOFT_PHRASES:
+        if frag in blob:
+            score += 1
+    return score
+
+
+def _count_concrete_markers(text: str) -> int:
+    src = text or ""
+    score = 0
+    score += len(CONCRETE_ACTION_RE.findall(src))
+    score += len(QUOTED_EXERCISE_RE.findall(src))
+    score += len(NUMBERED_STEP_RE.findall(src)) * 2
+    if "Примеры слов:" in src:
+        score += 3
+    if re.search(r"\bсначала\b", src, re.IGNORECASE):
+        score += 1
+    if re.search(r"\bпотом\b", src, re.IGNORECASE):
+        score += 1
+    if re.search(r"\bзатем\b", src, re.IGNORECASE):
+        score += 1
+    return score
+
+
 def _validate_parent_post(text: str, day_key: str, rubric_format: str) -> Tuple[bool, str]:
     lines = _nonempty_lines(text)
-    if len(lines) < 9:
+    if len(lines) < 10:
         return False, "too_short"
 
-    if not lines[1].startswith("👶 Возраст:"):
+    if not lines[0]:
+        return False, "missing_title"
+
+    if not any(_line_matches(line, AGE_LINE_RE) for line in lines[:4]):
         return False, "missing_age_line"
 
-    for header in PARENT_HEADERS:
-        if header not in lines:
-            return False, f"missing_section:{header}"
+    for key in PARENT_ORDER:
+        if _find_header_index(lines, PARENT_PATTERNS, key) == -1:
+            return False, f"missing_section:{key}"
 
-    why = _section_body(lines, PARENT_HEADERS, "Почему это важно")
-    what = _section_body(lines, PARENT_HEADERS, "Что делать")
-    result = _section_body(lines, PARENT_HEADERS, "Что это даст")
-    practice = _section_body(lines, PARENT_HEADERS, "Мини-практика")
+    problem = _extract_section(lines, PARENT_ORDER, PARENT_PATTERNS, "problem")
+    solution = _extract_section(lines, PARENT_ORDER, PARENT_PATTERNS, "solution")
+    home = _extract_section(lines, PARENT_ORDER, PARENT_PATTERNS, "home")
+    result = _extract_section(lines, PARENT_ORDER, PARENT_PATTERNS, "result")
 
-    if len(why) < 70:
+    if len(problem) < 55:
         return False, "thin_problem_block"
-    if len(what) < 140:
+    if len(solution) < 150:
         return False, "thin_solution_block"
-    if len(result) < 70:
+    if len(home) < 90:
+        return False, "thin_home_block"
+    if len(result) < 45:
         return False, "thin_result_block"
-    if len(practice) < 30:
-        return False, "thin_practice_block"
 
-    if not any(line.startswith("Источник:") for line in lines):
+    if not any(_line_matches(line, SOURCE_LINE_RE) for line in lines):
         return False, "missing_source_line"
 
-    if not any(line.startswith("💬 ") for line in lines):
+    if not any(_line_matches(line, COMMENT_LINE_RE) for line in lines):
         return False, "missing_comment_line"
 
-    dk = (day_key or "").upper()
-    rf = (rubric_format or "").lower()
-    blob = " ".join(lines).replace("ё", "е").lower()
+    if _soft_generic_score(problem + "\n" + solution + "\n" + home) >= 3:
+        return False, "too_generic"
+
+    concrete_score = _count_concrete_markers(solution + "\n" + home)
+    if concrete_score < 4:
+        return False, "not_concrete_enough"
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+    blob = _normalize_scan_text("\n".join(lines))
 
     if dk == "WE" or rf == "myth_fact":
-        if not any(line.startswith("🔴 Миф:") for line in lines):
+        if not any(_line_matches(line, MYTH_LINE_RE) for line in lines):
             return False, "missing_myth_line"
 
     if dk == "FR" or rf == "question_week":
-        if not any(line.startswith("❓ Вопрос недели:") for line in lines):
+        if not any(_line_matches(line, QUESTION_LINE_RE) for line in lines):
             return False, "missing_week_question"
 
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        if not any(line.startswith("Примеры слов:") for line in lines):
+        if not any(_line_matches(line, WORD_EXAMPLES_RE) for line in lines):
             return False, "missing_word_examples"
 
     if dk == "TH" or rf == "bilingual_parents":
-        if not any(k in blob for k in ["билинг", "двуязы", "код", "переключ", "switch"]):
+        if not any(k in blob for k in ["билинг", "двуязы", "код", "переключ", "switch", "русский язык дома"]):
             return False, "missing_bilingual_focus"
 
     if dk == "SU" or rf == "age_norms":
+        if not any(_line_matches(line, ORIENTIRS_RE) for line in lines):
+            return False, "missing_orientirs_line"
         if "каждый ребенок развивается индивидуально" not in blob:
             return False, "missing_individual_disclaimer"
 
@@ -170,32 +282,35 @@ def _validate_pro_post(text: str) -> Tuple[bool, str]:
     if len(lines) < 8:
         return False, "too_short"
 
-    if len(lines) < 2 or not lines[1].startswith("👩‍⚕️ Аудитория:"):
+    if not any(_line_matches(line, AUDIENCE_LINE_RE) for line in lines[:4]):
         return False, "missing_audience_line"
 
-    for header in PRO_HEADERS:
-        if header not in lines:
-            return False, f"missing_section:{header}"
+    for key in PRO_ORDER:
+        if _find_header_index(lines, PRO_PATTERNS, key) == -1:
+            return False, f"missing_section:{key}"
 
-    intro = _section_body(lines, PRO_HEADERS, "Введение")
-    methods = _section_body(lines, PRO_HEADERS, "Методы")
-    findings = _section_body(lines, PRO_HEADERS, "Главные выводы")
-    application = _section_body(lines, PRO_HEADERS, "Практическое применение")
+    intro = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "intro")
+    methods = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "methods")
+    findings = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "findings")
+    application = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "application")
 
     if len(intro) < 70:
         return False, "thin_intro_block"
     if len(methods) < 70:
         return False, "thin_methods_block"
-    if len(findings) < 110:
+    if len(findings) < 120:
         return False, "thin_findings_block"
     if len(application) < 70:
         return False, "thin_application_block"
 
-    if not any(line.startswith("Источник:") for line in lines):
+    if not any(_line_matches(line, SOURCE_LINE_RE) for line in lines):
         return False, "missing_source_line"
 
-    if not any(line.startswith("💬 ") for line in lines):
+    if not any(_line_matches(line, COMMENT_LINE_RE) for line in lines):
         return False, "missing_comment_line"
+
+    if _soft_generic_score(intro + "\n" + findings + "\n" + application) >= 3:
+        return False, "too_generic"
 
     return True, "ok"
 
@@ -267,7 +382,7 @@ async def groq_chat(prompt: str, api_key: str) -> str:
     payload = {
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.35,
+        "temperature": 0.2,
     }
 
     last_err = ""
@@ -331,31 +446,37 @@ def _common_rules(max_chars: int) -> str:
         "Пиши по-русски.\n"
         f"Весь пост не должен превышать {max_chars} символов.\n"
         "Опирайся только на EVIDENCE ниже.\n"
-        "Если данных недостаточно — верни строго одну строку: НЕТ_ДАННЫХ\n"
+        "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
         "Опирайся преимущественно на перефразирование, не используй прямые цитаты из текста.\n"
-        "Нельзя копировать формулировки из статьи длинными кусками.\n"
-        "Нельзя печатать служебные слова EVIDENCE, ШАБЛОН, placeholders в угловых скобках.\n"
-        "Пиши связно и читаемо. Избегай сухих bullet-list, кроме одной строки Примеры слов: если это игровой формат.\n"
+        "Нельзя копировать длинные фразы из статьи.\n"
+        "Нельзя печатать служебные слова EVIDENCE, ШАБЛОН и placeholders.\n"
+        "Категорически запрещено использовать вводные обобщающие фразы вроде: "
+        "«развитие речи очень важно», «родители часто сталкиваются с проблемой», "
+        "«создайте благоприятную среду», «это важный аспект общего развития».\n"
+        "Твоя задача — извлечь конкретные упражнения, метафоры, примеры слов, последовательность действий и практические приемы из текста.\n"
+        "Напиши пост так, чтобы он читался как полноценная, но краткая статья TL;DR: "
+        "после него пользователю не обязательно переходить по ссылке, потому что он уже получил практическую пользу.\n"
+        "Нельзя писать расплывчато. Каждый смысловой блок должен опираться на конкретику из EVIDENCE.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
         "Не используй Markdown и кодовые блоки.\n"
     )
 
 
-def _parent_day_marker(day_key: str, rubric_format: str) -> str:
+def _parent_marker(day_key: str, rubric_format: str) -> str:
     dk = (day_key or "").upper()
     rf = (rubric_format or "").lower()
 
     if dk == "WE" or rf == "myth_fact":
-        return "🔴 Миф: сформулируй одно частое заблуждение по теме и мягко его исправь."
+        return "После возраста добавь строку: 🔴 Миф: ... и коротко сформулируй именно то заблуждение, которое опровергает статья."
     if dk == "FR" or rf == "question_week":
-        return "❓ Вопрос недели: задай один живой родительский вопрос по теме и дальше ответь на него в тексте."
+        return "После возраста добавь строку: ❓ Вопрос недели: ... Это должен быть живой вопрос родителя, на который статья отвечает по сути."
     if dk == "TH" or rf == "bilingual_parents":
-        return "Контекст: семья за границей, русский язык нужно поддерживать мягко и реалистично."
+        return "Сфокусируй текст на реальной жизни билингвальной семьи: как поддерживать русский язык без давления."
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        return "Фокус: бытовая игра или мини-активность, которую можно встроить в день."
+        return "В блоке «Как сделать дома» обязательно добавь строку: Примеры слов: ..."
     if dk == "SU" or rf == "age_norms":
-        return "Фокус: возрастные ориентиры без запугивания; обязательно добавь мысль, что каждый ребенок развивается индивидуально."
-    return "Фокус: одна родительская ситуация, главный смысл статьи и практичный вывод на сегодня."
+        return "После возраста добавь строку: Ориентиры: ... и обязательно вплети фразу «Каждый ребенок развивается индивидуально.»"
+    return "Сделай из статьи плотный практический TL;DR без общих слов и без сухого пересказа."
 
 
 def _parent_comment(day_key: str, rubric_format: str) -> str:
@@ -363,15 +484,15 @@ def _parent_comment(day_key: str, rubric_format: str) -> str:
     rf = (rubric_format or "").lower()
 
     if dk == "TH" or rf == "bilingual_parents":
-        return "💬 Что в вашей семье помогает русскому звучать естественно?"
+        return "💬 Что реально помогает русскому языку звучать дома без принуждения?"
     if dk == "FR" or rf == "question_week":
         return "💬 С таким вопросом вы сталкивались?"
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        return "💬 В какой момент дня вам проще встроить такую игру?"
+        return "💬 Какую игру из текста вы бы попробовали первой?"
     if dk == "SU" or rf == "age_norms":
-        return "💬 Что из возрастных ориентиров оказалось самым полезным?"
+        return "💬 Какой ориентир из поста оказался самым полезным?"
     if dk == "WE" or rf == "myth_fact":
-        return "💬 С каким мифом по этой теме вы сталкивались?"
+        return "💬 С каким мифом на эту тему вы сталкивались?"
     return "💬 Что из этого вы готовы попробовать уже сегодня?"
 
 
@@ -396,13 +517,13 @@ def build_generation_prompt(
             f"{rubric_title} {title_suffix}\n"
             "👩‍⚕️ Аудитория: специалисты\n\n"
             "Введение\n"
-            "2–3 предложения: кратко сформулируй цель исследования или материала и клинический контекст.\n\n"
+            "2–3 предложения: сформулируй цель исследования или материала, клиническую задачу и контекст.\n\n"
             "Методы\n"
-            "2–4 предложения: какие подходы, наблюдения, дизайн или методические приемы использовались.\n\n"
+            "2–4 предложения: опиши дизайн, наблюдения, шкалы, методические приемы или принципы отбора данных.\n\n"
             "Главные выводы\n"
-            "3–5 предложений: самые важные результаты и смысл материала без копирования исходных формулировок.\n\n"
+            "3–5 предложений: передай самые важные результаты и смысл материала экспертным языком, без копирования исходных фраз.\n\n"
             "Практическое применение\n"
-            "2–4 предложения: что специалист может взять в работу уже сейчас, в каких случаях это особенно уместно.\n\n"
+            "2–4 предложения: что специалист может внедрить в работу, с какими детьми и в каком формате.\n\n"
             "Источник\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n\n"
@@ -410,7 +531,7 @@ def build_generation_prompt(
         )
         return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
-    marker = _parent_day_marker(day_key, rubric_format)
+    marker = _parent_marker(day_key, rubric_format)
     comment = _parent_comment(day_key, rubric_format)
 
     extra = ""
@@ -418,29 +539,32 @@ def build_generation_prompt(
     rf = (rubric_format or "").lower()
 
     if dk == "WE" or rf == "myth_fact":
-        extra = "После строки с возрастом добавь отдельную строку: 🔴 Миф: ...\n"
+        extra = "🔴 Миф: ...\n"
     elif dk == "FR" or rf == "question_week":
-        extra = "После строки с возрастом добавь отдельную строку: ❓ Вопрос недели: ...\n"
-    elif dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        extra = "Внутри блока 'Мини-практика' добавь отдельную строку: Примеры слов: ...\n"
+        extra = "❓ Вопрос недели: ...\n"
+    elif dk == "SU" or rf == "age_norms":
+        extra = "Ориентиры: ...\n"
 
     template = (
         f"{rubric_title} {title_suffix}\n"
         "👶 Возраст: конкретный диапазон\n"
-        f"{extra}"
-        "\n"
-        "Почему это важно\n"
-        f"2–3 предложения. {marker} Сначала опиши проблему или типичную ситуацию семьи, затем объясни, почему тема важна.\n\n"
-        "Что делать\n"
-        "4–6 предложений. Связно перескажи главные идеи статьи своими словами по схеме проблема -> решение. Не используй нумерованный список.\n\n"
-        "Что это даст\n"
-        "2–3 предложения. Коротко опиши ожидаемый результат, ограничения и когда уже стоит обсудить ситуацию со специалистом.\n\n"
-        "Мини-практика\n"
-        "1–2 предложения. Одна микро-активность на сегодня, без сухих инструкций и без заглушек.\n\n"
+        f"{extra}\n"
+        "Проблема\n"
+        "1–2 предложения: назови конкретную трудность, механизм или частую ошибку из статьи. Никаких общих фраз.\n\n"
+        "Решение\n"
+        "4–6 предложений: связно, но плотно перескажи суть статьи своими словами. "
+        "Обязательно вытащи из EVIDENCE упражнения, метафоры, приемы, примеры, последовательность действий.\n\n"
+        "Как сделать дома\n"
+        "2–4 предложения: преврати материал в мини-протокол на сегодня. "
+        "Это должен быть применимый сценарий, а не общий совет. "
+        "Если статья дает игру, опиши как именно ее проводить.\n\n"
+        "Результат\n"
+        "1–2 предложения: что изменится при таком подходе и какой красный флаг нельзя пропустить.\n\n"
         "Источник\n"
         f"Источник: {source_domain}\n"
         f"🔗 {source_url}\n\n"
-        f"{comment}\n"
+        f"{comment}\n\n"
+        f"Дополнительное правило: {marker}\n"
     )
 
     footer = ""
@@ -521,8 +645,9 @@ async def generate_post_plain_from_evidence_async(
 
             repair_prompt = (
                 prompt
-                + "\n\nПОВТОРИ. Сделай текст связным, без списочной сухости, строго по структуре разделов. "
-                + "Никаких шаблонных фраз, placeholders и буквального копирования."
+                + "\n\nПОВТОРИ. Предыдущий вариант был слишком общий или шаблонный. "
+                + "Перепиши плотнее: меньше абстракций, больше конкретных приемов, шагов, названий игр, метафор, примеров слов. "
+                + "Сделай текст читабельным как краткая статья TL;DR. Никакой воды."
             )
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))
             ok2, reason2 = validate(out2)

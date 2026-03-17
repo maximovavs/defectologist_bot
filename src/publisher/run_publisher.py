@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.1.1
+Publisher (cron/GitHub Actions) v4.1.2
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -17,6 +17,7 @@ Publisher (cron/GitHub Actions) v4.1.1
    - таймаут на генерацию одного кандидата
 5) Добавлено подробное логирование в stdout для GitHub Actions.
 6) Финальный tech alert экранируется как HTML-safe текст.
+7) Telegram HTML renderer синхронизирован с новым narrative-форматом постов.
 """
 
 import asyncio
@@ -54,7 +55,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.1.1 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.1.2 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -95,16 +96,25 @@ if os.getenv("SUPPRESS_INSECURE_TLS_WARNINGS", "1").strip().lower() in ("1", "tr
 # =========================
 
 SECTION_HEADERS = {
-    "Проблема",
-    "Решение",
-    "Как сделать дома",
-    "Результат",
-    "Источник",
     "Введение",
     "Методы",
     "Главные выводы",
     "Практическое применение",
+    "Источник",
 }
+
+GAME_HEADING_RE = re.compile(r"^🎲\s*Как играть\s*:?\s*$", re.IGNORECASE)
+TRY_TODAY_HEADING_RE = re.compile(r"^🧩\s*Что попробовать сегодня\s*:?\s*$", re.IGNORECASE)
+BILINGUAL_HEADING_RE = re.compile(r"^🌍\s*Что помогает в двуязычной семье\s*:?\s*$", re.IGNORECASE)
+HOME_HEADING_RE = re.compile(r"^🏠\s*Что можно попробовать дома\s*:?\s*$", re.IGNORECASE)
+
+AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
+AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
+SOURCE_LINE_RE = re.compile(r"^Источник:\s*\S.+$", re.IGNORECASE)
+BENEFIT_LINE_RE = re.compile(r"^💡\s*Что это дает\s*:\s*.+\S$", re.IGNORECASE)
+MYTH_LINE_RE = re.compile(r"^🔴\s*Миф\s*:\s*.+\S$", re.IGNORECASE)
+QUESTION_LINE_RE = re.compile(r"^❓\s*Вопрос недели\s*:\s*.+\S$", re.IGNORECASE)
+ORIENTIRS_LINE_RE = re.compile(r"^Ориентиры:\s*.+\S$", re.IGNORECASE)
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
@@ -427,11 +437,32 @@ def _is_structural_heading(line: str) -> bool:
     st = (line or "").strip()
     if not st:
         return False
-    if st.startswith("👶 Возраст:") or st.startswith("👩‍⚕️ Аудитория:"):
+
+    if _line_matches_structural(st):
         return True
+
     if st in SECTION_HEADERS:
         return True
+
     return False
+
+
+def _line_matches_structural(st: str) -> bool:
+    return any(
+        (
+            AGE_LINE_RE.match(st),
+            AUDIENCE_LINE_RE.match(st),
+            SOURCE_LINE_RE.match(st),
+            BENEFIT_LINE_RE.match(st),
+            MYTH_LINE_RE.match(st),
+            QUESTION_LINE_RE.match(st),
+            ORIENTIRS_LINE_RE.match(st),
+            GAME_HEADING_RE.match(st),
+            TRY_TODAY_HEADING_RE.match(st),
+            BILINGUAL_HEADING_RE.match(st),
+            HOME_HEADING_RE.match(st),
+        )
+    )
 
 
 def render_plain_to_telegram_html(plain_text: str) -> str:

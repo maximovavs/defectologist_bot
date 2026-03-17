@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 4.0 — deep narrative summary + anti-water validator
+Patch 4.1 — deep narrative summary + auto-fix source/comment tail
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -15,6 +15,7 @@ Patch 4.0 — deep narrative summary + anti-water validator
    - обобщающие фразы
    - утечки шаблона
    - слишком абстрактные посты без конкретных инструкций/примеров.
+6) Источник и финальный вопрос теперь достраиваются кодом, если модель их пропустила.
 """
 
 import asyncio
@@ -496,6 +497,62 @@ def _parent_comment(day_key: str, rubric_format: str) -> str:
     return "💬 Что из этого вы готовы попробовать уже сегодня?"
 
 
+def _default_comment(audience: str, day_key: str, rubric_format: str) -> str:
+    aud = (audience or "parents").strip().lower()
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    if aud == "pros":
+        return "💬 Что из этого вы бы протестировали в своей практике первым?"
+
+    if dk == "TH" or rf == "bilingual_parents":
+        return "💬 Что реально помогает русскому языку звучать дома без принуждения?"
+    if dk == "FR" or rf == "question_week":
+        return "💬 С таким вопросом вы сталкивались?"
+    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
+        return "💬 Какую игру из текста вы бы попробовали первой?"
+    if dk == "SU" or rf == "age_norms":
+        return "💬 Какой ориентир из поста оказался самым полезным?"
+    if dk == "WE" or rf == "myth_fact":
+        return "💬 С каким мифом на эту тему вы сталкивались?"
+    return "💬 Что из этого вы готовы попробовать уже сегодня?"
+
+
+def _ensure_source_and_comment(
+    text: str,
+    audience: str,
+    day_key: str,
+    rubric_format: str,
+    source_domain: str,
+    source_url: str,
+) -> str:
+    lines = [x.rstrip() for x in (text or "").replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    has_source_header = any(x.strip().lower() == "источник" for x in lines)
+    has_source_line = any(re.match(r"^Источник:\s*\S.+$", x.strip(), re.IGNORECASE) for x in lines)
+    has_link_line = any(x.strip().startswith("🔗 ") for x in lines)
+    has_comment_line = any(re.match(r"^💬\s*\S.+$", x.strip()) for x in lines)
+
+    if not has_source_header:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("Источник")
+
+    if not has_source_line:
+        lines.append(f"Источник: {source_domain}")
+
+    if not has_link_line:
+        lines.append(f"🔗 {source_url}")
+
+    if not has_comment_line:
+        lines.append("")
+        lines.append(_default_comment(audience, day_key, rubric_format))
+
+    return "\n".join(lines).strip()
+
+
 def build_generation_prompt(
     day_key: str,
     rubric_title: str,
@@ -621,6 +678,14 @@ async def generate_post_plain_from_evidence_async(
         s = (s or "").strip().replace("\r\n", "\n")
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
+        s = _ensure_source_and_comment(
+            text=s,
+            audience=aud,
+            day_key=day_key or "",
+            rubric_format=rubric_format,
+            source_domain=source_domain,
+            source_url=source_url,
+        )
         s = enforce_total_chars_keep_structure(s, max_chars)
         return s.strip()
 

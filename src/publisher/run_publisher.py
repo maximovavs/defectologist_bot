@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.1.0
+Publisher (cron/GitHub Actions) v4.1.1
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -16,6 +16,7 @@ Publisher (cron/GitHub Actions) v4.1.0
    - лимит skip-ов на рубрику
    - таймаут на генерацию одного кандидата
 5) Добавлено подробное логирование в stdout для GitHub Actions.
+6) Финальный tech alert экранируется как HTML-safe текст.
 """
 
 import asyncio
@@ -53,7 +54,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.1.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.1.1 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -162,6 +163,37 @@ def _escape(s: str) -> str:
 
 def _start_recent_window(now: datetime) -> datetime:
     return now - timedelta(hours=RECENT_ALERT_HOURS)
+
+
+def _build_posted_zero_alert_html(
+    now: datetime,
+    day: str,
+    week_key: str,
+    audience: str,
+    provider: str,
+    skip_reasons: Dict[str, int],
+    samples: List[str],
+) -> str:
+    top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:12]
+
+    parts: List[str] = [
+        "⚠️ <b>Publisher: не удалось опубликовать пост (Posted: 0)</b>",
+        f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
+        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)}",
+        "",
+        "<b>Причины пропуска (топ):</b>",
+    ]
+
+    for reason, count in top:
+        parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+
+    if samples:
+        parts.append("")
+        parts.append("<b>Примеры:</b>")
+        for sample in samples[:8]:
+            parts.append(_escape(sample))
+
+    return "<br>".join(parts)
 
 
 # =========================
@@ -606,7 +638,9 @@ async def amain() -> None:
                 print(f"[CANDIDATE] rubric={rubric_id} audience={aud} url={url}", flush=True)
 
                 if not url.startswith(("http://", "https://")):
+                    note("bad_candidate_url", url or "(empty)")
                     rubric_skips += 1
+                    print(f"[SKIP] bad_candidate_url url={url}", flush=True)
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -720,15 +754,18 @@ async def amain() -> None:
                             compare="evidence",
                         )
                         if recent_hit:
-                            send_semantic_alert(
-                                TELEGRAM_DRAFTS_CHAT_ID,
-                                canon,
-                                recent_hit.canonical_url,
-                                recent_hit.similarity,
-                                aud,
-                                rubric_id,
-                                recent_hit.match_field,
-                            )
+                            try:
+                                send_semantic_alert(
+                                    TELEGRAM_DRAFTS_CHAT_ID,
+                                    canon,
+                                    recent_hit.canonical_url,
+                                    recent_hit.similarity,
+                                    aud,
+                                    rubric_id,
+                                    recent_hit.match_field,
+                                )
+                            except Exception as e:
+                                print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -821,15 +858,18 @@ async def amain() -> None:
                             compare="body",
                         )
                         if recent_post_hit:
-                            send_semantic_alert(
-                                TELEGRAM_DRAFTS_CHAT_ID,
-                                canon,
-                                recent_post_hit.canonical_url,
-                                recent_post_hit.similarity,
-                                aud,
-                                rubric_id,
-                                recent_post_hit.match_field,
-                            )
+                            try:
+                                send_semantic_alert(
+                                    TELEGRAM_DRAFTS_CHAT_ID,
+                                    canon,
+                                    recent_post_hit.canonical_url,
+                                    recent_post_hit.similarity,
+                                    aud,
+                                    rubric_id,
+                                    recent_post_hit.match_field,
+                                )
+                            except Exception as e:
+                                print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -885,21 +925,21 @@ async def amain() -> None:
 
     if posted == 0 and not DRY_RUN:
         if TELEGRAM_DRAFTS_CHAT_ID:
-            top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:12]
-            lines = [
-                "⚠️ Publisher: не удалось опубликовать пост (Posted: 0)",
-                f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
-                f"AUDIENCE={AUDIENCE} | PROVIDER={PROVIDER}",
-                "",
-                "Причины пропуска (топ):",
-            ]
-            for k, v in top:
-                lines.append(f"• {k}: {v}")
-            if samples:
-                lines.append("")
-                lines.append("Примеры:")
-                lines.extend(samples)
-            send_message(TELEGRAM_DRAFTS_CHAT_ID, "\n".join(lines))
+            try:
+                send_message(
+                    TELEGRAM_DRAFTS_CHAT_ID,
+                    _build_posted_zero_alert_html(
+                        now=now,
+                        day=day,
+                        week_key=week_key,
+                        audience=AUDIENCE,
+                        provider=PROVIDER,
+                        skip_reasons=skip_reasons,
+                        samples=samples,
+                    ),
+                )
+            except Exception as e:
+                print(f"[WARN] failed_to_send_posted_zero_alert err={e}", flush=True)
         else:
             print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.", flush=True)
 

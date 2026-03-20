@@ -3,21 +3,19 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.0 — role prompting + narrative post format
+Patch 5.1 — narrative generation + soft validation
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
 2) Gemini: fallback через x-goog-api-key; региональный блок выключает Gemini на весь прогон.
-3) Родительские рубрики: role-prompting + живой нарративный формат без канцелярских заголовков
-   «Проблема / Решение / Результат / Как сделать дома».
-4) TU / "Играем и говорим": модель обязана вытянуть одну конкретную игру или упражнение
-   и описать правила пошагово.
-5) Источник и финальный вопрос достраиваются кодом, если модель их пропустила.
-6) Валидатор режет:
-   - воду и общие фразы
-   - шаблонные утечки
-   - отсутствие конкретики
-   - старые структурные заголовки
+3) Родительские рубрики: role-prompting + живой narrative format без заголовков
+   «Проблема / Решение / Результат».
+4) Источник и финальный вопрос достраиваются кодом, если модель их пропустила.
+5) Валидатор теперь мягкий:
+   - текст не пустой
+   - текст не слишком короткий
+   - нет banned phrases
+   - нет template leak
 """
 
 import asyncio
@@ -25,7 +23,7 @@ import os
 import random
 import re
 import time
-from typing import Dict, List, Optional, Pattern, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -46,41 +44,6 @@ def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
     if "\n" in cut:
         cut = cut[:cut.rfind("\n")].rstrip()
     return (cut.rstrip(" .,:;—-") + "…").strip()
-
-
-def _nonempty_lines(text: str) -> List[str]:
-    return [x.strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
-
-
-def _normalize_scan_text(text: str) -> str:
-    return norm_space(text).replace("ё", "е").lower()
-
-
-def _line_matches(line: str, pattern: Pattern[str]) -> bool:
-    return bool(pattern.match((line or "").strip()))
-
-
-def _find_header_index(lines: List[str], patterns: Dict[str, Pattern[str]], key: str) -> int:
-    pat = patterns[key]
-    for idx, line in enumerate(lines):
-        if _line_matches(line, pat):
-            return idx
-    return -1
-
-
-def _extract_section(lines: List[str], order: List[str], patterns: Dict[str, Pattern[str]], key: str) -> str:
-    idx = _find_header_index(lines, patterns, key)
-    if idx == -1:
-        return ""
-
-    next_idx = len(lines)
-    current_pos = order.index(key)
-    for next_key in order[current_pos + 1:]:
-        found = _find_header_index(lines, patterns, next_key)
-        if found != -1 and found > idx:
-            next_idx = min(next_idx, found)
-
-    return "\n".join(lines[idx + 1:next_idx]).strip()
 
 
 # -----------------------
@@ -114,60 +77,9 @@ TITLE_TEMPLATE_LEAKS = [
     "<3–5",
 ]
 
-GENERIC_SOFT_PHRASES = [
-    "важный аспект",
-    "благоприятную среду",
-    "общее развитие",
-    "социальные навыки",
-    "может помочь",
-    "очень важно",
-    "в целом",
-    "как правило",
-]
 
-FORBIDDEN_OLD_HEADINGS = {
-    "проблема",
-    "решение",
-    "результат",
-    "как сделать дома",
-}
-
-PRO_ORDER = ["intro", "methods", "findings", "application"]
-
-PRO_PATTERNS: Dict[str, Pattern[str]] = {
-    "intro": re.compile(r"^Введение\s*:?\s*$", re.IGNORECASE),
-    "methods": re.compile(r"^Методы\s*:?\s*$", re.IGNORECASE),
-    "findings": re.compile(r"^Главные выводы\s*:?\s*$", re.IGNORECASE),
-    "application": re.compile(r"^Практическое применение\s*:?\s*$", re.IGNORECASE),
-}
-
-AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
-AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
-SOURCE_LINE_RE = re.compile(r"^Источник:\s*\S.+$", re.IGNORECASE)
-COMMENT_LINE_RE = re.compile(r"^💬\s*\S.+$", re.IGNORECASE)
-
-MYTH_LINE_RE = re.compile(r"^🔴\s*Миф\s*:\s*.+\S$", re.IGNORECASE)
-QUESTION_LINE_RE = re.compile(r"^❓\s*Вопрос недели\s*:\s*.+\S$", re.IGNORECASE)
-WORD_EXAMPLES_RE = re.compile(r"^Примеры слов:\s*.+\S$", re.IGNORECASE)
-ORIENTIRS_RE = re.compile(r"^Ориентиры:\s*.+\S$", re.IGNORECASE)
-
-GAME_HEADING_RE = re.compile(r"^🎲\s*Как играть\s*:?\s*$", re.IGNORECASE)
-BENEFIT_LINE_RE = re.compile(r"^💡\s*Что это дает\s*:\s*.+\S$", re.IGNORECASE)
-TRY_TODAY_HEADING_RE = re.compile(r"^🧩\s*Что попробовать сегодня\s*:?\s*$", re.IGNORECASE)
-BILINGUAL_HEADING_RE = re.compile(r"^🌍\s*Что помогает в двуязычной семье\s*:?\s*$", re.IGNORECASE)
-HOME_HEADING_RE = re.compile(r"^🏠\s*Что можно попробовать дома\s*:?\s*$", re.IGNORECASE)
-
-CONCRETE_ACTION_RE = re.compile(
-    r"\b("
-    r"повторя|назов|полож|спряч|хлоп|читай|чита|попрос|сортир|покаж|найд|сравн|"
-    r"проговор|выбери|подуй|дуй|рисуй|реж|клей|тяни|ката|сложи|разложи|соедини|"
-    r"опиши|составь|веди|лови|поймай|раздели|постучи|стучи|передай|сначала|потом|затем|"
-    r"дай|возьми|ответь|скажи|слушай"
-    r")\w*\b",
-    re.IGNORECASE,
-)
-QUOTED_EXERCISE_RE = re.compile(r"[«\"]([^»\"\n]{3,80})[»\"]")
-NUMBERED_STEP_RE = re.compile(r"\b\d+\s*(?:минут|шага|шагов|раза|раз)\b", re.IGNORECASE)
+def _normalize_scan_text(text: str) -> str:
+    return norm_space(text).replace("ё", "е").lower()
 
 
 def _contains_banned(text: str) -> Optional[str]:
@@ -188,166 +100,10 @@ def _has_template_leak(text: str) -> bool:
     return False
 
 
-def _has_forbidden_old_headings(lines: List[str]) -> bool:
-    for line in lines:
-        if line.strip().replace(":", "").lower() in FORBIDDEN_OLD_HEADINGS:
-            return True
-    return False
-
-
-def _soft_generic_score(text: str) -> int:
-    blob = _normalize_scan_text(text or "")
-    score = 0
-    for frag in GENERIC_SOFT_PHRASES:
-        if frag in blob:
-            score += 1
-    return score
-
-
-def _count_concrete_markers(text: str) -> int:
-    src = text or ""
-    score = 0
-    score += len(CONCRETE_ACTION_RE.findall(src))
-    score += len(QUOTED_EXERCISE_RE.findall(src))
-    score += len(NUMBERED_STEP_RE.findall(src)) * 2
-    if "Примеры слов:" in src:
-        score += 3
-    if re.search(r"\bсначала\b", src, re.IGNORECASE):
-        score += 1
-    if re.search(r"\bпотом\b", src, re.IGNORECASE):
-        score += 1
-    if re.search(r"\bзатем\b", src, re.IGNORECASE):
-        score += 1
-    return score
-
-
-def _validate_parent_post(text: str, day_key: str, rubric_format: str) -> Tuple[bool, str]:
-    lines = _nonempty_lines(text)
-    if len(lines) < 8:
-        return False, "too_short"
-
-    if not lines[0]:
-        return False, "missing_title"
-
-    if _has_forbidden_old_headings(lines):
-        return False, "old_structural_headings_forbidden"
-
-    if not any(_line_matches(line, AGE_LINE_RE) for line in lines[:4]):
-        return False, "missing_age_line"
-
-    if not any(_line_matches(line, SOURCE_LINE_RE) for line in lines):
-        return False, "missing_source_line"
-
-    if not any(line.startswith("🔗 ") for line in lines):
-        return False, "missing_link_line"
-
-    if not any(_line_matches(line, COMMENT_LINE_RE) for line in lines):
-        return False, "missing_comment_line"
-
-    if not any(_line_matches(line, BENEFIT_LINE_RE) for line in lines):
-        return False, "missing_benefit_line"
-
-    body_blob = "\n".join(lines)
-    if _soft_generic_score(body_blob) >= 3:
-        return False, "too_generic"
-
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
-
-    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        if not any(_line_matches(line, GAME_HEADING_RE) for line in lines):
-            return False, "missing_game_heading"
-        if not any(_line_matches(line, WORD_EXAMPLES_RE) for line in lines):
-            return False, "missing_word_examples"
-        if _count_concrete_markers(body_blob) < 6:
-            return False, "not_concrete_enough"
-
-    elif dk == "WE" or rf == "myth_fact":
-        if not any(_line_matches(line, MYTH_LINE_RE) for line in lines):
-            return False, "missing_myth_line"
-        if not any(_line_matches(line, TRY_TODAY_HEADING_RE) for line in lines):
-            return False, "missing_try_today_heading"
-        if _count_concrete_markers(body_blob) < 4:
-            return False, "not_concrete_enough"
-
-    elif dk == "FR" or rf == "question_week":
-        if not any(_line_matches(line, QUESTION_LINE_RE) for line in lines):
-            return False, "missing_week_question"
-        if not any(_line_matches(line, TRY_TODAY_HEADING_RE) for line in lines):
-            return False, "missing_try_today_heading"
-        if _count_concrete_markers(body_blob) < 4:
-            return False, "not_concrete_enough"
-
-    elif dk == "TH" or rf == "bilingual_parents":
-        blob = _normalize_scan_text(body_blob)
-        if not any(k in blob for k in ["билинг", "двуязы", "код", "переключ", "switch", "русский язык дома"]):
-            return False, "missing_bilingual_focus"
-        if not any(_line_matches(line, BILINGUAL_HEADING_RE) for line in lines):
-            return False, "missing_bilingual_heading"
-        if _count_concrete_markers(body_blob) < 3:
-            return False, "not_concrete_enough"
-
-    elif dk == "SU" or rf == "age_norms":
-        blob = _normalize_scan_text(body_blob)
-        if not any(_line_matches(line, ORIENTIRS_RE) for line in lines):
-            return False, "missing_orientirs_line"
-        if "каждый ребенок развивается индивидуально" not in blob:
-            return False, "missing_individual_disclaimer"
-        if not any(_line_matches(line, HOME_HEADING_RE) for line in lines):
-            return False, "missing_home_heading"
-
-    else:
-        if not any(_line_matches(line, TRY_TODAY_HEADING_RE) for line in lines):
-            return False, "missing_try_today_heading"
-        if _count_concrete_markers(body_blob) < 4:
-            return False, "not_concrete_enough"
-
-    return True, "ok"
-
-
-def _validate_pro_post(text: str) -> Tuple[bool, str]:
-    lines = _nonempty_lines(text)
-    if len(lines) < 8:
-        return False, "too_short"
-
-    if not any(_line_matches(line, AUDIENCE_LINE_RE) for line in lines[:4]):
-        return False, "missing_audience_line"
-
-    for key in PRO_ORDER:
-        if _find_header_index(lines, PRO_PATTERNS, key) == -1:
-            return False, f"missing_section:{key}"
-
-    intro = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "intro")
-    methods = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "methods")
-    findings = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "findings")
-    application = _extract_section(lines, PRO_ORDER, PRO_PATTERNS, "application")
-
-    if len(intro) < 70:
-        return False, "thin_intro_block"
-    if len(methods) < 70:
-        return False, "thin_methods_block"
-    if len(findings) < 120:
-        return False, "thin_findings_block"
-    if len(application) < 70:
-        return False, "thin_application_block"
-
-    if not any(_line_matches(line, SOURCE_LINE_RE) for line in lines):
-        return False, "missing_source_line"
-
-    if not any(line.startswith("🔗 ") for line in lines):
-        return False, "missing_link_line"
-
-    if not any(_line_matches(line, COMMENT_LINE_RE) for line in lines):
-        return False, "missing_comment_line"
-
-    if _soft_generic_score(intro + "\n" + findings + "\n" + application) >= 3:
-        return False, "too_generic"
-
-    return True, "ok"
-
-
-def _validate_output(text: str, audience: str, day_key: str, rubric_format: str) -> Tuple[bool, str]:
+def _validate_output(text: str) -> Tuple[bool, str]:
     out = (text or "").strip()
+    if not out:
+        return False, "empty"
     if len(out) < 260:
         return False, "too_short"
 
@@ -358,10 +114,7 @@ def _validate_output(text: str, audience: str, day_key: str, rubric_format: str)
     if _has_template_leak(out):
         return False, "template_leak"
 
-    aud = (audience or "parents").strip().lower()
-    if aud == "pros":
-        return _validate_pro_post(out)
-    return _validate_parent_post(out, day_key, rubric_format)
+    return True, "ok"
 
 
 # -----------------------
@@ -484,7 +237,7 @@ def _common_rules(max_chars: int) -> str:
         "Категорически запрещено использовать канцелярские фразы вроде: "
         "«развитие речи очень важно», «родители часто сталкиваются с проблемой», "
         "«создайте благоприятную среду», «это важный аспект общего развития».\n"
-        "Никакой воды. Никаких заголовков «Проблема», «Решение», «Результат», «Как сделать дома».\n"
+        "Никаких заголовков «Проблема», «Решение», «Результат», «Как сделать дома».\n"
         "Твоя задача — вытащить практическую суть: игру, упражнение, прием, последовательность действий, примеры слов, формулировки для родителя.\n"
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
@@ -583,7 +336,6 @@ def build_generation_prompt(
         )
         return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
-    # TU / играем и говорим
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
         template = (
             f"{rubric_title} {title_suffix}\n"
@@ -593,14 +345,21 @@ def build_generation_prompt(
             "🎲 Как играть:\n"
             "Опиши одну конкретную игру или упражнение пошагово.\n"
             "Напиши, что говорит родитель, что отвечает ребенок, какой реквизит нужен.\n"
-            "Обязательно добавь строку: Примеры слов: ...\n\n"
+            "Добавь примеры слов и короткие реплики взрослого.\n\n"
             "💡 Что это дает: одним предложением укажи конкретный навык.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nРОЛЬ:\nТы — практикующий логопед и популярный Telegram-блогер для родителей-экспатов.\n" + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий логопед и популярный Telegram-блогер для родителей-экспатов.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
-    # WE / миф и факт
     if dk == "WE" or rf == "myth_fact":
         template = (
             f"{rubric_title} {title_suffix}\n"
@@ -613,9 +372,16 @@ def build_generation_prompt(
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nРОЛЬ:\nТы — практикующий логопед и Telegram-автор, который мягко развеивает мифы и сразу дает полезный следующий шаг.\n" + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий логопед и Telegram-автор, который мягко развеивает мифы и сразу дает полезный следующий шаг.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
-    # TH / bilingual
     if dk == "TH" or rf == "bilingual_parents":
         template = (
             f"{rubric_title} {title_suffix}\n"
@@ -627,9 +393,16 @@ def build_generation_prompt(
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nРОЛЬ:\nТы — логопед, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n" + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — логопед, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
-    # FR / question week
     if dk == "FR" or rf == "question_week":
         template = (
             f"{rubric_title} {title_suffix}\n"
@@ -642,9 +415,16 @@ def build_generation_prompt(
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nРОЛЬ:\nТы — логопед и автор Telegram-рубрики «вопрос недели», который отвечает по-человечески, но по делу.\n" + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — логопед и автор Telegram-рубрики «вопрос недели», который отвечает по-человечески, но по делу.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
-    # SU / age norms
     if dk == "SU" or rf == "age_norms":
         template = (
             f"{rubric_title} {title_suffix}\n"
@@ -658,9 +438,16 @@ def build_generation_prompt(
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nРОЛЬ:\nТы — логопед, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.\n" + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — логопед, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
-    # MO и общий fallback
     template = (
         f"{rubric_title} {title_suffix}\n"
         "👶 Возраст: укажи диапазон\n\n"
@@ -749,7 +536,7 @@ async def generate_post_plain_from_evidence_async(
     def validate(out: str) -> Tuple[bool, str]:
         if out.strip() == "НЕТ_ДАННЫХ":
             return False, "no_data_in_source"
-        return _validate_output(out, aud, day_key or "", rubric_format)
+        return _validate_output(out)
 
     if prov == "none":
         return "", False, "provider:none"
@@ -767,15 +554,16 @@ async def generate_post_plain_from_evidence_async(
 
             repair_prompt = (
                 prompt
-                + "\n\nПОВТОРИ. Предыдущий вариант звучал слишком шаблонно или слишком общо. "
-                + "Убери канцелярит, начни ближе к сути, добавь больше конкретных реплик родителя, шагов, примеров слов, мини-сценариев. "
-                + "Текст должен звучать как живой полезный Telegram-пост, а не как доклад."
+                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным. "
+                + "Сделай текст живее, плотнее и конкретнее. "
+                + "Не используй шаблонные фразы, placeholders и служебные маркеры. "
+                + "Сразу иди к сути и не делай текст слишком коротким."
             )
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))
             ok2, reason2 = validate(out2)
             if ok2:
                 return out2, True, "ok:groq_retry"
-            return "", False, f"structure_invalid_groq:{reason2}"
+            return "", False, f"invalid_groq:{reason2}"
         except Exception as e:
             groq_err = str(e)
             if prov == "groq":
@@ -789,7 +577,7 @@ async def generate_post_plain_from_evidence_async(
             ok, reason = validate(out)
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODEL}"
-            return "", False, f"structure_invalid_gemini:{reason}"
+            return "", False, f"invalid_gemini:{reason}"
         except Exception as e:
             return "", False, f"gemini_failed:{e} | groq={groq_err}"
 

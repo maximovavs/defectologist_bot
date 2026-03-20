@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.1.2
+Publisher (cron/GitHub Actions) v4.1.3
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -16,7 +16,9 @@ Publisher (cron/GitHub Actions) v4.1.2
    - лимит skip-ов на рубрику
    - таймаут на генерацию одного кандидата
 5) Добавлено подробное логирование в stdout для GitHub Actions.
-6) Финальный tech alert экранируется как HTML-safe текст.
+6) Tech alerts теперь отправляются безопасно для Telegram:
+   - без <br>
+   - с fallback на plain text, если HTML parse mode ломается
 7) Telegram HTML renderer синхронизирован с новым narrative-форматом постов.
 """
 
@@ -55,7 +57,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.1.2 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.1.3 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -203,7 +205,27 @@ def _build_posted_zero_alert_html(
         for sample in samples[:8]:
             parts.append(_escape(sample))
 
-    return "<br>".join(parts)
+    return "\n".join(parts)
+
+
+def _strip_html_tags_for_telegram(text: str) -> str:
+    s = text or ""
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r'<a\s+href="([^"]+)">(.+?)</a>',
+        lambda m: f"{_html.unescape(m.group(2))} ({_html.unescape(m.group(1))})",
+        s,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    s = re.sub(r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre)>", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = _html.unescape(s)
+    return s.strip()
+
+
+def _is_probably_parse_mode_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "can't parse entities" in text or "unsupported start tag" in text or "bad request" in text
 
 
 # =========================
@@ -433,20 +455,6 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
 # Plain -> Telegram HTML rendering
 # =========================
 
-def _is_structural_heading(line: str) -> bool:
-    st = (line or "").strip()
-    if not st:
-        return False
-
-    if _line_matches_structural(st):
-        return True
-
-    if st in SECTION_HEADERS:
-        return True
-
-    return False
-
-
 def _line_matches_structural(st: str) -> bool:
     return any(
         (
@@ -463,6 +471,17 @@ def _line_matches_structural(st: str) -> bool:
             HOME_HEADING_RE.match(st),
         )
     )
+
+
+def _is_structural_heading(line: str) -> bool:
+    st = (line or "").strip()
+    if not st:
+        return False
+    if _line_matches_structural(st):
+        return True
+    if st in SECTION_HEADERS:
+        return True
+    return False
 
 
 def render_plain_to_telegram_html(plain_text: str) -> str:
@@ -514,15 +533,53 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     r = requests.post(url, data=data, files=files, timeout=30)
-    r.raise_for_status()
-    return r.json()
+
+    try:
+        payload = r.json()
+    except Exception:
+        payload = None
+
+    if not r.ok:
+        description = ""
+        if isinstance(payload, dict):
+            description = payload.get("description", "") or ""
+        if not description:
+            description = r.text or ""
+        raise RuntimeError(f"telegram_api_error:{r.status_code}:{description}")
+
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        raise RuntimeError(f"telegram_api_error:{r.status_code}:{payload.get('description', '')}")
+
+    return payload or {}
 
 
 def send_message(chat_id: str, html_text: str) -> None:
-    data = {"chat_id": chat_id, "text": html_text}
+    if not chat_id:
+        raise RuntimeError("chat_id is missing")
+
+    base_data: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": html_text,
+        "disable_web_page_preview": "true",
+    }
+
     if TELEGRAM_PARSE_MODE:
-        data["parse_mode"] = TELEGRAM_PARSE_MODE
-    tg_request("sendMessage", data=data)
+        try:
+            data = dict(base_data)
+            data["parse_mode"] = TELEGRAM_PARSE_MODE
+            tg_request("sendMessage", data=data)
+            return
+        except Exception as e:
+            if not _is_probably_parse_mode_error(e):
+                raise
+
+    fallback_text = _strip_html_tags_for_telegram(html_text)
+    fallback_data: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": fallback_text,
+        "disable_web_page_preview": "true",
+    }
+    tg_request("sendMessage", data=fallback_data)
 
 
 def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:

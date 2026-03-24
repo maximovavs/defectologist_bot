@@ -3,15 +3,16 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.1 — narrative generation + soft validation
+Patch 5.2 — narrative generation + thematic hashtags
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
 2) Gemini: fallback через x-goog-api-key; региональный блок выключает Gemini на весь прогон.
 3) Родительские рубрики: role-prompting + живой narrative format без заголовков
    «Проблема / Решение / Результат».
-4) Источник и финальный вопрос достраиваются кодом, если модель их пропустила.
-5) Валидатор теперь мягкий:
+4) В конце поста модель должна сгенерировать 1–2 тематических хештега.
+5) Источник и ссылка достраиваются кодом, если модель их пропустила.
+6) Валидатор мягкий:
    - текст не пустой
    - текст не слишком короткий
    - нет banned phrases
@@ -51,7 +52,6 @@ def enforce_total_chars_keep_structure(text: str, max_chars: int) -> str:
 # -----------------------
 
 BANNED_PHRASES = [
-    "Действуй как Логопед-дефектолог ",
     "Короткая практика без давления",
     "Один конкретный мини-приём из EVIDENCE",
     "родители часто сталкиваются с проблемой",
@@ -243,38 +243,14 @@ def _common_rules(max_chars: int) -> str:
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
         "Не используй Markdown и кодовые блоки.\n"
+        "В самом конце текста сгенерируй 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
+        "Используй формат вроде #билингвизм #запуск_речи.\n"
+        "Никогда не пиши больше двух тематических хештегов.\n"
     )
 
 
-def _parent_comment(day_key: str, rubric_format: str) -> str:
-    dk = (day_key or "").upper()
-    rf = (rubric_format or "").lower()
-
-    if dk == "TH" or rf == "bilingual_parents":
-        return "💬 Что реально помогает русскому языку звучать дома без принуждения?"
-    if dk == "FR" or rf == "question_week":
-        return "💬 С таким вопросом вы сталкивались?"
-    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        return "💬 Какую игру из текста вы бы попробовали первой?"
-    if dk == "SU" or rf == "age_norms":
-        return "💬 Какой ориентир из поста оказался самым полезным?"
-    if dk == "WE" or rf == "myth_fact":
-        return "💬 С каким мифом на эту тему вы сталкивались?"
-    return "💬 Что из этого вы готовы попробовать уже сегодня?"
-
-
-def _default_comment(audience: str, day_key: str, rubric_format: str) -> str:
-    aud = (audience or "parents").strip().lower()
-    if aud == "pros":
-        return "💬 Что из этого вы бы протестировали в своей практике первым?"
-    return _parent_comment(day_key, rubric_format)
-
-
-def _ensure_source_and_comment(
+def _ensure_source_and_link(
     text: str,
-    audience: str,
-    day_key: str,
-    rubric_format: str,
     source_domain: str,
     source_url: str,
 ) -> str:
@@ -284,7 +260,6 @@ def _ensure_source_and_comment(
 
     has_source_line = any(re.match(r"^Источник:\s*\S.+$", x.strip(), re.IGNORECASE) for x in lines)
     has_link_line = any(x.strip().startswith("🔗 ") for x in lines)
-    has_comment_line = any(re.match(r"^💬\s*\S.+$", x.strip()) for x in lines)
 
     if not has_source_line:
         if lines and lines[-1].strip():
@@ -293,10 +268,6 @@ def _ensure_source_and_comment(
 
     if not has_link_line:
         lines.append(f"🔗 {source_url}")
-
-    if not has_comment_line:
-        lines.append("")
-        lines.append(_default_comment(audience, day_key, rubric_format))
 
     return "\n".join(lines).strip()
 
@@ -333,7 +304,7 @@ def build_generation_prompt(
             "2–4 предложения: что специалист может взять в работу уже сейчас.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n\n"
-            "💬 Что из этого вы бы протестировали в своей практике первым?\n"
+            "#пример_тега\n"
         )
         return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
@@ -349,11 +320,12 @@ def build_generation_prompt(
             "Добавь примеры слов и короткие реплики взрослого.\n\n"
             "💡 Что это дает: одним предложением укажи конкретный навык.\n\n"
             f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"🔗 {source_url}\n\n"
+            "#пример_тега #пример_тега_2\n"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и популярный Telegram-блогер для родителей-экспатов.\n"
+            + "\nРОЛЬ:\nТы — практикующий логопед и популярный Telegram-блогер для родителей-экспатов.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -371,7 +343,8 @@ def build_generation_prompt(
             "Дай один практический прием или микро-упражнение без канцелярита.\n\n"
             "💡 Что это дает: одним предложением назови конкретный навык или эффект.\n\n"
             f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"🔗 {source_url}\n\n"
+            "#пример_тега\n"
         )
         return (
             rules
@@ -392,11 +365,12 @@ def build_generation_prompt(
             "Перескажи 2–4 конкретных приема из текста человеческим языком. Никакой теории ради теории.\n\n"
             "💡 Что это дает: одним предложением объясни практический смысл.\n\n"
             f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"🔗 {source_url}\n\n"
+            "#пример_тега\n"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы —  Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -414,7 +388,8 @@ def build_generation_prompt(
             "Дай один конкретный следующий шаг.\n\n"
             "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
             f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"🔗 {source_url}\n\n"
+            "#пример_тега\n"
         )
         return (
             rules
@@ -437,7 +412,8 @@ def build_generation_prompt(
             "Дай один домашний прием или наблюдение из текста.\n\n"
             "💡 Что это дает: одним предложением назови практический смысл.\n\n"
             f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"🔗 {source_url}\n\n"
+            "#пример_тега\n"
         )
         return (
             rules
@@ -452,19 +428,18 @@ def build_generation_prompt(
     template = (
         f"{rubric_title} {title_suffix}\n"
         "👶 Возраст: укажи диапазон\n\n"
-        "Сразу начни с сути: Действуй как Логопед-дефектолог, над чем сегодня работаем или что можно заметить у ребенка по теме статьи.\n\n"
+        "Действуй как Логопед-дефектолог. Сразу начни с сути: над чем сегодня работаем или что можно заметить у ребенка по теме статьи.\n\n"
         "🧩 Что попробовать сегодня:\n"
         "Дай один конкретный прием, сценарий общения или микро-упражнение из текста.\n\n"
         "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
         f"Источник: {source_domain}\n"
-        f"🔗 {source_url}\n"
+        f"🔗 {source_url}\n\n"
+        "#пример_тега\n"
     )
 
     footer = ""
     if disclaimer:
         footer += f"\nℹ️ {norm_space(disclaimer)}\n"
-    if hashtags:
-        footer += "\n" + " ".join([h if h.startswith("#") else f"#{h}" for h in hashtags]) + "\n"
 
     return (
         rules
@@ -523,11 +498,8 @@ async def generate_post_plain_from_evidence_async(
         s = (s or "").strip().replace("\r\n", "\n")
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
-        s = _ensure_source_and_comment(
+        s = _ensure_source_and_link(
             text=s,
-            audience=aud,
-            day_key=day_key or "",
-            rubric_format=rubric_format,
             source_domain=source_domain,
             source_url=source_url,
         )

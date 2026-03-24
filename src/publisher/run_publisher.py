@@ -276,12 +276,11 @@ def _is_structural_heading(line: str) -> bool:
 
 def _slugify_tag_body(text: str) -> str:
     s = (text or "").strip().lower().replace("ё", "е")
-    s = re.sub(r"[–—−--]+", "_", s)
+    s = re.sub(r"[-–—−]+", "_", s)
     s = re.sub(r"\s+", "_", s)
     s = re.sub(r"[^0-9a-zа-я_]+", "_", s, flags=re.IGNORECASE)
     s = re.sub(r"_+", "_", s).strip("_")
     return s
-
 
 def _extract_age_value(lines: List[str]) -> str:
     for line in lines:

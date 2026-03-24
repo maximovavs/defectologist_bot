@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.1.3
+Publisher (cron/GitHub Actions) v4.2.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -20,6 +20,11 @@ Publisher (cron/GitHub Actions) v4.1.3
    - без <br>
    - с fallback на plain text, если HTML parse mode ломается
 7) Telegram HTML renderer синхронизирован с новым narrative-форматом постов.
+8) В каждый публикуемый пост внедрена система хештегов:
+   - рубричный тег по дню недели
+   - тег возраста из строки "👶 Возраст:"
+   - 1–2 тематических тега, извлечённых из LLM-ответа
+   Все хештеги ставятся строго в самом низу сообщения, под ссылкой.
 """
 
 import asyncio
@@ -57,7 +62,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.1.3 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.2.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -117,6 +122,18 @@ BENEFIT_LINE_RE = re.compile(r"^💡\s*Что это дает\s*:\s*.+\S$", re.I
 MYTH_LINE_RE = re.compile(r"^🔴\s*Миф\s*:\s*.+\S$", re.IGNORECASE)
 QUESTION_LINE_RE = re.compile(r"^❓\s*Вопрос недели\s*:\s*.+\S$", re.IGNORECASE)
 ORIENTIRS_LINE_RE = re.compile(r"^Ориентиры:\s*.+\S$", re.IGNORECASE)
+
+HASHTAG_TOKEN_RE = re.compile(r"(?<!\w)#([A-Za-zА-Яа-яЁё0-9_]+)")
+
+RUBRIC_TAGS_BY_DAY = {
+    "MO": "#совет_логопеда",
+    "TU": "#играем_и_говорим",
+    "WE": "#миф_факт",
+    "TH": "#русский_за_границей",
+    "FR": "#говорим_правильно",
+    "SA": "#методическая_копилка",
+    "SU": "#возрастная_норма",
+}
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
@@ -226,6 +243,179 @@ def _strip_html_tags_for_telegram(text: str) -> str:
 def _is_probably_parse_mode_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return "can't parse entities" in text or "unsupported start tag" in text or "bad request" in text
+
+
+def _line_matches_structural(st: str) -> bool:
+    return any(
+        (
+            AGE_LINE_RE.match(st),
+            AUDIENCE_LINE_RE.match(st),
+            SOURCE_LINE_RE.match(st),
+            BENEFIT_LINE_RE.match(st),
+            MYTH_LINE_RE.match(st),
+            QUESTION_LINE_RE.match(st),
+            ORIENTIRS_LINE_RE.match(st),
+            GAME_HEADING_RE.match(st),
+            TRY_TODAY_HEADING_RE.match(st),
+            BILINGUAL_HEADING_RE.match(st),
+            HOME_HEADING_RE.match(st),
+        )
+    )
+
+
+def _is_structural_heading(line: str) -> bool:
+    st = (line or "").strip()
+    if not st:
+        return False
+    if _line_matches_structural(st):
+        return True
+    if st in SECTION_HEADERS:
+        return True
+    return False
+
+
+def _slugify_tag_body(text: str) -> str:
+    s = (text or "").strip().lower().replace("ё", "е")
+    s = re.sub(r"[–—−--]+", "_", s)
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^0-9a-zа-я_]+", "_", s, flags=re.IGNORECASE)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
+def _extract_age_value(lines: List[str]) -> str:
+    for line in lines:
+        st = line.strip()
+        if AGE_LINE_RE.match(st):
+            return st.split(":", 1)[1].strip()
+    return ""
+
+
+def _build_age_tag(age_value: str) -> str:
+    value = _slugify_tag_body(age_value)
+    if not value:
+        return ""
+    if value.startswith("для_детей_"):
+        return f"#{value}"
+    return f"#для_детей_{value}"
+
+
+def _extract_thematic_tags_and_clean_lines(lines: List[str]) -> tuple[List[str], List[str]]:
+    tags: List[str] = []
+    clean_lines: List[str] = []
+
+    for line in lines:
+        st = line.strip()
+        if not st:
+            clean_lines.append(line)
+            continue
+
+        if st.startswith("#"):
+            for raw in HASHTAG_TOKEN_RE.findall(st):
+                tag = f"#{raw.lower()}"
+                if tag not in tags:
+                    tags.append(tag)
+            continue
+
+        clean_lines.append(line)
+
+    return tags[:2], clean_lines
+
+
+def _extract_source_line(lines: List[str], fallback_domain: str) -> str:
+    for line in lines:
+        st = line.strip()
+        if SOURCE_LINE_RE.match(st):
+            return st
+    return f"Источник: {fallback_domain}"
+
+
+def _extract_link_line(lines: List[str], fallback_url: str) -> str:
+    for line in lines:
+        st = line.strip()
+        if st.startswith("🔗 "):
+            return st
+    return f"🔗 {fallback_url}"
+
+
+def _remove_footer_lines(lines: List[str]) -> List[str]:
+    cleaned: List[str] = []
+    for line in lines:
+        st = line.strip()
+        if SOURCE_LINE_RE.match(st):
+            continue
+        if st.startswith("🔗 "):
+            continue
+        cleaned.append(line)
+
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+
+    return cleaned
+
+
+def _trim_body_preserving_footer(body_text: str, footer_text: str, max_chars: int) -> str:
+    body = (body_text or "").strip()
+    footer = (footer_text or "").strip()
+
+    if not footer:
+        return body[:max_chars].rstrip()
+
+    composed = f"{body}\n\n{footer}" if body else footer
+    if len(composed) <= max_chars:
+        return body
+
+    allowance = max_chars - len(footer) - 2
+    if allowance <= 0:
+        return ""
+
+    cut = body[:allowance]
+    if "\n" in cut:
+        cut = cut[:cut.rfind("\n")].rstrip()
+    return (cut.rstrip(" .,:;—-") + "…").strip()
+
+
+def finalize_plain_post_for_publication(
+    plain_text: str,
+    day_key: str,
+    source_domain: str,
+    source_url: str,
+    max_chars: int,
+) -> str:
+    raw_lines = (plain_text or "").replace("\r\n", "\n").split("\n")
+    while raw_lines and not raw_lines[-1].strip():
+        raw_lines.pop()
+
+    thematic_tags, no_tag_lines = _extract_thematic_tags_and_clean_lines(raw_lines)
+    source_line = _extract_source_line(no_tag_lines, source_domain)
+    link_line = _extract_link_line(no_tag_lines, source_url)
+    body_lines = _remove_footer_lines(no_tag_lines)
+
+    age_value = _extract_age_value(body_lines)
+    rubric_tag = RUBRIC_TAGS_BY_DAY.get((day_key or "").upper(), "")
+    age_tag = _build_age_tag(age_value)
+
+    final_tags: List[str] = []
+    for tag in [rubric_tag, age_tag, *thematic_tags]:
+        tag = (tag or "").strip()
+        if not tag:
+            continue
+        if not tag.startswith("#"):
+            tag = f"#{tag}"
+        if tag not in final_tags:
+            final_tags.append(tag)
+
+    body_text = "\n".join(body_lines).strip()
+    footer_parts = [source_line, link_line]
+    if final_tags:
+        footer_parts.append("")
+        footer_parts.append(" ".join(final_tags))
+    footer_text = "\n".join(footer_parts).strip()
+
+    trimmed_body = _trim_body_preserving_footer(body_text, footer_text, max_chars)
+    if trimmed_body:
+        return f"{trimmed_body}\n\n{footer_text}".strip()
+    return footer_text
 
 
 # =========================
@@ -454,35 +644,6 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
 # =========================
 # Plain -> Telegram HTML rendering
 # =========================
-
-def _line_matches_structural(st: str) -> bool:
-    return any(
-        (
-            AGE_LINE_RE.match(st),
-            AUDIENCE_LINE_RE.match(st),
-            SOURCE_LINE_RE.match(st),
-            BENEFIT_LINE_RE.match(st),
-            MYTH_LINE_RE.match(st),
-            QUESTION_LINE_RE.match(st),
-            ORIENTIRS_LINE_RE.match(st),
-            GAME_HEADING_RE.match(st),
-            TRY_TODAY_HEADING_RE.match(st),
-            BILINGUAL_HEADING_RE.match(st),
-            HOME_HEADING_RE.match(st),
-        )
-    )
-
-
-def _is_structural_heading(line: str) -> bool:
-    st = (line or "").strip()
-    if not st:
-        return False
-    if _line_matches_structural(st):
-        return True
-    if st in SECTION_HEADERS:
-        return True
-    return False
-
 
 def render_plain_to_telegram_html(plain_text: str) -> str:
     lines = (plain_text or "").splitlines()
@@ -863,7 +1024,7 @@ async def amain() -> None:
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
                 try:
-                    plain, ok, llm_note = await asyncio.wait_for(
+                    plain_raw, ok, llm_note = await asyncio.wait_for(
                         generate_post_plain_from_evidence_async(
                             rubric_title=rubric_title,
                             rubric_format=rf,
@@ -892,7 +1053,7 @@ async def amain() -> None:
                         break
                     continue
 
-                if not ok or not plain:
+                if not ok or not plain_raw:
                     note(llm_note, canon)
                     rubric_skips += 1
                     print(f"[SKIP] {llm_note} url={canon}", flush=True)
@@ -901,6 +1062,14 @@ async def amain() -> None:
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                         break
                     continue
+
+                plain = finalize_plain_post_for_publication(
+                    plain_text=plain_raw,
+                    day_key=day,
+                    source_domain=sd,
+                    source_url=canon,
+                    max_chars=POST_MAX_CHARS,
+                )
 
                 body_hash = sha1(norm_space(plain))
                 if body_hash in seen_body_hashes_this_run:

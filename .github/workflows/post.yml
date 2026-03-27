@@ -1,4 +1,4 @@
-name: Logoped Channel Bot v2.4
+name: Logoped Channel Bot v2.5
 
 on:
   schedule:
@@ -17,6 +17,10 @@ on:
         description: "REWRITE_PROVIDER: auto | groq | gemini"
         required: false
         default: "auto"
+      target_channel:
+        description: "Куда публиковать при ручном запуске: test | prod"
+        required: false
+        default: "test"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -34,6 +38,7 @@ jobs:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
       AUDIENCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.audience || 'both' }}
       REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
+      TARGET_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
 
       # важно для logorina.ru (плохой TLS)
       INSECURE_TLS_DOMAINS: "logorina.ru"
@@ -50,10 +55,17 @@ jobs:
       MAX_CANDIDATES_PER_RUBRIC: "25"
       MAX_SKIPS_PER_RUBRIC: "12"
       MAX_LLM_SECONDS_PER_CANDIDATE: "180"
+      IMAGE_PROMPT_TIMEOUT_SECONDS: "60"
 
       # Модели
       GROQ_MODEL: "llama-3.3-70b-versatile"
       GEMINI_MODEL: "gemini-2.5-flash"
+
+      # Pollinations
+      POLLINATIONS_TIMEOUT_SECONDS: "10"
+      POLLINATIONS_MODEL: "flux"
+      POLLINATIONS_WIDTH: "1280"
+      POLLINATIONS_HEIGHT: "720"
 
       # Telegram рендеринг ссылок
       TELEGRAM_PARSE_MODE: "HTML"
@@ -92,6 +104,7 @@ jobs:
           TELEGRAM_DRAFTS_CHAT_ID: ${{ secrets.TELEGRAM_DRAFTS_CHAT_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
         run: |
           mkdir -p .state
           python -u -m src.publisher.run_publisher

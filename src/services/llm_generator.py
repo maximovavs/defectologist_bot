@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.2.2 — narrative generation + thematic hashtags (safe)
+Patch 5.3.0 — narrative generation + thematic hashtags + image prompts
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -20,6 +20,7 @@ Patch 5.2.2 — narrative generation + thematic hashtags (safe)
 7) Защита от утечек шаблона:
    - запрещены #пример_тега / #пример_тега_2
    - запрещено служебное «Действуй как Логопед-дефектолог» в итоговом тексте
+8) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
 """
 
 import asyncio
@@ -461,6 +462,128 @@ def build_generation_prompt(
         + "\n"
         + footer
     )
+
+
+# -----------------------
+# Image prompt helpers
+# -----------------------
+
+def _clean_image_prompt(text: str) -> str:
+    s = (text or "").strip().replace("\r\n", "\n")
+    s = re.sub(r"^```[a-zA-Z]*\n", "", s)
+    s = re.sub(r"\n```$", "", s)
+    s = s.replace("\n", " ")
+    s = re.sub(r"^(prompt|image prompt)\s*:\s*", "", s, flags=re.IGNORECASE)
+    s = s.strip(" \"'“”")
+    s = norm_space(s)
+    if len(s) > 220:
+        s = s[:220].rstrip(" ,.;:-")
+    return s
+
+
+def _validate_image_prompt(prompt: str) -> Tuple[bool, str]:
+    p = _clean_image_prompt(prompt)
+    if not p:
+        return False, "empty"
+    if len(p) < 12:
+        return False, "too_short"
+    if len(p) > 240:
+        return False, "too_long"
+    if re.search(r"[А-Яа-яЁё]", p):
+        return False, "non_english"
+    if any(marker in p for marker in ["EVIDENCE", "ШАБЛОН", "#пример_тега"]):
+        return False, "template_leak"
+    return True, "ok"
+
+
+def build_image_prompt_prompt(
+    title: str,
+    body_text: str,
+    audience: str,
+) -> str:
+    safe_title = norm_space(title)
+    safe_body = body_text.replace("\r\n", "\n").strip()
+    safe_body = "\n".join([x.strip() for x in safe_body.split("\n") if x.strip()][:8])
+    safe_body = safe_body[:900]
+
+    return (
+        "You are an art director for Telegram educational covers.\n"
+        "Read the Russian post title and short post body.\n"
+        "Return exactly one short English image prompt for a friendly illustration.\n"
+        "Requirements:\n"
+        "- 10 to 22 words\n"
+        "- describe subject + mood + style\n"
+        "- add style hints like soft pastel colors, 2d flat illustration, clean background only when relevant\n"
+        "- no quotes\n"
+        "- no numbering\n"
+        "- no explanations\n"
+        "- no text in image\n"
+        "- no letters\n"
+        "- no words\n"
+        "- no logo\n"
+        "- no watermark\n\n"
+        f"Audience: {audience or 'parents'}\n"
+        f"Title: {safe_title}\n"
+        f"Post body:\n{safe_body}\n"
+    )
+
+
+async def generate_image_prompt_async(
+    title: str,
+    body_text: str,
+    audience: str,
+    provider: str,
+    groq_key: str,
+    gemini_key: str,
+) -> Tuple[str, bool, str]:
+    prov = (provider or "auto").strip().lower()
+    prompt = build_image_prompt_prompt(title=title, body_text=body_text, audience=audience)
+
+    async def _try_groq() -> Tuple[str, bool, str]:
+        if not groq_key:
+            return "", False, "GROQ_API_KEY_missing"
+        raw = await groq_chat(prompt, groq_key)
+        cleaned = _clean_image_prompt(raw)
+        ok, reason = _validate_image_prompt(cleaned)
+        if ok:
+            return cleaned, True, "ok:groq"
+        repair_prompt = prompt + "\nReturn only one English prompt line. Nothing else."
+        raw2 = await groq_chat(repair_prompt, groq_key)
+        cleaned2 = _clean_image_prompt(raw2)
+        ok2, reason2 = _validate_image_prompt(cleaned2)
+        if ok2:
+            return cleaned2, True, "ok:groq_retry"
+        return "", False, f"invalid_groq_image_prompt:{reason2}"
+
+    async def _try_gemini() -> Tuple[str, bool, str]:
+        if not gemini_key:
+            return "", False, "GEMINI_API_KEY_missing"
+        raw = await gemini_generate(prompt, gemini_key)
+        cleaned = _clean_image_prompt(raw)
+        ok, reason = _validate_image_prompt(cleaned)
+        if ok:
+            return cleaned, True, f"ok:gemini:{GEMINI_MODEL}"
+        return "", False, f"invalid_gemini_image_prompt:{reason}"
+
+    if prov == "none":
+        return "", False, "provider:none"
+
+    groq_err = ""
+    if prov in ("auto", "groq"):
+        try:
+            return await _try_groq()
+        except Exception as e:
+            groq_err = str(e)
+            if prov == "groq":
+                return "", False, f"groq_image_prompt_failed:{groq_err}"
+
+    if prov in ("auto", "gemini"):
+        try:
+            return await _try_gemini()
+        except Exception as e:
+            return "", False, f"gemini_image_prompt_failed:{e} | groq={groq_err}"
+
+    return "", False, f"image_prompt_failed:groq={groq_err}"
 
 
 # -----------------------

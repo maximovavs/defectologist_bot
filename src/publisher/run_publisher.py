@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.2.0
+Publisher (cron/GitHub Actions) v4.3.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -25,9 +25,14 @@ Publisher (cron/GitHub Actions) v4.2.0
    - тег возраста из строки "👶 Возраст:"
    - 1–2 тематических тега, извлечённых из LLM-ответа
    Все хештеги ставятся строго в самом низу сообщения, под ссылкой.
+9) Визуальный пайплайн теперь гибридный:
+   - основной режим: Pollinations AI
+   - fallback: шаблон дня недели + H1 поста через Pillow
+10) При TARGET_CHANNEL=test публикация идёт в TELEGRAM_DRAFTS_CHAT_ID.
 """
 
 import asyncio
+from io import BytesIO
 import hashlib
 import html as _html
 import os
@@ -48,9 +53,12 @@ import yaml
 from bs4 import BeautifulSoup
 from dateutil import tz
 
-from src.services.image_builder import render_image_card
-from src.services.llm_generator import generate_post_plain_from_evidence_async
+from src.services.llm_generator import (
+    generate_image_prompt_async,
+    generate_post_plain_from_evidence_async,
+)
 from src.services.publication_store import PublicationStore
+from src.services.visual_pipeline import build_post_visual
 
 
 # =========================
@@ -62,12 +70,14 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.2.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.3.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip()
+TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "prod").strip().lower()
+POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
 TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()
@@ -79,6 +89,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
+IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
 
 SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.95"))
 RECENT_ALERT_HOURS = int(os.getenv("RECENT_ALERT_HOURS", "36"))
@@ -130,7 +141,7 @@ RUBRIC_TAGS_BY_DAY = {
     "TU": "#играем_и_говорим",
     "WE": "#миф_факт",
     "TH": "#русский_за_границей",
-    "FR": "#говорим_правильно",
+    "FR": "#вопрос_недели",
     "SA": "#методическая_копилка",
     "SU": "#возрастная_норма",
 }
@@ -194,6 +205,12 @@ def _start_recent_window(now: datetime) -> datetime:
     return now - timedelta(hours=RECENT_ALERT_HOURS)
 
 
+def _resolve_publish_chat_id() -> str:
+    if TARGET_CHANNEL == "test":
+        return TELEGRAM_DRAFTS_CHAT_ID
+    return TELEGRAM_CHAT_ID
+
+
 def _build_posted_zero_alert_html(
     now: datetime,
     day: str,
@@ -208,7 +225,7 @@ def _build_posted_zero_alert_html(
     parts: List[str] = [
         "⚠️ <b>Publisher: не удалось опубликовать пост (Posted: 0)</b>",
         f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
-        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)}",
+        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
         "",
         "<b>Причины пропуска (топ):</b>",
     ]
@@ -229,7 +246,7 @@ def _strip_html_tags_for_telegram(text: str) -> str:
     s = text or ""
     s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
     s = re.sub(
-        r'<a\s+href="([^"]+)">(.+?)</a>',
+        r'<a\s+href=\"([^\"]+)\">(.+?)</a>',
         lambda m: f"{_html.unescape(m.group(2))} ({_html.unescape(m.group(1))})",
         s,
         flags=re.IGNORECASE | re.DOTALL,
@@ -281,6 +298,7 @@ def _slugify_tag_body(text: str) -> str:
     s = re.sub(r"[^0-9a-zа-я_]+", "_", s, flags=re.IGNORECASE)
     s = re.sub(r"_+", "_", s).strip("_")
     return s
+
 
 def _extract_age_value(lines: List[str]) -> str:
     for line in lines:
@@ -415,6 +433,14 @@ def finalize_plain_post_for_publication(
     if trimmed_body:
         return f"{trimmed_body}\n\n{footer_text}".strip()
     return footer_text
+
+
+def _extract_h1_from_plain_post(plain_text: str, fallback: str) -> str:
+    for line in (plain_text or "").splitlines():
+        st = line.strip()
+        if st:
+            return st
+    return fallback
 
 
 # =========================
@@ -742,21 +768,27 @@ def send_message(chat_id: str, html_text: str) -> None:
     tg_request("sendMessage", data=fallback_data)
 
 
-def send_post_with_card(chat_id: str, card_path: Path, plain_post: str, html_full_post: str) -> None:
+def _photo_file_tuple(photo_buffer: BytesIO) -> tuple[str, bytes, str]:
+    filename = getattr(photo_buffer, "name", "cover.png")
+    mime_type = getattr(photo_buffer, "mime_type", "image/png")
+    return (filename, photo_buffer.getvalue(), mime_type)
+
+
+def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, html_full_post: str) -> None:
     plain_bytes = len((plain_post or "").encode("utf-8"))
+    file_tuple = _photo_file_tuple(photo_buffer)
+
     if plain_bytes <= TG_CAPTION_MAX_BYTES:
         try:
             data: Dict[str, Any] = {"chat_id": chat_id, "caption": html_full_post}
             if TELEGRAM_PARSE_MODE:
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
-            with card_path.open("rb") as f:
-                tg_request("sendPhoto", data=data, files={"photo": f})
+            tg_request("sendPhoto", data=data, files={"photo": file_tuple})
             return
         except Exception:
             pass
 
-    with card_path.open("rb") as f:
-        tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": f})
+    tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
     send_message(chat_id, html_full_post)
 
 
@@ -789,13 +821,12 @@ def send_semantic_alert(
 async def amain() -> None:
     rub_cfg = load_yaml(CFG_DIR / "rubrics.yml")
     channel_cfg = rub_cfg.get("channel", {}) or {}
-    branding = rub_cfg.get("branding", {}) or {}
     pub_cfg = rub_cfg.get("publishing", {}) or {}
 
     tzname = channel_cfg.get("timezone", "Asia/Nicosia")
     now = get_local_now(tzname)
     run_started_monotonic = time.monotonic()
-    print(f"[START] Publisher started at {now.isoformat()}", flush=True)
+    print(f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL}", flush=True)
 
     week_key = iso_week_key(now)
     day = weekday_key(now)
@@ -1132,20 +1163,57 @@ async def amain() -> None:
                         break
                     continue
 
+                h1_title = _extract_h1_from_plain_post(plain, fallback=rubric_title)
+                image_prompt = ""
+                image_prompt_note = "skipped"
+
+                try:
+                    image_prompt, image_prompt_ok, image_prompt_note = await asyncio.wait_for(
+                        generate_image_prompt_async(
+                            title=h1_title,
+                            body_text=plain,
+                            audience=aud,
+                            provider=PROVIDER,
+                            groq_key=GROQ_API_KEY,
+                            gemini_key=GEMINI_API_KEY,
+                        ),
+                        timeout=IMAGE_PROMPT_TIMEOUT_SECONDS,
+                    )
+                    if not image_prompt_ok:
+                        image_prompt = ""
+                except asyncio.TimeoutError:
+                    image_prompt = ""
+                    image_prompt_note = "image_prompt_timeout"
+                except Exception as e:
+                    image_prompt = ""
+                    image_prompt_note = f"image_prompt_failed:{e}"
+
+                visual_buffer, visual_meta = build_post_visual(
+                    title=h1_title,
+                    day_key=day,
+                    image_prompt=image_prompt,
+                    pollinations_token=POLLINATIONS_TOKEN,
+                )
+                print(
+                    f"[VISUAL] rubric={rubric_id} mode={visual_meta.get('mode')} reason={visual_meta.get('reason')} image_prompt_note={image_prompt_note}",
+                    flush=True,
+                )
+
                 html_full = render_plain_to_telegram_html(plain)
-                theses = ["📚 TL;DR статьи", "🧠 конкретные приемы", "🚫 без дублей"]
-                card = render_image_card(rubric_title, theses, branding, age_tag="")
 
                 if DRY_RUN:
                     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     out = STATE_DIR / "dry_run" / ts
                     out.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(card, out / f"{posted+1:02d}_{aud}_{rubric_id}.png")
+                    filename = getattr(visual_buffer, "name", f"{posted+1:02d}_{aud}_{rubric_id}.png")
+                    ext = Path(filename).suffix or ".png"
+                    (out / f"{posted+1:02d}_{aud}_{rubric_id}{ext}").write_bytes(visual_buffer.getvalue())
                     (out / f"{posted+1:02d}_{aud}_{rubric_id}.txt").write_text(plain, encoding="utf-8")
                 else:
-                    if not TELEGRAM_CHAT_ID:
-                        raise RuntimeError("TELEGRAM_CHAT_ID missing")
-                    send_post_with_card(TELEGRAM_CHAT_ID, card, plain, html_full)
+                    target_chat_id = _resolve_publish_chat_id()
+                    if not target_chat_id:
+                        raise RuntimeError("Resolved target chat id is empty")
+                    send_post_with_visual(target_chat_id, visual_buffer, plain, html_full)
 
                     store.record_publication(
                         canonical_url=canon,

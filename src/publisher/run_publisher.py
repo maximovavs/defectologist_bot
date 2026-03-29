@@ -441,11 +441,17 @@ def finalize_plain_post_for_publication(
 
 
 def _extract_h1_from_plain_post(plain_text: str, fallback: str) -> str:
+    first = ""
     for line in (plain_text or "").splitlines():
-        st = line.strip()
+        st = norm_space(line)
         if st:
-            return st
-    return fallback
+            first = st
+            break
+    if not first:
+        return norm_space(fallback) or "Логопедия и дефектология"
+    if _is_structural_heading(first) or first.startswith('#'):
+        return norm_space(fallback) or "Логопедия и дефектология"
+    return first
 
 
 # =========================
@@ -802,6 +808,61 @@ def render_semantic_alert_message(
     )
     return html_text, plain
 
+
+
+
+def render_semantic_alert_summary_message(
+    alerts: List[Dict[str, Any]],
+    audience: str,
+    rubric_id: str,
+) -> Tuple[str, str]:
+    total = len(alerts)
+    top = sorted(alerts, key=lambda x: float(x.get("score", 0.0)), reverse=True)[:5]
+
+    plain_parts: List[str] = [
+        f"⚠️ Semantic dedup summary — {rubric_id}",
+        f"AUDIENCE={audience} | RUBRIC={rubric_id} | skipped={total}",
+        "",
+    ]
+    for item in top:
+        plain_parts.append(
+            f"• {item.get('candidate_url', '')} -> {item.get('matched_url', '')} | FIELD={item.get('match_field', '')} | Cosine={float(item.get('score', 0.0)):.3f}"
+        )
+    if total > len(top):
+        plain_parts.append("")
+        plain_parts.append(f"И ещё: {total - len(top)}")
+    plain = "\n".join(plain_parts)
+
+    if TELEGRAM_PARSE_MODE.lower() == "markdownv2":
+        rendered_parts: List[str] = [
+            f"⚠️ *Semantic dedup summary — {escape_markdown_v2(rubric_id)}*",
+            f"AUDIENCE={escape_markdown_v2(audience)} \\| RUBRIC={escape_markdown_v2(rubric_id)} \\| skipped={escape_markdown_v2(str(total))}",
+            "",
+        ]
+        for item in top:
+            rendered_parts.append(
+                f"• [candidate]({escape_markdown_v2_url(item.get('candidate_url', ''))}) → [matched]({escape_markdown_v2_url(item.get('matched_url', ''))}) \\| FIELD={escape_markdown_v2(item.get('match_field', ''))} \\| Cosine={escape_markdown_v2(f"{float(item.get('score', 0.0)):.3f}")}"
+            )
+        if total > len(top):
+            rendered_parts.append("")
+            rendered_parts.append(f"И ещё: {escape_markdown_v2(str(total - len(top)))}")
+        return "\n".join(rendered_parts), plain
+
+    html_parts: List[str] = [
+        f"⚠️ <b>Semantic dedup summary — {_escape(rubric_id)}</b>",
+        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | skipped={_escape(str(total))}",
+        "",
+    ]
+    for item in top:
+        cand = _html.escape(item.get("candidate_url", ""), quote=True)
+        hit = _html.escape(item.get("matched_url", ""), quote=True)
+        html_parts.append(
+            f'• <a href="{cand}">candidate</a> → <a href="{hit}">matched</a> | FIELD={_escape(item.get("match_field", ""))} | Cosine={_escape(f"{float(item.get("score", 0.0)):.3f}")}'
+        )
+    if total > len(top):
+        html_parts.append("")
+        html_parts.append(f"И ещё: {_escape(str(total - len(top)))}")
+    return "\n".join(html_parts), plain
 
 def _build_posted_zero_alert_message(
     now: datetime,
@@ -1167,6 +1228,7 @@ async def amain() -> None:
             rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
             rubric_skips = 0
+            semantic_alerts_for_rubric: List[Dict[str, Any]] = []
 
             all_items: List[Dict[str, str]] = []
             for sid in rubric.get("sources", []) or []:
@@ -1320,18 +1382,12 @@ async def amain() -> None:
                             compare="evidence",
                         )
                         if recent_hit:
-                            try:
-                                send_semantic_alert(
-                                    TELEGRAM_DRAFTS_CHAT_ID,
-                                    canon,
-                                    recent_hit.canonical_url,
-                                    recent_hit.similarity,
-                                    aud,
-                                    rubric_id,
-                                    recent_hit.match_field,
-                                )
-                            except Exception as e:
-                                print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+                            semantic_alerts_for_rubric.append({
+                                "candidate_url": canon,
+                                "matched_url": recent_hit.canonical_url,
+                                "score": recent_hit.similarity,
+                                "match_field": recent_hit.match_field,
+                            })
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1392,6 +1448,7 @@ async def amain() -> None:
                     day_key=day,
                     image_prompt=image_prompt,
                     pollinations_token=POLLINATIONS_TOKEN,
+                    fallback_title=rubric_title,
                 )
                 print(
                     f"[VISUAL] rubric={rubric_id} mode={visual_meta.get('mode')} reason={visual_meta.get('reason')} image_prompt_note={image_prompt_note}",
@@ -1441,6 +1498,17 @@ async def amain() -> None:
                 print(f"[POSTED] rubric={rubric_id} audience={aud} url={canon}", flush=True)
                 await asyncio.sleep(1.0)
                 break
+
+            if semantic_alerts_for_rubric and not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
+                try:
+                    rendered_summary, plain_summary = render_semantic_alert_summary_message(
+                        alerts=semantic_alerts_for_rubric,
+                        audience=aud,
+                        rubric_id=rubric_id,
+                    )
+                    send_message(TELEGRAM_DRAFTS_CHAT_ID, rendered_summary, fallback_text=plain_summary)
+                except Exception as e:
+                    print(f"[WARN] failed_to_send_semantic_summary err={e}", flush=True)
 
             if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS:
                 break

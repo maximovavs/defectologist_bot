@@ -28,7 +28,8 @@ import os
 import random
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from functools import wraps
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -172,6 +173,39 @@ def _is_gemini_region_block(text: str) -> bool:
     return "user location is not supported" in t or "location is not supported" in t
 
 
+def _is_retryable_exception(exc: Exception) -> bool:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    text = str(exc).lower()
+    retry_markers = [
+        "429", "500", "502", "503", "504",
+        "rate limit", "resource_exhausted", "temporarily unavailable",
+        "read timed out", "connection aborted", "service unavailable",
+    ]
+    return any(marker in text for marker in retry_markers)
+
+
+def with_exponential_backoff(func: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> str:
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= LLM_MAX_RETRIES or not _is_retryable_exception(exc):
+                    raise
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                await asyncio.sleep(wait)
+        assert last_exc is not None
+        raise last_exc
+
+    return wrapper
+
+
 async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: int = 70) -> requests.Response:
     def _do() -> requests.Response:
         return requests.post(url, headers=headers, json=payload, timeout=timeout)
@@ -179,46 +213,44 @@ async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: 
     return await asyncio.to_thread(_do)
 
 
-async def groq_chat(prompt: str, api_key: str) -> str:
+@with_exponential_backoff
+async def groq_chat(prompt: str, api_key: str, temperature: float = 0.2) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        "temperature": float(max(0.0, min(temperature, 1.2))),
     }
 
-    last_err = ""
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
-        await _throttle()
-        resp = await _post_json(url, headers, payload, timeout=80)
+    await _throttle()
+    resp = await _post_json(url, headers, payload, timeout=80)
 
-        if resp.status_code == 200:
-            j = resp.json()
-            return (j["choices"][0]["message"]["content"] or "").strip()
+    if resp.status_code == 200:
+        j = resp.json()
+        return (j["choices"][0]["message"]["content"] or "").strip()
 
-        txt = resp.text or ""
-        last_err = f"{resp.status_code}: {txt[:240]}"
-        if _is_quota_error(resp.status_code, txt):
-            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
-            wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-            wait = wait * random.uniform(0.85, 1.15)
-            await asyncio.sleep(wait)
-            continue
-
-        resp.raise_for_status()
-
-    raise RuntimeError(f"groq_failed_after_retries:{last_err}")
+    txt = resp.text or ""
+    if _is_quota_error(resp.status_code, txt):
+        raise RuntimeError(f"groq_rate_limit:{resp.status_code}:{txt[:240]}")
+    if resp.status_code >= 500:
+        raise RuntimeError(f"groq_server_error:{resp.status_code}:{txt[:240]}")
+    resp.raise_for_status()
+    raise RuntimeError(f"groq_failed:{resp.status_code}:{txt[:240]}")
 
 
-async def gemini_generate(prompt: str, api_key: str) -> str:
+@with_exponential_backoff
+async def gemini_generate(prompt: str, api_key: str, temperature: float = 0.2) -> str:
     global _gemini_region_blocked
     if _gemini_region_blocked:
         raise RuntimeError("gemini_disabled_region")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": float(max(0.0, min(temperature, 1.2)))},
+    }
 
     await _throttle()
     resp = await _post_json(url, headers, payload, timeout=80)
@@ -232,11 +264,15 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
         _gemini_region_blocked = True
         raise RuntimeError("gemini_blocked_region")
 
+    if _is_quota_error(resp.status_code, txt):
+        raise RuntimeError(f"gemini_rate_limit:{resp.status_code}:{txt[:240]}")
     if resp.status_code == 404:
         raise RuntimeError(f"gemini_model_not_found:{GEMINI_MODEL}")
+    if resp.status_code >= 500:
+        raise RuntimeError(f"gemini_server_error:{resp.status_code}:{txt[:240]}")
 
     resp.raise_for_status()
-    raise RuntimeError(f"gemini_failed:{resp.status_code}")
+    raise RuntimeError(f"gemini_failed:{resp.status_code}:{txt[:240]}")
 
 
 # -----------------------
@@ -542,13 +578,13 @@ async def generate_image_prompt_async(
     async def _try_groq() -> Tuple[str, bool, str]:
         if not groq_key:
             return "", False, "GROQ_API_KEY_missing"
-        raw = await groq_chat(prompt, groq_key)
+        raw = await groq_chat(prompt, groq_key, temperature=0.45)
         cleaned = _clean_image_prompt(raw)
         ok, reason = _validate_image_prompt(cleaned)
         if ok:
             return cleaned, True, "ok:groq"
         repair_prompt = prompt + "\nReturn only one English prompt line. Nothing else."
-        raw2 = await groq_chat(repair_prompt, groq_key)
+        raw2 = await groq_chat(repair_prompt, groq_key, temperature=0.55)
         cleaned2 = _clean_image_prompt(raw2)
         ok2, reason2 = _validate_image_prompt(cleaned2)
         if ok2:
@@ -558,7 +594,7 @@ async def generate_image_prompt_async(
     async def _try_gemini() -> Tuple[str, bool, str]:
         if not gemini_key:
             return "", False, "GEMINI_API_KEY_missing"
-        raw = await gemini_generate(prompt, gemini_key)
+        raw = await gemini_generate(prompt, gemini_key, temperature=0.4)
         cleaned = _clean_image_prompt(raw)
         ok, reason = _validate_image_prompt(cleaned)
         if ok:
@@ -605,6 +641,9 @@ async def generate_post_plain_from_evidence_async(
     gemini_key: str,
     max_chars: int,
     day_key: Optional[str] = None,
+    temperature: float = 0.2,
+    variation_seed: Optional[int] = None,
+    regeneration_hint: str = "",
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
@@ -626,6 +665,10 @@ async def generate_post_plain_from_evidence_async(
         hashtags=hashtags,
         max_chars=max_chars,
     )
+    if variation_seed is not None:
+        prompt += f"\n\nВариативный seed для новой версии: {variation_seed}."
+    if regeneration_hint:
+        prompt += f"\n\nДополнительное условие для перегенерации: {regeneration_hint}"
 
     def postprocess(s: str) -> str:
         s = (s or "").strip().replace("\r\n", "\n")
@@ -654,7 +697,7 @@ async def generate_post_plain_from_evidence_async(
         if not groq_key:
             return "", False, "GROQ_API_KEY_missing"
         try:
-            out = postprocess(await groq_chat(prompt, groq_key))
+            out = postprocess(await groq_chat(prompt, groq_key, temperature=temperature))
             ok, reason = validate(out)
             if ok:
                 return out, True, "ok:groq"
@@ -667,7 +710,7 @@ async def generate_post_plain_from_evidence_async(
                 + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
                 + "Сразу иди к сути и не делай текст слишком коротким."
             )
-            out2 = postprocess(await groq_chat(repair_prompt, groq_key))
+            out2 = postprocess(await groq_chat(repair_prompt, groq_key, temperature=min(1.0, temperature + 0.15)))
             ok2, reason2 = validate(out2)
             if ok2:
                 return out2, True, "ok:groq_retry"
@@ -681,7 +724,7 @@ async def generate_post_plain_from_evidence_async(
         if not gemini_key:
             return "", False, "GEMINI_API_KEY_missing"
         try:
-            out = postprocess(await gemini_generate(prompt, gemini_key))
+            out = postprocess(await gemini_generate(prompt, gemini_key, temperature=temperature))
             ok, reason = validate(out)
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODEL}"
@@ -707,6 +750,9 @@ def generate_post_plain_from_evidence(
     gemini_key: str,
     max_chars: int,
     day_key: Optional[str] = None,
+    temperature: float = 0.2,
+    variation_seed: Optional[int] = None,
+    regeneration_hint: str = "",
 ) -> Tuple[str, bool, str]:
     try:
         asyncio.get_running_loop()
@@ -727,6 +773,9 @@ def generate_post_plain_from_evidence(
                 gemini_key=gemini_key,
                 max_chars=max_chars,
                 day_key=day_key,
+                temperature=temperature,
+                variation_seed=variation_seed,
+                regeneration_hint=regeneration_hint,
             )
         )
     raise RuntimeError(

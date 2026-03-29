@@ -154,12 +154,49 @@ def _resolve_background_path(day_key: str) -> Path:
     )
 
 
+_STRUCTURAL_TITLE_PATTERNS = [
+    re.compile(r"^👶\s*Возраст\s*:", re.IGNORECASE),
+    re.compile(r"^👩‍⚕️\s*Аудитория\s*:", re.IGNORECASE),
+    re.compile(r"^🎲\s*Как играть", re.IGNORECASE),
+    re.compile(r"^🧩\s*Что попробовать сегодня", re.IGNORECASE),
+    re.compile(r"^🌍\s*Что помогает в двуязычной семье", re.IGNORECASE),
+    re.compile(r"^🏠\s*Что можно попробовать дома", re.IGNORECASE),
+    re.compile(r"^💡\s*Что это дает\s*:", re.IGNORECASE),
+    re.compile(r"^🔴\s*Миф\s*:", re.IGNORECASE),
+    re.compile(r"^❓\s*Вопрос недели\s*:", re.IGNORECASE),
+    re.compile(r"^Ориентиры\s*:", re.IGNORECASE),
+    re.compile(r"^Источник\s*:", re.IGNORECASE),
+    re.compile(r"^🔗\s+", re.IGNORECASE),
+]
+
+
+def _is_structural_cover_line(text: str) -> bool:
+    st = norm_space(text)
+    if not st:
+        return True
+    if st.startswith('#'):
+        return True
+    return any(pat.match(st) for pat in _STRUCTURAL_TITLE_PATTERNS)
+
+
+def sanitize_cover_title(title: str, fallback: str = "Логопедия и дефектология") -> str:
+    candidate = norm_space(title)
+    fb = norm_space(fallback) or "Логопедия и дефектология"
+    if not candidate or _is_structural_cover_line(candidate):
+        return fb
+    return candidate
+
+
 def extract_h1_from_plain_post(plain_text: str, fallback: str = "Логопедия и дефектология") -> str:
+    first = ""
     for line in (plain_text or "").splitlines():
-        st = line.strip()
+        st = norm_space(line)
         if st:
-            return st
-    return fallback
+            first = st
+            break
+    if not first:
+        return sanitize_cover_title("", fallback=fallback)
+    return sanitize_cover_title(first, fallback=fallback)
 
 
 def _measure(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> float:
@@ -335,9 +372,11 @@ def build_fallback_cover_buffer(
     day_key: str,
     max_lines: int = MAX_TITLE_LINES,
     text_color: str = TITLE_COLOR,
+    fallback_title: str = "Логопедия и дефектология",
 ) -> BytesIO:
     image = _open_background(day_key)
     draw = ImageDraw.Draw(image)
+    title = sanitize_cover_title(title, fallback=fallback_title)
 
     safe_width = int(TARGET_SIZE[0] * 0.72)
     safe_height = int(TARGET_SIZE[1] * 0.42)

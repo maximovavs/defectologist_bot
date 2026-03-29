@@ -212,31 +212,39 @@ def _ellipsize_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageF
     return (base + "…").strip() if base else "…"
 
 
+
 def _fit_title_lines(
     draw: ImageDraw.ImageDraw,
     title: str,
     max_width: int,
     max_height: int,
     max_lines: int = MAX_TITLE_LINES,
-) -> Tuple[ImageFont.ImageFont, List[str], int]:
+) -> Tuple[ImageFont.ImageFont, str, int]:
+    cleaned = norm_space(title)
+    if not cleaned:
+        font = _load_font(42)
+        return font, "", max(8, int(42 * 0.2))
+
     for font_size in range(88, 34, -2):
         font = _load_font(font_size)
-        lines = _wrap_to_width(draw, title, font, max_width)
+        lines = _wrap_to_width(draw, cleaned, font, max_width)
         if len(lines) > max_lines:
             lines = lines[:max_lines]
             lines[-1] = _ellipsize_line(draw, lines[-1], font, max_width)
 
-        line_height = int(font_size * 1.18)
-        total_height = line_height * len(lines)
-        if lines and total_height <= max_height:
-            return font, lines, line_height
+        multiline = "\n".join(lines)
+        spacing = max(8, int(font_size * 0.2))
+        bbox = draw.multiline_textbbox((0, 0), multiline, font=font, align="center", spacing=spacing)
+        width = int(bbox[2] - bbox[0])
+        height = int(bbox[3] - bbox[1])
+        if lines and width <= max_width and height <= max_height:
+            return font, multiline, spacing
 
     font = _load_font(34)
-    lines = _wrap_to_width(draw, title, font, max_width)[:max_lines]
+    lines = _wrap_to_width(draw, cleaned, font, max_width)[:max_lines]
     if lines:
         lines[-1] = _ellipsize_line(draw, lines[-1], font, max_width)
-    return font, lines, int(34 * 1.18)
-
+    return font, "\n".join(lines), max(8, int(34 * 0.2))
 
 def _open_background(day_key: str) -> Image.Image:
     bg_path = _resolve_background_path(day_key)
@@ -321,6 +329,7 @@ def validate_generated_image_bytes(image_bytes: bytes, content_type: str = "") -
 # Fallback builder
 # =========================
 
+
 def build_fallback_cover_buffer(
     title: str,
     day_key: str,
@@ -332,10 +341,8 @@ def build_fallback_cover_buffer(
 
     safe_width = int(TARGET_SIZE[0] * 0.72)
     safe_height = int(TARGET_SIZE[1] * 0.42)
-    left = int((TARGET_SIZE[0] - safe_width) / 2)
-    top = int((TARGET_SIZE[1] - safe_height) / 2)
 
-    font, lines, line_height = _fit_title_lines(
+    font, multiline_text, spacing = _fit_title_lines(
         draw=draw,
         title=title,
         max_width=safe_width,
@@ -343,14 +350,20 @@ def build_fallback_cover_buffer(
         max_lines=max_lines,
     )
 
-    total_height = line_height * len(lines)
-    y = top + int((safe_height - total_height) / 2)
-
-    for line in lines:
-        width = _measure(draw, line, font)
-        x = int((TARGET_SIZE[0] - width) / 2)
-        draw.text((x, y), line, font=font, fill=text_color, align="center")
-        y += line_height
+    if multiline_text:
+        bbox = draw.multiline_textbbox((0, 0), multiline_text, font=font, align="center", spacing=spacing)
+        text_width = int(bbox[2] - bbox[0])
+        text_height = int(bbox[3] - bbox[1])
+        x = int((TARGET_SIZE[0] - text_width) / 2 - bbox[0])
+        y = int((TARGET_SIZE[1] - text_height) / 2 - bbox[1])
+        draw.multiline_text(
+            (x, y),
+            multiline_text,
+            font=font,
+            fill=text_color,
+            align="center",
+            spacing=spacing,
+        )
 
     buffer = BytesIO()
     image.save(buffer, format="PNG", optimize=True)

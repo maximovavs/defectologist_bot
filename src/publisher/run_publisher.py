@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.5.0
+Publisher (cron/GitHub Actions) v4.6.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -33,6 +33,7 @@ Publisher (cron/GitHub Actions) v4.5.0
 12) Разделены state/test и state/prod для истории публикаций.
 13) Введены отдельные semantic thresholds для source/evidence и post/body.
 14) Добавлен prefilter мусорных documents/* URL для age_norms.
+15) Добавлен rubric-guard для age_norms: whitelist/blacklist тем и reject при несоответствии рубрике.
 """
 
 import asyncio
@@ -77,7 +78,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.5.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.6.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -272,11 +273,13 @@ def classify_skip_severity(reason: str) -> str:
         "no_candidates",
         "unknown_source_id",
         "prefilter_noise_document",
+        "rubric_topic_mismatch_source",
+        "rubric_topic_mismatch_post_after_regen",
     }
     if reason in soft_exact:
         return "soft"
 
-    soft_prefixes = ("dup_", "no_evidence_")
+    soft_prefixes = ("dup_", "no_evidence_", "rubric_topic_mismatch")
     if reason.startswith(soft_prefixes):
         return "soft"
 
@@ -543,6 +546,124 @@ def _extract_h1_from_plain_post(plain_text: str, fallback: str) -> str:
     if _is_structural_heading(first) or first.startswith('#'):
         return norm_space(fallback) or "Логопедия и дефектология"
     return first
+
+
+AGE_NORMS_POSITIVE_MARKERS = (
+    "возраст",
+    "возрастн",
+    "норма",
+    "ориентир",
+    "этап",
+    "milestone",
+    "milestones",
+    "developmental",
+    "development",
+    "communication milestone",
+    "speech development",
+    "language development",
+    "typical development",
+    "по возрасту",
+    "развитие речи",
+    "развитие языка",
+)
+
+AGE_NORMS_NEGATIVE_MARKERS = (
+    "дисграф",
+    "дислекс",
+    "заикан",
+    "алали",
+    "афази",
+    "дизартр",
+    "ринолал",
+    "дислал",
+    "нарушени",
+    "коррекц",
+    "диагноз",
+    "патолог",
+    "дефект",
+    "therapy",
+    "treatment",
+    "intervention",
+    "disorder",
+    "impairment",
+)
+
+AGE_NORMS_RED_FLAG_PHRASES = (
+    "трудности с письм",
+    "замена букв",
+    "пропуск слог",
+    "ошибки письма",
+    "коррекция письма",
+    "нарушение письма",
+    "reading disorder",
+    "writing disorder",
+)
+
+
+def _topic_scan_normalize(text: str) -> str:
+    return norm_space((text or "").lower().replace("ё", "е"))
+
+
+def _contains_any_marker(text: str, markers: Tuple[str, ...]) -> bool:
+    blob = _topic_scan_normalize(text)
+    return any(marker in blob for marker in markers)
+
+
+def _find_negative_marker(text: str, markers: Tuple[str, ...]) -> str:
+    blob = _topic_scan_normalize(text)
+    for marker in markers:
+        if marker in blob:
+            return marker
+    return ""
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        st = norm_space(line)
+        if st:
+            return st
+    return ""
+
+
+def validate_rubric_source_fit(rubric_id: str, candidate_title: str, canonical_url: str, evidence_text: str) -> Optional[str]:
+    rid = (rubric_id or "").strip().lower()
+    if rid != "age_norms":
+        return None
+
+    scan = "\n".join([candidate_title or "", canonical_url or "", (evidence_text or "")[:4000]])
+    negative_marker = _find_negative_marker(scan, AGE_NORMS_NEGATIVE_MARKERS)
+    if negative_marker:
+        return "rubric_topic_mismatch_source"
+
+    if _contains_any_marker(scan, AGE_NORMS_RED_FLAG_PHRASES):
+        return "rubric_topic_mismatch_source"
+
+    if not _contains_any_marker(scan, AGE_NORMS_POSITIVE_MARKERS):
+        return "rubric_topic_mismatch_source"
+
+    return None
+
+
+def validate_rubric_post_fit(rubric_id: str, plain_text: str, rubric_title: str, source_url: str = "", evidence_text: str = "") -> Optional[str]:
+    rid = (rubric_id or "").strip().lower()
+    if rid != "age_norms":
+        return None
+
+    title = _first_nonempty_line(plain_text)
+    scan = "\n".join([title or "", plain_text or "", source_url or "", (evidence_text or "")[:2500]])
+
+    negative_marker = _find_negative_marker(scan, AGE_NORMS_NEGATIVE_MARKERS)
+    if negative_marker:
+        return "rubric_topic_mismatch_post_after_regen"
+
+    if _contains_any_marker(scan, AGE_NORMS_RED_FLAG_PHRASES):
+        return "rubric_topic_mismatch_post_after_regen"
+
+    positive_scan = "\n".join([title or "", plain_text or "", rubric_title or ""])
+    if not _contains_any_marker(positive_scan, AGE_NORMS_POSITIVE_MARKERS):
+        return "rubric_topic_mismatch_post_after_regen"
+
+    return None
 
 
 # =========================
@@ -1293,6 +1414,7 @@ async def amain() -> None:
             samples.append(f"• [{sev}] {reason}: {url}")
 
     async def _generate_unique_post(
+        rubric_id: str,
         rubric_title: str,
         rf: str,
         aud: str,
@@ -1345,6 +1467,23 @@ async def amain() -> None:
                 source_url=canon,
                 max_chars=POST_MAX_CHARS,
             )
+
+            rubric_mismatch_reason = validate_rubric_post_fit(
+                rubric_id=rubric_id,
+                plain_text=plain,
+                rubric_title=rubric_title,
+                source_url=canon,
+                evidence_text=evidence,
+            )
+            if rubric_mismatch_reason:
+                duplicate_hint = (
+                    "Материал не соответствует рубрике возрастных норм. "
+                    "Нужны именно возрастные ориентиры и milestones, без патологий, диагнозов, коррекции и симптомов нарушений. "
+                    "Сфокусируй текст на том, что обычно появляется по возрасту и какие ориентиры можно спокойно отслеживать."
+                )
+                if attempt >= MAX_LLM_REGEN_ATTEMPTS:
+                    return None, rubric_mismatch_reason
+                continue
 
             body_hash = sha1(norm_space(plain))
             if body_hash in seen_body_hashes_this_run or store.has_body_hash(body_hash):
@@ -1510,6 +1649,18 @@ async def amain() -> None:
                     print(f"[SKIP][soft] no_evidence_short url={canon}", flush=True)
                     continue
 
+                source_fit_reason = validate_rubric_source_fit(
+                    rubric_id=rubric_id,
+                    candidate_title=cand.get("title", ""),
+                    canonical_url=canon,
+                    evidence_text=evidence,
+                )
+                if source_fit_reason:
+                    if record_rubric_skip(source_fit_reason, canon, severity="soft"):
+                        break
+                    print(f"[SKIP][soft] {source_fit_reason} url={canon}", flush=True)
+                    continue
+
                 evidence_hash = sha1(norm_space(evidence))
                 if evidence_hash in seen_evidence_hashes_this_run:
                     if record_rubric_skip("dup_evidence_same_run", canon, severity="soft"):
@@ -1557,6 +1708,7 @@ async def amain() -> None:
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
                 plain, generation_note = await _generate_unique_post(
+                    rubric_id=rubric_id,
                     rubric_title=rubric_title,
                     rf=rf,
                     aud=aud,

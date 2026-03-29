@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.4.0
+Publisher (cron/GitHub Actions) v4.5.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -30,6 +30,9 @@ Publisher (cron/GitHub Actions) v4.4.0
    - fallback: шаблон дня недели + H1 поста через Pillow
 10) При TARGET_CHANNEL=test публикация идёт в TELEGRAM_DRAFTS_CHAT_ID.
 11) Введены soft_skip / hard_skip и диагностический alert для Posted:0.
+12) Разделены state/test и state/prod для истории публикаций.
+13) Введены отдельные semantic thresholds для source/evidence и post/body.
+14) Добавлен prefilter мусорных documents/* URL для age_norms.
 """
 
 import asyncio
@@ -74,7 +77,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.3.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.5.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -97,8 +100,12 @@ IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
 
 SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.85"))
+SEMANTIC_THRESHOLD_SOURCE = float(os.getenv("SEMANTIC_THRESHOLD_SOURCE", "0.93"))
+SEMANTIC_THRESHOLD_POST = float(os.getenv("SEMANTIC_THRESHOLD_POST", "0.86"))
 MAX_LLM_REGEN_ATTEMPTS = int(os.getenv("MAX_LLM_REGEN_ATTEMPTS", "3"))
 RECENT_ALERT_HOURS = int(os.getenv("RECENT_ALERT_HOURS", "36"))
+STATE_SCOPE = "test" if TARGET_CHANNEL == "test" else "prod"
+PUBLICATION_DB_NAME = "publication_history_test.sqlite3" if STATE_SCOPE == "test" else "publication_history.sqlite3"
 
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
 MAX_CANDIDATES_PER_RUBRIC = int(os.getenv("MAX_CANDIDATES_PER_RUBRIC", "25"))
@@ -211,6 +218,35 @@ def _start_recent_window(now: datetime) -> datetime:
     return now - timedelta(hours=RECENT_ALERT_HOURS)
 
 
+_AGE_NORMS_URL_NOISE_TOKENS = (
+    "anketa",
+    "anam",
+    "karta",
+    "obsl",
+    "obsled",
+    "obslyed",
+    "diagnost",
+    "programma",
+    "otziv",
+    "harakter",
+    "haraktyer",
+    "studenta-vuza",
+    "logidoshkol",
+)
+
+
+def prefilter_candidate_url(rubric_id: str, url: str) -> Optional[str]:
+    rid = (rubric_id or "").strip().lower()
+    if rid != "age_norms":
+        return None
+    low = (url or "").lower()
+    if "logopediya.com/documents/" not in low:
+        return None
+    if any(token in low for token in _AGE_NORMS_URL_NOISE_TOKENS):
+        return "prefilter_noise_document"
+    return None
+
+
 def _resolve_publish_chat_id() -> str:
     if TARGET_CHANNEL == "test":
         return TELEGRAM_DRAFTS_CHAT_ID
@@ -235,6 +271,7 @@ def classify_skip_severity(reason: str) -> str:
         "no_evidence_short",
         "no_candidates",
         "unknown_source_id",
+        "prefilter_noise_document",
     }
     if reason in soft_exact:
         return "soft"
@@ -833,7 +870,7 @@ def render_semantic_alert_message(
 ) -> Tuple[str, str]:
     plain = (
         "⚠️ Semantic dedup alert\n"
-        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
+        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD_SOURCE:.2f}\n"
         f"AUDIENCE={audience} | RUBRIC={rubric_id} | FIELD={match_field}\n\n"
         f"Новый кандидат: {candidate_url}\n"
         f"Похож на: {matched_url}\n"
@@ -854,7 +891,7 @@ def render_semantic_alert_message(
     hit = _html.escape(matched_url, quote=True)
     html_text = (
         "⚠️ <b>Semantic dedup alert</b>\n"
-        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
+        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD_SOURCE:.2f}\n"
         f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | FIELD={_escape(match_field)}\n\n"
         f"Новый кандидат: <a href=\"{cand}\">{_escape(candidate_url)}</a>\n"
         f"Похож на: <a href=\"{hit}\">{_escape(matched_url)}</a>\n"
@@ -951,7 +988,8 @@ def _build_posted_zero_alert_message(
     plain_parts: List[str] = [
         "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
         f"Дата: {str(now.date())} | День: {day} | Неделя: {week_key}",
-        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL} | STATE_SCOPE={STATE_SCOPE}",
+        f"History DB: {PUBLICATION_DB_NAME}",
         f"Rubrics attempted: {', '.join(unique_attempted) if unique_attempted else 'n/a'}",
         f"Soft skips: {total_soft} | Hard skips: {total_hard}",
         "",
@@ -1214,7 +1252,7 @@ async def amain() -> None:
     tzname = channel_cfg.get("timezone", "Asia/Nicosia")
     now = get_local_now(tzname)
     run_started_monotonic = time.monotonic()
-    print(f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL}", flush=True)
+    print(f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={STATE_SCOPE} db={PUBLICATION_DB_NAME}", flush=True)
 
     week_key = iso_week_key(now)
     day = weekday_key(now)
@@ -1224,7 +1262,7 @@ async def amain() -> None:
     hashtags = channel_cfg.get("hashtags", []) or []
 
     sources = load_sources()
-    store = PublicationStore(STATE_DIR / "publication_history.sqlite3")
+    store = PublicationStore(STATE_DIR / PUBLICATION_DB_NAME)
     recent_since_iso = _start_recent_window(now).isoformat()
 
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
@@ -1317,7 +1355,7 @@ async def amain() -> None:
 
             sem_body_hit = store.find_semantic_duplicate(
                 plain,
-                threshold=SEMANTIC_THRESHOLD,
+                threshold=SEMANTIC_THRESHOLD_POST,
                 since_iso=None,
                 limit=500,
                 compare="body",
@@ -1326,7 +1364,7 @@ async def amain() -> None:
                 duplicate_hint = (
                     "Новый текст всё ещё слишком семантически похож на уже опубликованный. "
                     "Смени структуру, начальный ракурс, примеры и полезный следующий шаг. "
-                    f"Ориентир similarity<{SEMANTIC_THRESHOLD:.2f}."
+                    f"Ориентир similarity<{SEMANTIC_THRESHOLD_POST:.2f}."
                 )
                 if attempt >= MAX_LLM_REGEN_ATTEMPTS:
                     return None, "dup_semantic_post_after_regen"
@@ -1438,6 +1476,13 @@ async def amain() -> None:
                     print(f"[SKIP][soft] skip_non_html_asset canon={canon}", flush=True)
                     continue
 
+                prefilter_reason = prefilter_candidate_url(rubric_id, canon)
+                if prefilter_reason:
+                    if record_rubric_skip(prefilter_reason, canon, severity="soft"):
+                        break
+                    print(f"[SKIP][soft] {prefilter_reason} url={canon}", flush=True)
+                    continue
+
                 if canon in seen_urls_this_run:
                     if record_rubric_skip("dup_url_same_run", canon, severity="soft"):
                         break
@@ -1480,7 +1525,7 @@ async def amain() -> None:
 
                 sem_source_hit = store.find_semantic_duplicate(
                     evidence,
-                    threshold=SEMANTIC_THRESHOLD,
+                    threshold=SEMANTIC_THRESHOLD_SOURCE,
                     since_iso=None,
                     limit=500,
                     compare="evidence",
@@ -1495,7 +1540,7 @@ async def amain() -> None:
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                         recent_hit = store.find_semantic_duplicate(
                             evidence,
-                            threshold=SEMANTIC_THRESHOLD,
+                            threshold=SEMANTIC_THRESHOLD_SOURCE,
                             since_iso=recent_since_iso,
                             limit=120,
                             compare="evidence",

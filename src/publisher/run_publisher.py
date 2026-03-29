@@ -840,8 +840,9 @@ def render_semantic_alert_summary_message(
             "",
         ]
         for item in top:
+            score_text = f"{float(item.get('score', 0.0)):.3f}"
             rendered_parts.append(
-                f"• [candidate]({escape_markdown_v2_url(item.get('candidate_url', ''))}) → [matched]({escape_markdown_v2_url(item.get('matched_url', ''))}) \\| FIELD={escape_markdown_v2(item.get('match_field', ''))} \\| Cosine={escape_markdown_v2(f"{float(item.get('score', 0.0)):.3f}")}"
+                f"• [candidate]({escape_markdown_v2_url(item.get('candidate_url', ''))}) → [matched]({escape_markdown_v2_url(item.get('matched_url', ''))}) \\| FIELD={escape_markdown_v2(item.get('match_field', ''))} \\| Cosine={escape_markdown_v2(score_text)}"
             )
         if total > len(top):
             rendered_parts.append("")
@@ -856,8 +857,9 @@ def render_semantic_alert_summary_message(
     for item in top:
         cand = _html.escape(item.get("candidate_url", ""), quote=True)
         hit = _html.escape(item.get("matched_url", ""), quote=True)
+        score_text = f"{float(item.get('score', 0.0)):.3f}"
         html_parts.append(
-            f'• <a href="{cand}">candidate</a> → <a href="{hit}">matched</a> | FIELD={_escape(item.get("match_field", ""))} | Cosine={_escape(f"{float(item.get("score", 0.0)):.3f}")}'
+            f'• <a href="{cand}">candidate</a> → <a href="{hit}">matched</a> | FIELD={_escape(item.get("match_field", ""))} | Cosine={_escape(score_text)}'
         )
     if total > len(top):
         html_parts.append("")

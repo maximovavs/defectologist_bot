@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.3.0
+Publisher (cron/GitHub Actions) v4.4.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -29,6 +29,7 @@ Publisher (cron/GitHub Actions) v4.3.0
    - основной режим: Pollinations AI
    - fallback: шаблон дня недели + H1 поста через Pillow
 10) При TARGET_CHANNEL=test публикация идёт в TELEGRAM_DRAFTS_CHAT_ID.
+11) Введены soft_skip / hard_skip и диагностический alert для Posted:0.
 """
 
 import asyncio
@@ -214,6 +215,59 @@ def _resolve_publish_chat_id() -> str:
     if TARGET_CHANNEL == "test":
         return TELEGRAM_DRAFTS_CHAT_ID
     return TELEGRAM_CHAT_ID
+
+
+def classify_skip_severity(reason: str) -> str:
+    reason = (reason or "").strip().lower()
+    if not reason:
+        return "soft"
+
+    soft_exact = {
+        "bad_candidate_url",
+        "skip_non_html_asset",
+        "dup_url_same_run",
+        "dup_url_db",
+        "dup_evidence_same_run",
+        "dup_evidence_hash_db",
+        "dup_semantic_source",
+        "dup_body_hash_after_regen",
+        "dup_semantic_post_after_regen",
+        "no_evidence_short",
+        "no_candidates",
+        "unknown_source_id",
+    }
+    if reason in soft_exact:
+        return "soft"
+
+    soft_prefixes = ("dup_", "no_evidence_")
+    if reason.startswith(soft_prefixes):
+        return "soft"
+
+    hard_exact = {
+        "source_fetch_failed",
+        "evidence_fetch_failed",
+        "llm_timeout",
+        "llm_regen_exhausted",
+        "max_run_seconds",
+    }
+    if reason in hard_exact:
+        return "hard"
+
+    hard_prefixes = (
+        "invalid_",
+        "llm_failed",
+        "gemini_failed",
+        "groq_failed",
+        "image_prompt_failed",
+        "image_prompt_timeout",
+        "telegram_api_error",
+        "banned_phrase:",
+        "template_leak",
+    )
+    if reason.startswith(hard_prefixes):
+        return "hard"
+
+    return "hard"
 
 
 def _build_posted_zero_alert_html(
@@ -824,47 +878,47 @@ def render_semantic_alert_summary_message(
         f"AUDIENCE={audience} | RUBRIC={rubric_id} | skipped={total}",
         "",
     ]
-    for item in top:
-        plain_parts.append(
-            f"• {item.get('candidate_url', '')} -> {item.get('matched_url', '')} | FIELD={item.get('match_field', '')} | Cosine={float(item.get('score', 0.0)):.3f}"
-        )
-    if total > len(top):
+    for idx, item in enumerate(top, start=1):
+        score_text = f"{float(item.get('score', 0.0)):.3f}"
+        plain_parts.append(f"{idx}) candidate: {item.get('candidate_url', '')}")
+        plain_parts.append(f"   matched:   {item.get('matched_url', '')}")
+        plain_parts.append(f"   field: {item.get('match_field', '')} | cosine: {score_text}")
         plain_parts.append("")
+    if total > len(top):
         plain_parts.append(f"И ещё: {total - len(top)}")
-    plain = "\n".join(plain_parts)
+    plain = "\n".join(plain_parts).rstrip()
 
     if TELEGRAM_PARSE_MODE.lower() == "markdownv2":
         rendered_parts: List[str] = [
             f"⚠️ *Semantic dedup summary — {escape_markdown_v2(rubric_id)}*",
-            f"AUDIENCE={escape_markdown_v2(audience)} \\| RUBRIC={escape_markdown_v2(rubric_id)} \\| skipped={escape_markdown_v2(str(total))}",
+            f"AUDIENCE={escape_markdown_v2(audience)} \| RUBRIC={escape_markdown_v2(rubric_id)} \| skipped={escape_markdown_v2(str(total))}",
             "",
         ]
-        for item in top:
+        for idx, item in enumerate(top, start=1):
             score_text = f"{float(item.get('score', 0.0)):.3f}"
-            rendered_parts.append(
-                f"• [candidate]({escape_markdown_v2_url(item.get('candidate_url', ''))}) → [matched]({escape_markdown_v2_url(item.get('matched_url', ''))}) \\| FIELD={escape_markdown_v2(item.get('match_field', ''))} \\| Cosine={escape_markdown_v2(score_text)}"
-            )
-        if total > len(top):
+            rendered_parts.append(f"{escape_markdown_v2(str(idx))}\) candidate: {escape_markdown_v2(item.get('candidate_url', ''))}")
+            rendered_parts.append(f"   matched:   {escape_markdown_v2(item.get('matched_url', ''))}")
+            rendered_parts.append(f"   field: {escape_markdown_v2(item.get('match_field', ''))} \| cosine: {escape_markdown_v2(score_text)}")
             rendered_parts.append("")
+        if total > len(top):
             rendered_parts.append(f"И ещё: {escape_markdown_v2(str(total - len(top)))}")
-        return "\n".join(rendered_parts), plain
+        return "\n".join(rendered_parts).rstrip(), plain
 
     html_parts: List[str] = [
         f"⚠️ <b>Semantic dedup summary — {_escape(rubric_id)}</b>",
         f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | skipped={_escape(str(total))}",
         "",
     ]
-    for item in top:
-        cand = _html.escape(item.get("candidate_url", ""), quote=True)
-        hit = _html.escape(item.get("matched_url", ""), quote=True)
+    for idx, item in enumerate(top, start=1):
         score_text = f"{float(item.get('score', 0.0)):.3f}"
-        html_parts.append(
-            f'• <a href="{cand}">candidate</a> → <a href="{hit}">matched</a> | FIELD={_escape(item.get("match_field", ""))} | Cosine={_escape(score_text)}'
-        )
-    if total > len(top):
+        html_parts.append(f"<b>{_escape(str(idx))})</b> candidate: {_escape(item.get('candidate_url', ''))}")
+        html_parts.append(f"&nbsp;&nbsp;&nbsp;matched: {_escape(item.get('matched_url', ''))}")
+        html_parts.append(f"&nbsp;&nbsp;&nbsp;field: {_escape(item.get('match_field', ''))} | cosine: {_escape(score_text)}")
         html_parts.append("")
+    if total > len(top):
         html_parts.append(f"И ещё: {_escape(str(total - len(top)))}")
-    return "\n".join(html_parts), plain
+    return "\n".join(html_parts).rstrip(), plain
+
 
 def _build_posted_zero_alert_message(
     now: datetime,
@@ -874,52 +928,118 @@ def _build_posted_zero_alert_message(
     provider: str,
     skip_reasons: Dict[str, int],
     samples: List[str],
+    soft_skip_reasons: Dict[str, int],
+    hard_skip_reasons: Dict[str, int],
+    stop_events: List[str],
+    attempted_rubrics: List[str],
 ) -> Tuple[str, str]:
-    top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:12]
+    soft_top = sorted(soft_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:8]
+    hard_top = sorted(hard_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:8]
+    total_soft = sum(soft_skip_reasons.values())
+    total_hard = sum(hard_skip_reasons.values())
+
+    unique_attempted: List[str] = []
+    for item in attempted_rubrics:
+        if item not in unique_attempted:
+            unique_attempted.append(item)
+
+    unique_stops: List[str] = []
+    for item in stop_events:
+        if item not in unique_stops:
+            unique_stops.append(item)
+
     plain_parts: List[str] = [
-        "⚠️ Publisher: не удалось опубликовать пост (Posted: 0)",
+        "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
         f"Дата: {str(now.date())} | День: {day} | Неделя: {week_key}",
         f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        f"Rubrics attempted: {', '.join(unique_attempted) if unique_attempted else 'n/a'}",
+        f"Soft skips: {total_soft} | Hard skips: {total_hard}",
         "",
-        "Причины пропуска (топ):",
+        "Диагноз:",
     ]
-    for reason, count in top:
-        plain_parts.append(f"• {reason}: {count}")
+    if unique_stops:
+        for item in unique_stops[:6]:
+            plain_parts.append(f"• {item}")
+    else:
+        plain_parts.append("• publishable candidates were not found before run completion")
+
+    if hard_top:
+        plain_parts.append("")
+        plain_parts.append("Hard skip reasons:")
+        for reason, count in hard_top:
+            plain_parts.append(f"• {reason}: {count}")
+
+    if soft_top:
+        plain_parts.append("")
+        plain_parts.append("Soft skip reasons:")
+        for reason, count in soft_top:
+            plain_parts.append(f"• {reason}: {count}")
+
     if samples:
         plain_parts.append("")
-        plain_parts.append("Примеры:")
+        plain_parts.append("Examples:")
         plain_parts.extend(samples[:8])
     plain = "\n".join(plain_parts)
 
     if TELEGRAM_PARSE_MODE.lower() == "markdownv2":
         rendered_parts: List[str] = [
-            "⚠️ *Publisher: не удалось опубликовать пост \\(Posted: 0\\)*",
-            f"Дата: {escape_markdown_v2(str(now.date()))} \\| День: {escape_markdown_v2(day)} \\| Неделя: {escape_markdown_v2(week_key)}",
-            f"AUDIENCE={escape_markdown_v2(audience)} \\| PROVIDER={escape_markdown_v2(provider)} \\| TARGET_CHANNEL={escape_markdown_v2(TARGET_CHANNEL)}",
+            "⚠️ *Publisher diagnostic: пост не опубликован \(Posted: 0\)*",
+            f"Дата: {escape_markdown_v2(str(now.date()))} \| День: {escape_markdown_v2(day)} \| Неделя: {escape_markdown_v2(week_key)}",
+            f"AUDIENCE={escape_markdown_v2(audience)} \| PROVIDER={escape_markdown_v2(provider)} \| TARGET\_CHANNEL={escape_markdown_v2(TARGET_CHANNEL)}",
+            f"Rubrics attempted: {escape_markdown_v2(', '.join(unique_attempted) if unique_attempted else 'n/a')}",
+            f"Soft skips: {escape_markdown_v2(str(total_soft))} \| Hard skips: {escape_markdown_v2(str(total_hard))}",
             "",
-            "*Причины пропуска \\(топ\\):*",
+            "*Диагноз:*",
         ]
-        for reason, count in top:
-            rendered_parts.append(f"• {escape_markdown_v2(reason)}: {escape_markdown_v2(str(count))}")
+        if unique_stops:
+            for item in unique_stops[:6]:
+                rendered_parts.append(f"• {escape_markdown_v2(item)}")
+        else:
+            rendered_parts.append("• publishable candidates were not found before run completion")
+        if hard_top:
+            rendered_parts.append("")
+            rendered_parts.append("*Hard skip reasons:*")
+            for reason, count in hard_top:
+                rendered_parts.append(f"• {escape_markdown_v2(reason)}: {escape_markdown_v2(str(count))}")
+        if soft_top:
+            rendered_parts.append("")
+            rendered_parts.append("*Soft skip reasons:*")
+            for reason, count in soft_top:
+                rendered_parts.append(f"• {escape_markdown_v2(reason)}: {escape_markdown_v2(str(count))}")
         if samples:
             rendered_parts.append("")
-            rendered_parts.append("*Примеры:*")
+            rendered_parts.append("*Examples:*")
             for sample in samples[:8]:
                 rendered_parts.append(escape_markdown_v2(sample))
         return "\n".join(rendered_parts), plain
 
     html_parts: List[str] = [
-        "⚠️ <b>Publisher: не удалось опубликовать пост (Posted: 0)</b>",
+        "⚠️ <b>Publisher diagnostic: пост не опубликован (Posted: 0)</b>",
         f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
         f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
+        f"Rubrics attempted: {_escape(', '.join(unique_attempted) if unique_attempted else 'n/a')}",
+        f"Soft skips: {_escape(str(total_soft))} | Hard skips: {_escape(str(total_hard))}",
         "",
-        "<b>Причины пропуска (топ):</b>",
+        "<b>Диагноз:</b>",
     ]
-    for reason, count in top:
-        html_parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+    if unique_stops:
+        for item in unique_stops[:6]:
+            html_parts.append(f"• {_escape(item)}")
+    else:
+        html_parts.append("• publishable candidates were not found before run completion")
+    if hard_top:
+        html_parts.append("")
+        html_parts.append("<b>Hard skip reasons:</b>")
+        for reason, count in hard_top:
+            html_parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+    if soft_top:
+        html_parts.append("")
+        html_parts.append("<b>Soft skip reasons:</b>")
+        for reason, count in soft_top:
+            html_parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
     if samples:
         html_parts.append("")
-        html_parts.append("<b>Примеры:</b>")
+        html_parts.append("<b>Examples:</b>")
         for sample in samples[:8]:
             html_parts.append(_escape(sample))
     return "\n".join(html_parts), plain
@@ -1117,15 +1237,22 @@ async def amain() -> None:
 
     posted = 0
     skip_reasons: Dict[str, int] = {}
+    soft_skip_reasons: Dict[str, int] = {}
+    hard_skip_reasons: Dict[str, int] = {}
     samples: List[str] = []
+    stop_events: List[str] = []
+    attempted_rubrics: List[str] = []
     seen_urls_this_run: set[str] = set()
     seen_body_hashes_this_run: set[str] = set()
     seen_evidence_hashes_this_run: set[str] = set()
 
-    def note(reason: str, url: str) -> None:
+    def note(reason: str, url: str, severity: Optional[str] = None) -> None:
+        sev = severity or classify_skip_severity(reason)
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+        bucket = hard_skip_reasons if sev == "hard" else soft_skip_reasons
+        bucket[reason] = bucket.get(reason, 0) + 1
         if len(samples) < 8:
-            samples.append(f"• {reason}: {url}")
+            samples.append(f"• [{sev}] {reason}: {url}")
 
     async def _generate_unique_post(
         rubric_title: str,
@@ -1229,22 +1356,45 @@ async def amain() -> None:
 
             rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
-            rubric_skips = 0
+            attempted_rubrics.append(rubric_id)
+            rubric_hard_skips = 0
+            rubric_soft_skips = 0
+            rubric_stop_reason = ""
+            rubric_posted = False
             semantic_alerts_for_rubric: List[Dict[str, Any]] = []
+
+            def record_rubric_skip(reason: str, url: str, severity: Optional[str] = None) -> bool:
+                nonlocal rubric_hard_skips, rubric_soft_skips, rubric_stop_reason
+                sev = severity or classify_skip_severity(reason)
+                note(reason, url, severity=sev)
+                if sev == "hard":
+                    rubric_hard_skips += 1
+                    if rubric_hard_skips >= MAX_SKIPS_PER_RUBRIC:
+                        rubric_stop_reason = f"hard_skip_budget_exceeded:{rubric_id}"
+                        stop_events.append(rubric_stop_reason)
+                        print(
+                            f"[STOP] hard_skip_budget_exceeded rubric={rubric_id} hard_skips={rubric_hard_skips} soft_skips={rubric_soft_skips}",
+                            flush=True,
+                        )
+                        return True
+                else:
+                    rubric_soft_skips += 1
+                return False
 
             all_items: List[Dict[str, str]] = []
             for sid in rubric.get("sources", []) or []:
                 src = sources.get(sid)
                 if not src:
-                    note("unknown_source_id", sid)
+                    note("unknown_source_id", sid, severity="soft")
                     continue
                 try:
                     all_items.extend(fetch_source(src))
                 except Exception as e:
-                    note("source_fetch_failed", f"{sid}: {e}")
+                    note("source_fetch_failed", f"{sid}: {e}", severity="hard")
 
             if not all_items:
-                note("no_candidates", rubric_id)
+                note("no_candidates", rubric_id, severity="soft")
+                stop_events.append(f"no_candidates:{rubric_id}")
                 continue
 
             seed = int(hashlib.sha1(f"{now.date()}|{rubric_id}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
@@ -1261,104 +1411,71 @@ async def amain() -> None:
 
                 elapsed = time.monotonic() - run_started_monotonic
                 if elapsed > MAX_RUN_SECONDS:
-                    note("max_run_seconds", rubric_id)
+                    note("max_run_seconds", rubric_id, severity="hard")
+                    rubric_stop_reason = f"max_run_seconds:{rubric_id}"
+                    stop_events.append(rubric_stop_reason)
                     print(f"[STOP] max_run_seconds reached: {elapsed:.1f}s", flush=True)
                     break
 
                 print(f"[CANDIDATE] rubric={rubric_id} audience={aud} url={url}", flush=True)
 
                 if not url.startswith(("http://", "https://")):
-                    note("bad_candidate_url", url or "(empty)")
-                    rubric_skips += 1
-                    print(f"[SKIP] bad_candidate_url url={url}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("bad_candidate_url", url or "(empty)", severity="soft"):
                         break
+                    print(f"[SKIP][soft] bad_candidate_url url={url}", flush=True)
                     continue
 
                 if _SKIP_EXT_RE.search(url):
-                    note("skip_non_html_asset", url)
-                    rubric_skips += 1
-                    print(f"[SKIP] skip_non_html_asset url={url}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("skip_non_html_asset", url, severity="soft"):
                         break
+                    print(f"[SKIP][soft] skip_non_html_asset url={url}", flush=True)
                     continue
 
                 canon = get_canonical(url)
                 if _SKIP_EXT_RE.search(canon):
-                    note("skip_non_html_asset", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] skip_non_html_asset canon={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("skip_non_html_asset", canon, severity="soft"):
                         break
+                    print(f"[SKIP][soft] skip_non_html_asset canon={canon}", flush=True)
                     continue
 
                 if canon in seen_urls_this_run:
-                    note("dup_url_same_run", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_url_same_run url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("dup_url_same_run", canon, severity="soft"):
                         break
+                    print(f"[SKIP][soft] dup_url_same_run url={canon}", flush=True)
                     continue
 
                 if store.has_url(canon):
-                    note("dup_url_db", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_url_db url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("dup_url_db", canon, severity="soft"):
                         break
+                    print(f"[SKIP][soft] dup_url_db url={canon}", flush=True)
                     continue
 
                 try:
                     evidence = extract_evidence_text(canon, max_chars=3600)
                 except Exception as e:
-                    note("evidence_fetch_failed", f"{canon} ({e})")
-                    rubric_skips += 1
-                    print(f"[SKIP] evidence_fetch_failed url={canon} err={e}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    should_stop = record_rubric_skip("evidence_fetch_failed", f"{canon} ({e})", severity="hard")
+                    print(f"[SKIP][hard] evidence_fetch_failed url={canon} err={e}", flush=True)
+                    if should_stop:
                         break
                     continue
 
                 if len((evidence or "").strip()) < 260:
-                    note("no_evidence_short", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] no_evidence_short url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("no_evidence_short", canon, severity="soft"):
                         break
+                    print(f"[SKIP][soft] no_evidence_short url={canon}", flush=True)
                     continue
 
                 evidence_hash = sha1(norm_space(evidence))
                 if evidence_hash in seen_evidence_hashes_this_run:
-                    note("dup_evidence_same_run", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_evidence_same_run url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("dup_evidence_same_run", canon, severity="soft"):
                         break
+                    print(f"[SKIP][soft] dup_evidence_same_run url={canon}", flush=True)
                     continue
 
                 if store.has_evidence_hash(evidence_hash):
-                    note("dup_evidence_hash_db", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_evidence_hash_db url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    if record_rubric_skip("dup_evidence_hash_db", canon, severity="soft"):
                         break
+                    print(f"[SKIP][soft] dup_evidence_hash_db url={canon}", flush=True)
                     continue
 
                 sem_source_hit = store.find_semantic_duplicate(
@@ -1369,10 +1486,10 @@ async def amain() -> None:
                     compare="evidence",
                 )
                 if sem_source_hit:
-                    note("dup_semantic_source", canon)
-                    rubric_skips += 1
+                    if record_rubric_skip("dup_semantic_source", canon, severity="soft"):
+                        break
                     print(
-                        f"[SKIP] dup_semantic_source url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
+                        f"[SKIP][soft] dup_semantic_source url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
                         flush=True,
                     )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
@@ -1390,10 +1507,6 @@ async def amain() -> None:
                                 "score": recent_hit.similarity,
                                 "match_field": recent_hit.match_field,
                             })
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
                     continue
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
@@ -1409,12 +1522,10 @@ async def amain() -> None:
                     day=day,
                 )
                 if not plain:
-                    note(generation_note, canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] {generation_note} url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                    severity = classify_skip_severity(generation_note)
+                    should_stop = record_rubric_skip(generation_note, canon, severity=severity)
+                    print(f"[SKIP][{severity}] {generation_note} url={canon}", flush=True)
+                    if should_stop:
                         break
                     continue
 
@@ -1497,9 +1608,14 @@ async def amain() -> None:
                 seen_evidence_hashes_this_run.add(evidence_hash)
 
                 posted += 1
+                rubric_posted = True
                 print(f"[POSTED] rubric={rubric_id} audience={aud} url={canon}", flush=True)
                 await asyncio.sleep(1.0)
                 break
+
+            if not rubric_posted and not rubric_stop_reason:
+                rubric_stop_reason = f"candidates_exhausted:{rubric_id}"
+                stop_events.append(rubric_stop_reason)
 
             if semantic_alerts_for_rubric and not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                 try:
@@ -1535,6 +1651,10 @@ async def amain() -> None:
                         provider=PROVIDER,
                         skip_reasons=skip_reasons,
                         samples=samples,
+                        soft_skip_reasons=soft_skip_reasons,
+                        hard_skip_reasons=hard_skip_reasons,
+                        stop_events=stop_events,
+                        attempted_rubrics=attempted_rubrics,
                     ),
                 )
             except Exception as e:

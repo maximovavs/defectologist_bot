@@ -98,6 +98,39 @@ TITLE_TEMPLATE_LEAKS = [
 ]
 
 
+
+
+_FIRST_LINE_STRUCTURAL_PATTERNS = [
+    re.compile(r"^👶\s*Возраст\s*:", re.IGNORECASE),
+    re.compile(r"^👩‍⚕️\s*Аудитория\s*:", re.IGNORECASE),
+    re.compile(r"^🎲\s*Как играть", re.IGNORECASE),
+    re.compile(r"^🧩\s*Что попробовать сегодня", re.IGNORECASE),
+    re.compile(r"^🌍\s*Что помогает в двуязычной семье", re.IGNORECASE),
+    re.compile(r"^🏠\s*Что можно попробовать дома", re.IGNORECASE),
+    re.compile(r"^💡\s*Что это дает\s*:", re.IGNORECASE),
+    re.compile(r"^🔴\s*Миф\s*:", re.IGNORECASE),
+    re.compile(r"^❓\s*Вопрос недели\s*:", re.IGNORECASE),
+    re.compile(r"^Ориентиры\s*:", re.IGNORECASE),
+    re.compile(r"^Источник\s*:", re.IGNORECASE),
+    re.compile(r"^🔗\s+", re.IGNORECASE),
+]
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        st = norm_space(line)
+        if st:
+            return st
+    return ""
+
+
+def _looks_like_structural_first_line(text: str) -> bool:
+    st = _first_nonempty_line(text)
+    if not st:
+        return True
+    if st.startswith('#'):
+        return True
+    return any(pat.match(st) for pat in _FIRST_LINE_STRUCTURAL_PATTERNS)
 def _normalize_scan_text(text: str) -> str:
     return norm_space(text).replace("ё", "е").lower()
 
@@ -126,6 +159,8 @@ def _validate_output(text: str) -> Tuple[bool, str]:
         return False, "empty"
     if len(out) < 260:
         return False, "too_short"
+    if _looks_like_structural_first_line(out):
+        return False, "missing_h1"
 
     banned = _contains_banned(out)
     if banned:
@@ -300,6 +335,8 @@ def _common_rules(max_chars: int) -> str:
         "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
         "Используй формат вроде: #билингвизм #запуск_речи\n"
         "Никогда не пиши больше двух тематических хештегов.\n"
+        "Первая непустая строка поста должна быть обычным коротким заголовком без эмодзи-меток структуры.\n"
+        "Первая строка не может начинаться с: 👶, 👩‍⚕️, 🎲, 🧩, 🌍, 🏠, 💡, 🔴, ❓, Ориентиры:, Источник:, 🔗.\n"
     )
 
 
@@ -708,7 +745,8 @@ async def generate_post_plain_from_evidence_async(
                 + "Сделай текст живее, плотнее и конкретнее. "
                 + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
                 + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
-                + "Сразу иди к сути и не делай текст слишком коротким."
+                + "Сразу иди к сути и не делай текст слишком коротким. "
+                + "Обязательно начни пост с обычного заголовка первой строкой, а не со строки Возраст/Миф/Вопрос/Источник."
             )
             out2 = postprocess(await groq_chat(repair_prompt, groq_key, temperature=min(1.0, temperature + 0.15)))
             ok2, reason2 = validate(out2)

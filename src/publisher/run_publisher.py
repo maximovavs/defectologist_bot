@@ -33,6 +33,7 @@ Publisher (cron/GitHub Actions) v4.3.0
 
 import asyncio
 from io import BytesIO
+import json
 import hashlib
 import html as _html
 import os
@@ -43,10 +44,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import feedparser
+from aiogram.types import InlineKeyboardMarkup
 import requests
 import urllib3
 import yaml
@@ -59,6 +61,7 @@ from src.services.llm_generator import (
 )
 from src.services.publication_store import PublicationStore
 from src.services.visual_pipeline import build_post_visual
+from src.services.telegram_miniapp import build_mini_app_markup
 
 
 # =========================
@@ -90,8 +93,10 @@ AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
+MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
 
-SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.95"))
+SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.85"))
+MAX_LLM_REGEN_ATTEMPTS = int(os.getenv("MAX_LLM_REGEN_ATTEMPTS", "3"))
 RECENT_ALERT_HOURS = int(os.getenv("RECENT_ALERT_HOURS", "36"))
 
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
@@ -667,8 +672,23 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
 
 
 # =========================
-# Plain -> Telegram HTML rendering
+# Telegram markup helpers
 # =========================
+
+_MD_V2_RE = re.compile(r"([_\*\[\]\(\)~`>#+\-=|{}.!\\])")
+
+
+def escape_markdown_v2(text: str) -> str:
+    s = (text or "")
+    s = s.replace("\\", "\\\\")
+    return _MD_V2_RE.sub(r"\\\1", s)
+
+
+def escape_markdown_v2_url(url: str) -> str:
+    s = (url or "").replace("\\", "\\\\")
+    s = s.replace("(", "\\(")
+    return s.replace(")", "\\)")
+
 
 def render_plain_to_telegram_html(plain_text: str) -> str:
     lines = (plain_text or "").splitlines()
@@ -701,13 +721,145 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
                 out.append(_escape(st))
             continue
 
-        if st.startswith("ℹ️ "):
-            out.append(f"<i>{_escape(st)}</i>")
-            continue
-
         out.append(_escape(s))
 
     return "\n".join(out).strip()
+
+
+def render_plain_to_telegram_markdown_v2(plain_text: str) -> str:
+    lines = (plain_text or "").splitlines()
+    if not lines:
+        return ""
+
+    out: List[str] = []
+    for idx, raw in enumerate(lines):
+        s = raw.rstrip("\n")
+        st = s.strip()
+
+        if idx == 0 and st:
+            out.append(f"*{escape_markdown_v2(st)}*")
+            continue
+
+        if _is_structural_heading(st):
+            out.append(f"*{escape_markdown_v2(st)}*")
+            continue
+
+        if st.startswith("🔗 "):
+            url = st[2:].strip()
+            if url.startswith(("http://", "https://")):
+                out.append(f"🔗 [Читать оригинальный материал]({escape_markdown_v2_url(url)})")
+            else:
+                out.append(escape_markdown_v2(st))
+            continue
+
+        out.append(escape_markdown_v2(s))
+
+    return "\n".join(out).strip()
+
+
+def render_post_for_telegram(plain_text: str) -> str:
+    if TELEGRAM_PARSE_MODE.lower() == "markdownv2":
+        return render_plain_to_telegram_markdown_v2(plain_text)
+    return render_plain_to_telegram_html(plain_text)
+
+
+def render_semantic_alert_message(
+    candidate_url: str,
+    matched_url: str,
+    score: float,
+    audience: str,
+    rubric_id: str,
+    match_field: str,
+) -> Tuple[str, str]:
+    plain = (
+        "⚠️ Semantic dedup alert\n"
+        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
+        f"AUDIENCE={audience} | RUBRIC={rubric_id} | FIELD={match_field}\n\n"
+        f"Новый кандидат: {candidate_url}\n"
+        f"Похож на: {matched_url}\n"
+        f"Cosine: {score:.3f}"
+    )
+    if TELEGRAM_PARSE_MODE.lower() == "markdownv2":
+        rendered = (
+            "⚠️ *Semantic dedup alert*\n"
+            f"Материал отклонён: cosine similarity ≥ {escape_markdown_v2(f'{SEMANTIC_THRESHOLD:.2f}')}\n"
+            f"AUDIENCE={escape_markdown_v2(audience)} \\| RUBRIC={escape_markdown_v2(rubric_id)} \\| FIELD={escape_markdown_v2(match_field)}\n\n"
+            f"Новый кандидат: [ссылка]({escape_markdown_v2_url(candidate_url)})\n"
+            f"Похож на: [ссылка]({escape_markdown_v2_url(matched_url)})\n"
+            f"Cosine: *{escape_markdown_v2(f'{score:.3f}')}*"
+        )
+        return rendered, plain
+
+    cand = _html.escape(candidate_url, quote=True)
+    hit = _html.escape(matched_url, quote=True)
+    html_text = (
+        "⚠️ <b>Semantic dedup alert</b>\n"
+        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
+        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | FIELD={_escape(match_field)}\n\n"
+        f"Новый кандидат: <a href=\"{cand}\">{_escape(candidate_url)}</a>\n"
+        f"Похож на: <a href=\"{hit}\">{_escape(matched_url)}</a>\n"
+        f"Cosine: <b>{score:.3f}</b>"
+    )
+    return html_text, plain
+
+
+def _build_posted_zero_alert_message(
+    now: datetime,
+    day: str,
+    week_key: str,
+    audience: str,
+    provider: str,
+    skip_reasons: Dict[str, int],
+    samples: List[str],
+) -> Tuple[str, str]:
+    top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:12]
+    plain_parts: List[str] = [
+        "⚠️ Publisher: не удалось опубликовать пост (Posted: 0)",
+        f"Дата: {str(now.date())} | День: {day} | Неделя: {week_key}",
+        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        "",
+        "Причины пропуска (топ):",
+    ]
+    for reason, count in top:
+        plain_parts.append(f"• {reason}: {count}")
+    if samples:
+        plain_parts.append("")
+        plain_parts.append("Примеры:")
+        plain_parts.extend(samples[:8])
+    plain = "\n".join(plain_parts)
+
+    if TELEGRAM_PARSE_MODE.lower() == "markdownv2":
+        rendered_parts: List[str] = [
+            "⚠️ *Publisher: не удалось опубликовать пост \\(Posted: 0\\)*",
+            f"Дата: {escape_markdown_v2(str(now.date()))} \\| День: {escape_markdown_v2(day)} \\| Неделя: {escape_markdown_v2(week_key)}",
+            f"AUDIENCE={escape_markdown_v2(audience)} \\| PROVIDER={escape_markdown_v2(provider)} \\| TARGET_CHANNEL={escape_markdown_v2(TARGET_CHANNEL)}",
+            "",
+            "*Причины пропуска \\(топ\\):*",
+        ]
+        for reason, count in top:
+            rendered_parts.append(f"• {escape_markdown_v2(reason)}: {escape_markdown_v2(str(count))}")
+        if samples:
+            rendered_parts.append("")
+            rendered_parts.append("*Примеры:*")
+            for sample in samples[:8]:
+                rendered_parts.append(escape_markdown_v2(sample))
+        return "\n".join(rendered_parts), plain
+
+    html_parts: List[str] = [
+        "⚠️ <b>Publisher: не удалось опубликовать пост (Posted: 0)</b>",
+        f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
+        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
+        "",
+        "<b>Причины пропуска (топ):</b>",
+    ]
+    for reason, count in top:
+        html_parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+    if samples:
+        html_parts.append("")
+        html_parts.append("<b>Примеры:</b>")
+        for sample in samples[:8]:
+            html_parts.append(_escape(sample))
+    return "\n".join(html_parts), plain
 
 
 # =========================
@@ -739,15 +891,28 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
     return payload or {}
 
 
-def send_message(chat_id: str, html_text: str) -> None:
+def _markup_json(reply_markup: Optional[InlineKeyboardMarkup]) -> str:
+    if not reply_markup:
+        return ""
+    return reply_markup.model_dump_json(exclude_none=True)
+
+
+def send_message(
+    chat_id: str,
+    rendered_text: str,
+    fallback_text: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
     if not chat_id:
         raise RuntimeError("chat_id is missing")
 
     base_data: Dict[str, Any] = {
         "chat_id": chat_id,
-        "text": html_text,
+        "text": rendered_text,
         "disable_web_page_preview": "true",
     }
+    if reply_markup:
+        base_data["reply_markup"] = _markup_json(reply_markup)
 
     if TELEGRAM_PARSE_MODE:
         try:
@@ -759,12 +924,13 @@ def send_message(chat_id: str, html_text: str) -> None:
             if not _is_probably_parse_mode_error(e):
                 raise
 
-    fallback_text = _strip_html_tags_for_telegram(html_text)
     fallback_data: Dict[str, Any] = {
         "chat_id": chat_id,
-        "text": fallback_text,
+        "text": fallback_text or _strip_html_tags_for_telegram(rendered_text),
         "disable_web_page_preview": "true",
     }
+    if reply_markup:
+        fallback_data["reply_markup"] = _markup_json(reply_markup)
     tg_request("sendMessage", data=fallback_data)
 
 
@@ -774,22 +940,46 @@ def _photo_file_tuple(photo_buffer: BytesIO) -> tuple[str, bytes, str]:
     return (filename, photo_buffer.getvalue(), mime_type)
 
 
-def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, html_full_post: str) -> None:
+def send_post_with_visual(
+    chat_id: str,
+    photo_buffer: BytesIO,
+    plain_post: str,
+    rendered_post: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
     plain_bytes = len((plain_post or "").encode("utf-8"))
     file_tuple = _photo_file_tuple(photo_buffer)
 
     if plain_bytes <= TG_CAPTION_MAX_BYTES:
         try:
-            data: Dict[str, Any] = {"chat_id": chat_id, "caption": html_full_post}
+            data: Dict[str, Any] = {"chat_id": chat_id, "caption": rendered_post}
             if TELEGRAM_PARSE_MODE:
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
+            if reply_markup:
+                data["reply_markup"] = _markup_json(reply_markup)
             tg_request("sendPhoto", data=data, files={"photo": file_tuple})
             return
         except Exception:
             pass
 
-    tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
-    send_message(chat_id, html_full_post)
+    data: Dict[str, Any] = {"chat_id": chat_id, "caption": ""}
+    if reply_markup:
+        data["reply_markup"] = _markup_json(reply_markup)
+    tg_request("sendPhoto", data=data, files={"photo": file_tuple})
+    send_message(chat_id, rendered_post, fallback_text=plain_post)
+
+
+def send_poll(chat_id: str, question: str, options: List[str]) -> None:
+    tg_request(
+        "sendPoll",
+        data={
+            "chat_id": chat_id,
+            "question": question,
+            "options": json.dumps(options, ensure_ascii=False),
+            "is_anonymous": "true",
+            "allows_multiple_answers": "false",
+        },
+    )
 
 
 def send_semantic_alert(
@@ -801,17 +991,32 @@ def send_semantic_alert(
     rubric_id: str,
     match_field: str,
 ) -> None:
-    cand = _html.escape(candidate_url, quote=True)
-    hit = _html.escape(matched_url, quote=True)
-    html_text = (
-        "⚠️ <b>Semantic dedup alert</b>\n"
-        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
-        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | FIELD={_escape(match_field)}\n\n"
-        f"Новый кандидат: <a href=\"{cand}\">{_escape(candidate_url)}</a>\n"
-        f"Похож на: <a href=\"{hit}\">{_escape(matched_url)}</a>\n"
-        f"Cosine: <b>{score:.3f}</b>"
+    rendered, plain = render_semantic_alert_message(
+        candidate_url=candidate_url,
+        matched_url=matched_url,
+        score=score,
+        audience=audience,
+        rubric_id=rubric_id,
+        match_field=match_field,
     )
-    send_message(chat_id, html_text)
+    send_message(chat_id, rendered, fallback_text=plain)
+
+
+def build_interactive_followup(day_key: str) -> Tuple[Optional[Dict[str, Any]], Optional[InlineKeyboardMarkup]]:
+    key = (day_key or "").upper()
+    if key == "WE":
+        return {
+            "question": 'Этот формат "Миф / Факт" был полезен?',
+            "options": ["Да, очень", "Немного", "Хочу ещё примеры"],
+        }, None
+    if key == "FR":
+        return {
+            "question": "Этот вопрос откликается вашей семье?",
+            "options": ["Да", "Частично", "Пока нет"],
+        }, None
+    if MINI_APP_URL and key in {"TH", "SU"}:
+        return None, build_mini_app_markup(MINI_APP_URL)
+    return None, None
 
 
 # =========================
@@ -858,6 +1063,88 @@ async def amain() -> None:
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
         if len(samples) < 8:
             samples.append(f"• {reason}: {url}")
+
+    async def _generate_unique_post(
+        rubric_title: str,
+        rf: str,
+        aud: str,
+        title_suffix: str,
+        sd: str,
+        canon: str,
+        evidence: str,
+        day: str,
+    ) -> Tuple[Optional[str], str]:
+        duplicate_hint = ""
+        for attempt in range(1, MAX_LLM_REGEN_ATTEMPTS + 1):
+            temperature = min(0.95, 0.2 + (attempt - 1) * 0.18)
+            variation_seed = random.randint(1000, 999999)
+            try:
+                plain_raw, ok, llm_note = await asyncio.wait_for(
+                    generate_post_plain_from_evidence_async(
+                        rubric_title=rubric_title,
+                        rubric_format=rf,
+                        audience=aud,
+                        title_suffix=title_suffix,
+                        source_domain=sd,
+                        source_url=canon,
+                        evidence_text=evidence,
+                        disclaimer=disclaimer,
+                        hashtags=hashtags if aud != "pros" else [],
+                        provider=PROVIDER,
+                        groq_key=GROQ_API_KEY,
+                        gemini_key=GEMINI_API_KEY,
+                        max_chars=POST_MAX_CHARS,
+                        day_key=day,
+                        temperature=temperature,
+                        variation_seed=variation_seed,
+                        regeneration_hint=duplicate_hint,
+                    ),
+                    timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
+                )
+            except asyncio.TimeoutError:
+                return None, "llm_timeout"
+
+            if not ok or not plain_raw:
+                duplicate_hint = "Сделай структуру и формулировки заметно более отличающимися от предыдущих публикаций."
+                if attempt >= MAX_LLM_REGEN_ATTEMPTS:
+                    return None, llm_note
+                continue
+
+            plain = finalize_plain_post_for_publication(
+                plain_text=plain_raw,
+                day_key=day,
+                source_domain=sd,
+                source_url=canon,
+                max_chars=POST_MAX_CHARS,
+            )
+
+            body_hash = sha1(norm_space(plain))
+            if body_hash in seen_body_hashes_this_run or store.has_body_hash(body_hash):
+                duplicate_hint = "Перепиши пост в другом narrative-угле, без повторения уже опубликованных формулировок и структуры."
+                if attempt >= MAX_LLM_REGEN_ATTEMPTS:
+                    return None, "dup_body_hash_after_regen"
+                continue
+
+            sem_body_hit = store.find_semantic_duplicate(
+                plain,
+                threshold=SEMANTIC_THRESHOLD,
+                since_iso=None,
+                limit=500,
+                compare="body",
+            )
+            if sem_body_hit:
+                duplicate_hint = (
+                    "Новый текст всё ещё слишком семантически похож на уже опубликованный. "
+                    "Смени структуру, начальный ракурс, примеры и полезный следующий шаг. "
+                    f"Ориентир similarity<{SEMANTIC_THRESHOLD:.2f}."
+                )
+                if attempt >= MAX_LLM_REGEN_ATTEMPTS:
+                    return None, "dup_semantic_post_after_regen"
+                continue
+
+            return plain, "ok"
+
+        return None, "llm_regen_exhausted"
 
     for aud in aud_list:
         if posted >= max_posts:
@@ -1053,115 +1340,27 @@ async def amain() -> None:
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
-                try:
-                    plain_raw, ok, llm_note = await asyncio.wait_for(
-                        generate_post_plain_from_evidence_async(
-                            rubric_title=rubric_title,
-                            rubric_format=rf,
-                            audience=aud,
-                            title_suffix=title_suffix,
-                            source_domain=sd,
-                            source_url=canon,
-                            evidence_text=evidence,
-                            disclaimer=disclaimer,
-                            hashtags=hashtags if aud != "pros" else [],
-                            provider=PROVIDER,
-                            groq_key=GROQ_API_KEY,
-                            gemini_key=GEMINI_API_KEY,
-                            max_chars=POST_MAX_CHARS,
-                            day_key=day,
-                        ),
-                        timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
-                    )
-                except asyncio.TimeoutError:
-                    note("llm_timeout", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] llm_timeout url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
-
-                if not ok or not plain_raw:
-                    note(llm_note, canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] {llm_note} url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
-
-                plain = finalize_plain_post_for_publication(
-                    plain_text=plain_raw,
-                    day_key=day,
-                    source_domain=sd,
-                    source_url=canon,
-                    max_chars=POST_MAX_CHARS,
+                plain, generation_note = await _generate_unique_post(
+                    rubric_title=rubric_title,
+                    rf=rf,
+                    aud=aud,
+                    title_suffix=title_suffix,
+                    sd=sd,
+                    canon=canon,
+                    evidence=evidence,
+                    day=day,
                 )
+                if not plain:
+                    note(generation_note, canon)
+                    rubric_skips += 1
+                    print(f"[SKIP] {generation_note} url={canon}", flush=True)
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
 
                 body_hash = sha1(norm_space(plain))
-                if body_hash in seen_body_hashes_this_run:
-                    note("dup_body_same_run", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_body_same_run url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
-
-                if store.has_body_hash(body_hash):
-                    note("dup_body_hash_db", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_body_hash_db url={canon}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
-
-                sem_body_hit = store.find_semantic_duplicate(
-                    plain,
-                    threshold=SEMANTIC_THRESHOLD,
-                    since_iso=None,
-                    limit=500,
-                    compare="body",
-                )
-                if sem_body_hit:
-                    note("dup_semantic_post", canon)
-                    rubric_skips += 1
-                    print(
-                        f"[SKIP] dup_semantic_post url={canon} matched={sem_body_hit.canonical_url} score={sem_body_hit.similarity:.3f}",
-                        flush=True,
-                    )
-                    if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
-                        recent_post_hit = store.find_semantic_duplicate(
-                            plain,
-                            threshold=SEMANTIC_THRESHOLD,
-                            since_iso=recent_since_iso,
-                            limit=120,
-                            compare="body",
-                        )
-                        if recent_post_hit:
-                            try:
-                                send_semantic_alert(
-                                    TELEGRAM_DRAFTS_CHAT_ID,
-                                    canon,
-                                    recent_post_hit.canonical_url,
-                                    recent_post_hit.similarity,
-                                    aud,
-                                    rubric_id,
-                                    recent_post_hit.match_field,
-                                )
-                            except Exception as e:
-                                print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
 
                 h1_title = _extract_h1_from_plain_post(plain, fallback=rubric_title)
                 image_prompt = ""
@@ -1199,7 +1398,7 @@ async def amain() -> None:
                     flush=True,
                 )
 
-                html_full = render_plain_to_telegram_html(plain)
+                rendered_post = render_post_for_telegram(plain)
 
                 if DRY_RUN:
                     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -1213,7 +1412,13 @@ async def amain() -> None:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:
                         raise RuntimeError("Resolved target chat id is empty")
-                    send_post_with_visual(target_chat_id, visual_buffer, plain, html_full)
+                    poll_payload, reply_markup = build_interactive_followup(day)
+                    send_post_with_visual(target_chat_id, visual_buffer, plain, rendered_post, reply_markup=reply_markup)
+                    if poll_payload:
+                        try:
+                            send_poll(target_chat_id, poll_payload["question"], poll_payload["options"])
+                        except Exception as e:
+                            print(f"[WARN] failed_to_send_poll err={e}", flush=True)
 
                     store.record_publication(
                         canonical_url=canon,
@@ -1252,7 +1457,7 @@ async def amain() -> None:
             try:
                 send_message(
                     TELEGRAM_DRAFTS_CHAT_ID,
-                    _build_posted_zero_alert_html(
+                    *_build_posted_zero_alert_message(
                         now=now,
                         day=day,
                         week_key=week_key,

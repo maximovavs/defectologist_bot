@@ -8,7 +8,7 @@ from urllib.parse import quote
 import requests
 from PIL import Image, ImageOps
 
-from src.services.image_builder import build_fallback_cover_buffer, validate_generated_image_bytes
+from src.services.image_builder import build_fallback_cover_buffer, sanitize_cover_title, validate_generated_image_bytes
 
 
 POLLINATIONS_TIMEOUT_SECONDS = int(os.getenv("POLLINATIONS_TIMEOUT_SECONDS", "10"))
@@ -84,16 +84,18 @@ def build_post_visual(
     day_key: str,
     image_prompt: str,
     pollinations_token: str = "",
+    fallback_title: str = "Логопедия и дефектология",
 ) -> Tuple[BytesIO, Dict[str, str]]:
     prompt = (image_prompt or "").strip()
+    safe_title = sanitize_cover_title(title, fallback=fallback_title)
 
     if prompt:
         try:
             buffer = download_pollinations_image(prompt=prompt, token=pollinations_token)
-            return buffer, {"mode": "ai", "reason": "ok", "prompt": prompt}
+            return buffer, {"mode": "ai", "reason": "ok", "prompt": prompt, "title": safe_title}
         except Exception as e:
-            fallback = build_fallback_cover_buffer(title=title, day_key=day_key)
-            return fallback, {"mode": "fallback", "reason": str(e), "prompt": prompt}
+            fallback = build_fallback_cover_buffer(title=safe_title, day_key=day_key, fallback_title=fallback_title)
+            return fallback, {"mode": "fallback", "reason": str(e), "prompt": prompt, "title": safe_title}
 
-    fallback = build_fallback_cover_buffer(title=title, day_key=day_key)
-    return fallback, {"mode": "fallback", "reason": "empty_prompt", "prompt": ""}
+    fallback = build_fallback_cover_buffer(title=safe_title, day_key=day_key, fallback_title=fallback_title)
+    return fallback, {"mode": "fallback", "reason": "empty_prompt", "prompt": "", "title": safe_title}

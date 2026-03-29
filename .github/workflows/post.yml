@@ -1,4 +1,4 @@
-name: Logoped Channel Bot v2.6
+name: Logoped Channel Bot v2.7
 
 on:
   schedule:
@@ -39,6 +39,7 @@ jobs:
       AUDIENCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.audience || 'both' }}
       REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
       TARGET_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
+      STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
 
       # важно для logorina.ru (плохой TLS)
       INSECURE_TLS_DOMAINS: "logorina.ru"
@@ -72,6 +73,8 @@ jobs:
 
       # sentence-transformers dedup
       SEMANTIC_THRESHOLD: "0.85"
+      SEMANTIC_THRESHOLD_SOURCE: "0.93"
+      SEMANTIC_THRESHOLD_POST: "0.86"
       SEMANTIC_MODEL_NAME: "all-MiniLM-L6-v2"
       MAX_LLM_REGEN_ATTEMPTS: "3"
 
@@ -86,10 +89,10 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .state
-          key: logoped-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: logoped-state-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            logoped-state-${{ github.ref_name }}-
-            logoped-state-
+            logoped-state-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-
+            logoped-state-${{ env.STATE_SCOPE }}-
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -125,7 +128,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .state
-          key: logoped-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: logoped-state-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload dry-run artifacts
         if: ${{ env.DRY_RUN == '1' }}

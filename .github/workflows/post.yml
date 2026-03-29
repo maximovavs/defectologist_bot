@@ -1,4 +1,4 @@
-name: Logoped Channel Bot v2.5
+name: Logoped Channel Bot v2.6
 
 on:
   schedule:
@@ -68,7 +68,12 @@ jobs:
       POLLINATIONS_HEIGHT: "720"
 
       # Telegram рендеринг ссылок
-      TELEGRAM_PARSE_MODE: "HTML"
+      TELEGRAM_PARSE_MODE: "MarkdownV2"
+
+      # sentence-transformers dedup
+      SEMANTIC_THRESHOLD: "0.85"
+      SEMANTIC_MODEL_NAME: "all-MiniLM-L6-v2"
+      MAX_LLM_REGEN_ATTEMPTS: "3"
 
       # общий лимит поста
       POST_MAX_CHARS: "1000"

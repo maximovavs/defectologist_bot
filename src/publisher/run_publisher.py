@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.9.0
+Publisher (cron/GitHub Actions) v5.0.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -37,6 +37,7 @@ Publisher (cron/GitHub Actions) v4.9.0
 16) Усилен age consistency для age_norms: узкий возрастной диапазон, базовая проверка milestone-age fit, stronger titles.
 17) Добавлен site-specific extractor для logopedy.ru + boilerplate guard + защита от ложных semantic collisions score=1.000.
 18) Для Monday/tip_of_day добавлена диверсификация candidate pool: round-robin по источникам, cap по домену и чистая test DB v10.
+19) Для Monday/tip_of_day запрещён generic final H1: заголовок обязан отражать конкретный приём/действие, а не название рубрики.
 """
 
 import asyncio
@@ -712,6 +713,9 @@ def _first_nonempty_line(text: str) -> str:
     return ""
 
 TIP_OF_DAY_GENERIC_TITLE_MARKERS = (
+    "совет логопеда дня",
+    "совет логопеда",
+    "логопедический совет",
     "работа с",
     "развитие ",
     "развитие_",
@@ -838,6 +842,55 @@ def _tip_of_day_title_too_generic(title: str) -> bool:
     if not blob:
         return True
     return any(marker in blob for marker in TIP_OF_DAY_GENERIC_TITLE_MARKERS)
+
+
+def _tip_of_day_title_matches_rubric(title: str, rubric_title: str) -> bool:
+    title_blob = _topic_scan_normalize(title)
+    rubric_blob = _topic_scan_normalize(rubric_title)
+    if not title_blob:
+        return True
+    if rubric_blob and title_blob == rubric_blob:
+        return True
+    if title_blob in {"совет логопеда дня", "совет логопеда", "логопедический совет"}:
+        return True
+    return False
+
+
+def _cleanup_tip_of_day_title(action: str) -> str:
+    s = norm_space(action)
+    if not s:
+        return ""
+    replacements = [
+        (r"^попробуйте\s+поиграть", "Поиграйте"),
+        (r"^попробуйте\s+играть", "Играйте"),
+        (r"^попробуйте\s+читать", "Читайте"),
+        (r"^попробуйте\s+почитать", "Читайте"),
+        (r"^попробуйте\s+называть", "Называйте"),
+        (r"^попробуйте\s+повторять", "Повторяйте"),
+        (r"^попробуйте\s+говорить", "Говорите"),
+        (r"^попробуйте\s+сказать", "Скажите"),
+        (r"^попробуйте\s+дать", "Дайте"),
+        (r"^попробуйте\s+давать", "Давайте"),
+        (r"^попробуйте\s+использовать", "Используйте"),
+        (r"^попробуйте\s+слушать", "Слушайте"),
+        (r"^попробуйте\s+спеть", "Спойте"),
+        (r"^попробуйте\s+обсуждать", "Обсуждайте"),
+        (r"^попробуйте\s+предложить", "Предложите"),
+        (r"^попробуйте\s+выбрать", "Выберите"),
+    ]
+    for pattern, repl in replacements:
+        s2 = re.sub(pattern, repl, s, flags=re.IGNORECASE)
+        if s2 != s:
+            s = s2
+            break
+    s = re.sub(r"^сегодня\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^что\s+(попробовать\s+сегодня|можно\s+попробовать\s+дома)\s*:?[ ]*", "", s, flags=re.IGNORECASE)
+    s = re.split(r"[,;:](?=\s|$)", s, maxsplit=1)[0]
+    s = re.split(r"чтобы", s, maxsplit=1, flags=re.IGNORECASE)[0]
+    s = norm_space(s).strip(" .")
+    if s:
+        s = s[0].upper() + s[1:]
+    return s
 
 
 def _looks_tip_of_day_action_sentence(sentence: str) -> bool:

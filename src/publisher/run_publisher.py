@@ -271,7 +271,7 @@ def _skip_kind(reason: str) -> str:
     return "soft"
 
 
-def _build_posted_zero_alert_html(
+def _build_posted_zero_alert_plain(
     now: datetime,
     day: str,
     week_key: str,
@@ -927,6 +927,17 @@ def send_message(chat_id: str, html_text: str) -> None:
     tg_request("sendMessage", data=fallback_data)
 
 
+def send_plain_message(chat_id: str, text: str) -> None:
+    if not chat_id:
+        raise RuntimeError("chat_id is missing")
+    data: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": "true",
+    }
+    tg_request("sendMessage", data=data)
+
+
 def _photo_file_tuple(photo_buffer: BytesIO) -> tuple[str, bytes, str]:
     filename = getattr(photo_buffer, "name", "cover.png")
     mime_type = getattr(photo_buffer, "mime_type", "image/png")
@@ -963,17 +974,15 @@ def send_semantic_alert(
     rubric_id: str,
     match_field: str,
 ) -> None:
-    cand = _html.escape(candidate_url, quote=True)
-    hit = _html.escape(matched_url, quote=True)
-    html_text = (
-        "⚠️ <b>Semantic dedup alert</b>\n"
+    plain_text = (
+        "⚠️ Semantic dedup alert\n"
         f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
-        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | FIELD={_escape(match_field)}\n\n"
-        f"Новый кандидат: <a href=\"{cand}\">{_escape(candidate_url)}</a>\n"
-        f"Похож на: <a href=\"{hit}\">{_escape(matched_url)}</a>\n"
-        f"Cosine: <b>{score:.3f}</b>"
+        f"AUDIENCE={audience} | RUBRIC={rubric_id} | FIELD={match_field}\n\n"
+        f"Новый кандидат: {candidate_url}\n"
+        f"Похож на: {matched_url}\n"
+        f"Cosine: {score:.3f}"
     )
-    send_message(chat_id, html_text)
+    send_plain_message(chat_id, plain_text)
 
 
 # =========================
@@ -1513,9 +1522,9 @@ async def amain() -> None:
     if posted == 0 and not DRY_RUN:
         if TELEGRAM_DRAFTS_CHAT_ID:
             try:
-                send_message(
+                send_plain_message(
                     TELEGRAM_DRAFTS_CHAT_ID,
-                    _build_posted_zero_alert_html(
+                    _build_posted_zero_alert_plain(
                         now=now,
                         day=day,
                         week_key=week_key,

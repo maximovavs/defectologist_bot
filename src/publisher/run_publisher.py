@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.6.0
+Publisher (cron/GitHub Actions) v4.7.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -34,6 +34,7 @@ Publisher (cron/GitHub Actions) v4.6.0
 13) Введены отдельные semantic thresholds для source/evidence и post/body.
 14) Добавлен prefilter мусорных documents/* URL для age_norms.
 15) Добавлен rubric-guard для age_norms: whitelist/blacklist тем и reject при несоответствии рубрике.
+16) Усилен age consistency для age_norms: узкий возрастной диапазон, базовая проверка milestone-age fit, stronger titles.
 """
 
 import asyncio
@@ -78,7 +79,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.6.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.7.0 (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -275,6 +276,10 @@ def classify_skip_severity(reason: str) -> str:
         "prefilter_noise_document",
         "rubric_topic_mismatch_source",
         "rubric_topic_mismatch_post_after_regen",
+        "age_consistency_missing_age_line",
+        "age_consistency_unparsed_age_line",
+        "age_consistency_range_too_wide",
+        "age_consistency_milestone_mismatch",
     }
     if reason in soft_exact:
         return "soft"
@@ -623,6 +628,120 @@ def _first_nonempty_line(text: str) -> str:
         if st:
             return st
     return ""
+
+AGE_GENERIC_TITLE_MARKERS = (
+    "возрастная норма",
+    "норма речи",
+    "развитие речи",
+    "для родителей",
+    "речевые нормы",
+)
+
+AGE_EARLY_COMPLEX_MARKERS = (
+    "предложени",
+    "рассказывает историю",
+    "пересказывает",
+    "длинные фразы",
+    "сложные фразы",
+)
+
+AGE_LATE_SIMPLE_MARKERS = (
+    "около 50 слов",
+    "50 слов",
+    "первые слова",
+    "двухслов",
+    "2-слов",
+    "два слова",
+)
+
+
+def _extract_first_nonempty_line_index(lines: List[str]) -> int:
+    for idx, line in enumerate(lines):
+        if norm_space(line):
+            return idx
+    return -1
+
+
+def _parse_age_bounds(age_value: str) -> Optional[Tuple[float, float]]:
+    s = (age_value or "").strip().lower().replace("ё", "е")
+    s = s.replace("–", "-").replace("—", "-").replace(",", ".")
+    nums = []
+    for part in re.findall(r"\d+(?:\.\d+)?", s):
+        try:
+            nums.append(float(part))
+        except Exception:
+            continue
+    if not nums:
+        return None
+    if len(nums) == 1:
+        return (nums[0], nums[0])
+    return (min(nums), max(nums))
+
+
+def _age_range_too_wide(age_value: str) -> bool:
+    bounds = _parse_age_bounds(age_value)
+    if not bounds:
+        return True
+    lo, hi = bounds
+    return (hi - lo) > 2.0
+
+
+def _looks_generic_age_norms_title(title: str) -> bool:
+    blob = _topic_scan_normalize(title)
+    if not blob:
+        return True
+    if any(marker in blob for marker in AGE_GENERIC_TITLE_MARKERS):
+        return True
+    return not bool(re.search(r"\d", blob))
+
+
+def _build_stronger_age_norms_title(age_value: str, plain_text: str) -> str:
+    age_clean = norm_space(age_value).replace("-", "–")
+    blob = _topic_scan_normalize(plain_text)
+    if any(marker in blob for marker in ("слова", "фразы", "предложени", "вопрос", "понимает")):
+        return f"Что обычно говорит ребёнок в {age_clean}"
+    return f"Речевые ориентиры в {age_clean}"
+
+
+def strengthen_age_norms_title(plain_text: str, rubric_title: str) -> str:
+    lines = (plain_text or "").replace("\r\n", "\n").split("\n")
+    age_value = _extract_age_value(lines)
+    if not age_value:
+        return plain_text
+    idx = _extract_first_nonempty_line_index(lines)
+    if idx < 0:
+        return plain_text
+    current = norm_space(lines[idx])
+    stronger = _build_stronger_age_norms_title(age_value, plain_text)
+    if _is_structural_heading(current) or _looks_generic_age_norms_title(current):
+        lines[idx] = stronger
+        return "\n".join(lines).strip()
+    return plain_text
+
+
+def validate_age_norms_age_consistency(plain_text: str) -> Optional[str]:
+    lines = (plain_text or "").replace("\r\n", "\n").split("\n")
+    age_value = _extract_age_value(lines)
+    if not age_value:
+        return "age_consistency_missing_age_line"
+
+    bounds = _parse_age_bounds(age_value)
+    if not bounds:
+        return "age_consistency_unparsed_age_line"
+
+    if _age_range_too_wide(age_value):
+        return "age_consistency_range_too_wide"
+
+    lo, hi = bounds
+    blob = _topic_scan_normalize(plain_text)
+
+    if hi <= 2.0 and any(marker in blob for marker in AGE_EARLY_COMPLEX_MARKERS):
+        return "age_consistency_milestone_mismatch"
+
+    if lo >= 3.0 and any(marker in blob for marker in AGE_LATE_SIMPLE_MARKERS):
+        return "age_consistency_milestone_mismatch"
+
+    return None
 
 
 def validate_rubric_source_fit(rubric_id: str, candidate_title: str, canonical_url: str, evidence_text: str) -> Optional[str]:
@@ -1467,6 +1586,19 @@ async def amain() -> None:
                 source_url=canon,
                 max_chars=POST_MAX_CHARS,
             )
+
+            if (rubric_id or "").strip().lower() == "age_norms":
+                plain = strengthen_age_norms_title(plain, rubric_title)
+                age_consistency_reason = validate_age_norms_age_consistency(plain)
+                if age_consistency_reason:
+                    duplicate_hint = (
+                        "Для рубрики возрастных норм нужен узкий возрастной диапазон: например, 1–2, 2–3, 3–4 или 4–5 лет, а не слишком широкий интервал. "
+                        "Заголовок должен быть конкретным и возрастным, а ориентиры — соответствовать именно этому возрасту. "
+                        "Не смешивай milestones для слишком разных этапов развития в одном посте."
+                    )
+                    if attempt >= MAX_LLM_REGEN_ATTEMPTS:
+                        return None, age_consistency_reason
+                    continue
 
             rubric_mismatch_reason = validate_rubric_post_fit(
                 rubric_id=rubric_id,

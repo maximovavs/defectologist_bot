@@ -84,6 +84,27 @@ def _find_line(lines: List[str], prefix: str) -> str:
     return ""
 
 
+def _line_after_prefix(lines: List[str], prefix: str) -> str:
+    probe = (prefix or "").strip().lower()
+    for idx, line in enumerate(lines):
+        st = line.strip()
+        if st.lower().startswith(probe):
+            remainder = st.split(":", 1)[1].strip() if ":" in st else ""
+            if remainder:
+                return remainder
+            for nxt in lines[idx + 1:]:
+                ns = nxt.strip()
+                if not ns:
+                    continue
+                if ns.startswith("#"):
+                    continue
+                if _looks_like_structural_first_line(ns):
+                    return ""
+                return ns
+            return ""
+    return ""
+
+
 def _first_narrative_line_after_title(lines: List[str]) -> str:
     skipped_prefixes = (
         "👶 возраст:",
@@ -199,6 +220,33 @@ MONDAY_GENERIC_LEAD_FRAGMENTS = [
     "развитие речи",
 ]
 
+MONDAY_GENERIC_BENEFIT_FRAGMENTS = [
+    "развивает речь",
+    "улучшает речь",
+    "помогает развитию речи",
+    "развивает навыки диалога",
+    "помогает общению",
+    "развивает коммуникацию",
+    "развивает речевые навыки",
+    "способствует развитию речи",
+    "улучшает коммуникацию",
+]
+
+MONDAY_PATHOLOGY_FRAGMENTS = [
+    "онр",
+    "общее недоразвитие речи",
+    "дизартр",
+    "алали",
+    "дисграф",
+    "дислекс",
+    "заикан",
+    "афаз",
+    "коррекц",
+    "диагноз",
+    "патолог",
+    "дефект",
+]
+
 SUNDAY_PATHOLOGY_FRAGMENTS = [
     "задерж",
     "нарушен",
@@ -288,6 +336,25 @@ def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     if len(lead) < 24:
         return False, "monday_lead_too_short"
 
+    if not _find_line(lines, "🧩 Что попробовать сегодня"):
+        return False, "monday_no_try_block"
+
+    example_line = _line_after_prefix(lines, "👄 Пример")
+    if not example_line:
+        return False, "monday_no_example_block"
+
+    benefit_line = _line_after_prefix(lines, "💡 Что это дает")
+    if not benefit_line:
+        return False, "monday_no_benefit_block"
+
+    benefit_bad = _contains_any_fragment(benefit_line, MONDAY_GENERIC_BENEFIT_FRAGMENTS)
+    if benefit_bad:
+        return False, f"monday_generic_benefit:{benefit_bad}"
+
+    pathology_bad = _contains_any_fragment(text, MONDAY_PATHOLOGY_FRAGMENTS)
+    if pathology_bad:
+        return False, f"monday_pathology:{pathology_bad}"
+
     return True, "ok"
 
 
@@ -322,6 +389,55 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def _validate_rubric_specific_output(
+    text: str,
+    day_key: str,
+    rubric_format: str,
+    audience: str,
+) -> Tuple[bool, str]:
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+    aud = (audience or "").strip().lower()
+
+    if aud == "parents" and (dk == "MO" or rf == "tip_of_day"):
+        return _validate_tip_of_day_output(text)
+
+    if aud == "parents" and (dk == "SU" or rf == "age_norms"):
+        return _validate_age_norms_output(text)
+
+    return True, "ok"
+
+
+def _build_rubric_repair_appendix(
+    day_key: str,
+    rubric_format: str,
+    audience: str,
+    reason: str,
+) -> str:
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+    aud = (audience or "").strip().lower()
+
+    if aud == "parents" and (dk == "MO" or rf == "tip_of_day"):
+        return (
+            " Для Monday обязательно: первая строка — один прикладной совет, а не название рубрики и не обзор темы."
+            " После строки возраста дай одну живую фразу про один домашний шаг на сегодня."
+            " Обязательно сохрани блоки «🧩 Что попробовать сегодня», «👄 Пример» и «💡 Что это дает»."
+            " Пример должен буквально реализовывать тот же прием, что и в заголовке."
+            " В пользе назови один узкий наблюдаемый навык, а не общую фразу про развитие речи."
+            " Не используй клиническую, диагностическую и коррекционную лексику."
+        )
+
+    if aud == "parents" and (dk == "SU" or rf == "age_norms"):
+        return (
+            " Для Sunday обязательно: только возрастные ориентиры и milestones."
+            " Сохрани спокойный родительский тон без патологии, диагностики и коррекции."
+            " Обязательно оставь строку «Ориентиры:» и фразу «Каждый ребенок развивается индивидуально»."
+        )
+
+    return ""
+
+
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -337,19 +453,6 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if _has_template_leak(out):
         return False, "template_leak"
-
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
-
-    if dk == "MO" or rf == "tip_of_day":
-        ok, reason = _validate_tip_of_day_output(out)
-        if not ok:
-            return False, reason
-
-    if dk == "SU" or rf == "age_norms":
-        ok, reason = _validate_age_norms_output(out)
-        if not ok:
-            return False, reason
 
     return True, "ok"
 
@@ -939,7 +1042,10 @@ async def generate_post_plain_from_evidence_async(
     def validate(out: str) -> Tuple[bool, str]:
         if out.strip() == "НЕТ_ДАННЫХ":
             return False, "no_data_in_source"
-        return _validate_output(out, day_key=dk, rubric_format=rf)
+        ok_common, reason_common = _validate_output(out, day_key=dk, rubric_format=rf)
+        if not ok_common:
+            return False, reason_common
+        return _validate_rubric_specific_output(out, day_key=dk, rubric_format=rf, audience=aud)
 
     if prov == "none":
         return "", False, "provider:none"
@@ -967,19 +1073,12 @@ async def generate_post_plain_from_evidence_async(
                 + "Обязательно начни пост с обычного заголовка первой строкой, а не со строки Возраст/Миф/Вопрос/Источник."
             )
 
-            if dk == "MO" or rf == "tip_of_day":
-                repair_prompt += (
-                    "Для Monday обязательно: первая строка — один прикладной совет, "
-                    "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
-                    "никаких обзоров темы и общих формулировок."
-                )
-
-            if dk == "SU" or rf == "age_norms":
-                repair_prompt += (
-                    "Для Sunday обязательно: только возрастные ориентиры и milestones, "
-                    "без патологической, диагностической и коррекционной лексики, "
-                    "с фразой «Каждый ребенок развивается индивидуально»."
-                )
+            repair_prompt += _build_rubric_repair_appendix(
+                day_key=dk,
+                rubric_format=rf,
+                audience=aud,
+                reason=reason,
+            )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key, temperature=min(1.0, temperature + 0.15)))
             ok2, reason2 = validate(out2)

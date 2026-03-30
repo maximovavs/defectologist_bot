@@ -288,6 +288,9 @@ def classify_skip_severity(reason: str) -> str:
         "evidence_boilerplate_extracted",
         "evidence_low_information",
         "extractor_collision_suspected",
+        "tip_of_day_title_too_generic",
+        "tip_of_day_first_action_missing",
+        "tip_of_day_bilingual_too_general",
     }
     if reason in soft_exact:
         return "soft"
@@ -708,6 +711,63 @@ def _first_nonempty_line(text: str) -> str:
             return st
     return ""
 
+TIP_OF_DAY_GENERIC_TITLE_MARKERS = (
+    "работа с",
+    "развитие ",
+    "развитие_",
+    "особенности",
+    "формирование",
+    "поддержка",
+    "воспитание",
+    "обучение",
+    "языковые навыки",
+    "речевые навыки",
+    "билингваль",
+    "двуязыч",
+    "для родителей",
+)
+
+TIP_OF_DAY_ACTION_VERBS = (
+    "попробуйте",
+    "читайте",
+    "играйте",
+    "скажите",
+    "говорите",
+    "называйте",
+    "попросите",
+    "повторяйте",
+    "покажите",
+    "дайте",
+    "выберите",
+    "используйте",
+    "добавьте",
+    "опишите",
+    "слушайте",
+    "спойте",
+    "чередуйте",
+    "обсуждайте",
+    "предложите",
+    "прочитайте",
+)
+
+TIP_OF_DAY_BILINGUAL_MARKERS = (
+    "билингв",
+    "двуязыч",
+    "два языка",
+    "двух язы",
+    "на каждом языке",
+    "на двух языках",
+    "язык среды",
+    "родной язык",
+    "второй язык",
+)
+
+TIP_OF_DAY_ACTION_SECTION_MARKERS = (
+    "что попробовать сегодня",
+    "что можно попробовать дома",
+    "что сделать сегодня",
+)
+
 AGE_GENERIC_TITLE_MARKERS = (
     "возрастная норма",
     "норма речи",
@@ -763,6 +823,134 @@ def _age_range_too_wide(age_value: str) -> bool:
         return True
     lo, hi = bounds
     return (hi - lo) > 2.0
+
+
+def _iter_content_sentences(text: str) -> List[str]:
+    blob = norm_space(text)
+    if not blob:
+        return []
+    parts = re.split(r"(?<=[.!?…])\s+", blob)
+    return [norm_space(p).strip(" .") for p in parts if norm_space(p)]
+
+
+def _tip_of_day_title_too_generic(title: str) -> bool:
+    blob = _topic_scan_normalize(title)
+    if not blob:
+        return True
+    return any(marker in blob for marker in TIP_OF_DAY_GENERIC_TITLE_MARKERS)
+
+
+def _looks_tip_of_day_action_sentence(sentence: str) -> bool:
+    blob = _topic_scan_normalize(sentence)
+    if not blob:
+        return False
+    return any(re.search(rf"\b{re.escape(verb)}\b", blob) for verb in TIP_OF_DAY_ACTION_VERBS)
+
+
+def _extract_tip_of_day_section_action(lines: List[str]) -> str:
+    for idx, raw in enumerate(lines):
+        st = norm_space(raw)
+        if not st:
+            continue
+        low = _topic_scan_normalize(st)
+        if any(marker in low for marker in TIP_OF_DAY_ACTION_SECTION_MARKERS):
+            if ":" in st:
+                after = norm_space(st.split(":", 1)[1])
+                if after:
+                    for sent in _iter_content_sentences(after):
+                        if _looks_tip_of_day_action_sentence(sent):
+                            return sent
+            collected: List[str] = []
+            for nxt in lines[idx + 1:]:
+                s2 = norm_space(nxt)
+                if not s2:
+                    break
+                if _is_structural_heading(s2) or SOURCE_LINE_RE.match(s2) or s2.startswith("🔗 ") or s2.startswith("#"):
+                    break
+                collected.append(s2)
+                if len(" ".join(collected)) > 240:
+                    break
+            joined = " ".join(collected)
+            for sent in _iter_content_sentences(joined):
+                if _looks_tip_of_day_action_sentence(sent):
+                    return sent
+    return ""
+
+
+def _extract_tip_of_day_first_substantive_sentence(lines: List[str]) -> str:
+    collected: List[str] = []
+    for idx, raw in enumerate(lines):
+        st = norm_space(raw)
+        if idx == 0:
+            continue
+        if not st:
+            continue
+        if AGE_LINE_RE.match(st) or AUDIENCE_LINE_RE.match(st):
+            continue
+        if SOURCE_LINE_RE.match(st) or st.startswith("🔗 ") or st.startswith("#"):
+            break
+        if _is_structural_heading(st):
+            continue
+        collected.append(st)
+        if len(" ".join(collected)) > 260:
+            break
+    joined = " ".join(collected)
+    sentences = _iter_content_sentences(joined)
+    return sentences[0] if sentences else ""
+
+
+def _build_tip_of_day_title_from_action(action_sentence: str, plain_text: str, rubric_title: str) -> str:
+    action = norm_space(action_sentence)
+    if not action:
+        return rubric_title or "Совет логопеда дня"
+    action = re.sub(r"^(сегодня\s+)?", "", action, flags=re.IGNORECASE)
+    action = re.sub(r"^(что\s+попробовать\s+сегодня|что\s+можно\s+попробовать\s+дома)\s*:?\s*", "", action, flags=re.IGNORECASE)
+    action = re.split(r"[,;:](?=\s|$)", action, maxsplit=1)[0]
+    action = re.split(r"\bчтобы\b", action, maxsplit=1, flags=re.IGNORECASE)[0]
+    action = norm_space(action).strip(" .")
+    if not action:
+        return rubric_title or "Совет логопеда дня"
+    words = action.split()
+    if len(words) > 7:
+        action = " ".join(words[:7]).strip(" ,.;:")
+    if action:
+        action = action[0].upper() + action[1:]
+    if len(action) < 8:
+        return rubric_title or "Совет логопеда дня"
+    return action
+
+
+def strengthen_tip_of_day_title(plain_text: str, rubric_title: str) -> str:
+    lines = (plain_text or "").replace("\r\n", "\n").split("\n")
+    idx = _extract_first_nonempty_line_index(lines)
+    if idx < 0:
+        return plain_text
+    current = norm_space(lines[idx])
+    if not (_is_structural_heading(current) or _tip_of_day_title_too_generic(current)):
+        return plain_text
+    action_line = _extract_tip_of_day_section_action(lines) or _extract_tip_of_day_first_substantive_sentence(lines)
+    stronger = _build_tip_of_day_title_from_action(action_line, plain_text, rubric_title)
+    lines[idx] = stronger
+    return "\n".join(lines).strip()
+
+
+def validate_tip_of_day_editorial_fit(plain_text: str, rubric_title: str) -> Optional[str]:
+    lines = (plain_text or "").replace("\r\n", "\n").split("\n")
+    title = _first_nonempty_line(plain_text)
+    if _is_structural_heading(title) or _tip_of_day_title_too_generic(title):
+        return "tip_of_day_title_too_generic"
+
+    first_sentence = _extract_tip_of_day_first_substantive_sentence(lines)
+    if not first_sentence or not _looks_tip_of_day_action_sentence(first_sentence):
+        return "tip_of_day_first_action_missing"
+
+    blob = _topic_scan_normalize(plain_text)
+    if any(marker in blob for marker in TIP_OF_DAY_BILINGUAL_MARKERS):
+        action_line = _extract_tip_of_day_section_action(lines) or first_sentence
+        if not action_line or not _looks_tip_of_day_action_sentence(action_line):
+            return "tip_of_day_bilingual_too_general"
+
+    return None
 
 
 def _looks_generic_age_norms_title(title: str) -> bool:
@@ -1931,6 +2119,20 @@ async def amain() -> None:
                 source_url=canon,
                 max_chars=POST_MAX_CHARS,
             )
+
+            if (rubric_id or "").strip().lower() == "tip_of_day":
+                plain = strengthen_tip_of_day_title(plain, rubric_title)
+                tip_of_day_reason = validate_tip_of_day_editorial_fit(plain, rubric_title)
+                if tip_of_day_reason:
+                    duplicate_hint = (
+                        "Для рубрики 'Совет логопеда дня' нужен один конкретный домашний приём на сегодня. "
+                        "Заголовок должен быть прикладным, а первая смысловая фраза — сразу вести к действию. "
+                        "Избегай обзорных тем вроде 'работа с...', 'развитие...', 'особенности...'. "
+                        "Для bilingual-темы допустим один конкретный домашний приём, а не общая тема."
+                    )
+                    if attempt >= MAX_LLM_REGEN_ATTEMPTS:
+                        return None, tip_of_day_reason
+                    continue
 
             if (rubric_id or "").strip().lower() == "age_norms":
                 plain = strengthen_age_norms_title(plain, rubric_title)

@@ -443,6 +443,76 @@ def _extract_thematic_tags_and_clean_lines(lines: List[str]) -> tuple[List[str],
     return tags[:2], clean_lines
 
 
+_TAG_WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
+_TAG_RU_SUFFIXES = (
+    "иями", "ями", "ами", "иях", "ого", "ему", "ому", "ыми", "ими", "ее", "ие", "ые",
+    "ое", "ей", "ий", "ый", "ой", "ам", "ям", "ом", "ем", "ах", "ях", "ию", "ью", "ия", "ья",
+    "ев", "ов", "ие", "ье", "а", "я", "ы", "и", "е", "о", "у",
+)
+_TAG_EN_SUFFIXES = ("ingly", "edly", "ing", "ed", "ly", "es", "s")
+
+
+def _stem_tag_token(token: str) -> str:
+    t = (token or "").strip().lower().replace("ё", "е")
+    if len(t) <= 3:
+        return t
+    for suf in _TAG_RU_SUFFIXES:
+        if len(t) > len(suf) + 2 and t.endswith(suf):
+            return t[: -len(suf)]
+    for suf in _TAG_EN_SUFFIXES:
+        if len(t) > len(suf) + 2 and t.endswith(suf):
+            return t[: -len(suf)]
+    return t
+
+
+def _tag_match_tokens(text: str) -> set[str]:
+    raw = _TAG_WORD_RE.findall((text or "").lower().replace("ё", "е"))
+    out: set[str] = set()
+    for token in raw:
+        stem = _stem_tag_token(token)
+        if len(stem) >= 3:
+            out.add(stem)
+    return out
+
+
+def _is_thematic_tag_relevant(tag: str, body_text: str) -> bool:
+    tag_body = (tag or "").strip().lstrip("#")
+    if not tag_body:
+        return False
+
+    tag_tokens = [
+        _stem_tag_token(tok)
+        for tok in _TAG_WORD_RE.findall(tag_body.replace("_", " "))
+        if len(_stem_tag_token(tok)) >= 3
+    ]
+    if not tag_tokens:
+        return False
+
+    body_tokens = _tag_match_tokens(body_text)
+    if not body_tokens:
+        return False
+
+    matches = 0
+    for tok in tag_tokens:
+        if tok in body_tokens:
+            matches += 1
+            continue
+        if any(tok in b or b in tok for b in body_tokens):
+            matches += 1
+
+    required = 1 if len(tag_tokens) == 1 else max(1, (len(tag_tokens) + 1) // 2)
+    return matches >= required
+
+
+def _filter_relevant_thematic_tags(tags: List[str], body_text: str) -> List[str]:
+    filtered: List[str] = []
+    for tag in tags:
+        if _is_thematic_tag_relevant(tag, body_text):
+            if tag not in filtered:
+                filtered.append(tag)
+    return filtered[:2]
+
+
 def _extract_source_line(lines: List[str], fallback_domain: str) -> str:
     for line in lines:
         st = line.strip()
@@ -515,6 +585,8 @@ def finalize_plain_post_for_publication(
     age_value = _extract_age_value(body_lines)
     rubric_tag = RUBRIC_TAGS_BY_DAY.get((day_key or "").upper(), "")
     age_tag = _build_age_tag(age_value)
+    body_text = "\n".join(body_lines).strip()
+    thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text)
 
     final_tags: List[str] = []
     for tag in [rubric_tag, age_tag, *thematic_tags]:
@@ -526,7 +598,6 @@ def finalize_plain_post_for_publication(
         if tag not in final_tags:
             final_tags.append(tag)
 
-    body_text = "\n".join(body_lines).strip()
     footer_parts = [source_line, link_line]
     if final_tags:
         footer_parts.append("")

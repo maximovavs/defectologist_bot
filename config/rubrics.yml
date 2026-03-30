@@ -1,4 +1,4 @@
-version: 2.4
+version: 2.5
 
 channel:
   locale: "ru-RU"
@@ -7,20 +7,18 @@ channel:
   hashtags: ["#логопед", "#речь", "#билингвизм", "#развитиеРечи"]
 
 branding:
-  card_theme: "kids"  # minimal | kids | scientific
+  card_theme: "kids"
   card_footer: "Русский логопед онлайн • без воды • с источниками"
   card_accent: "#4A90E2"
 
 publishing:
-  # ✅ чтобы была ровно 1 рубрика в день
   max_posts_per_run: 1
   max_posts_per_audience_per_run: 1
 
-  drafts_mode: "post_to_drafts_chat"   # skip | post_to_drafts_chat
+  drafts_mode: "post_to_drafts_chat"
   drafts_chat_id_env: "TELEGRAM_DRAFTS_CHAT_ID"
 
-  # defense-in-depth (hotfix в коде все равно принудительно шлёт dashboard в drafts)
-  dashboard_chat: "drafts"    # main | drafts
+  dashboard_chat: "drafts"
   dashboard_title: "Quality dashboard недели"
 
 audiences:
@@ -34,10 +32,13 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["MO"]
         sources:
-          - "logopediya_documents_rss"
-          - "logopediya_ppt_rss"
+          - "hanen_parent_tips"
+          - "handyhandouts_parent_tips"
+          - "fraser_parent_speech_tips"
+          - "nationwidechildrens_speech_language"
+          - "naeyc_family_communication"
           - "logorina_latest"
-          - "logopedy_articles_latest"
+          - "logomag_lib_latest"
         format: "tip_of_day"
         media: ["image_card"]
 
@@ -48,8 +49,12 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["TU"]
         sources:
+          - "hanen_parent_tips"
+          - "handyhandouts_parent_tips"
+          - "nationwidechildrens_speech_language"
+          - "kidskey_speech_games"
           - "logorina_latest"
-          - "logopedy_articles_latest"
+          - "gosh_speech_language_12_24_months"
         format: "exercise_steps"
         media: ["image_card"]
 
@@ -60,11 +65,12 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["WE"]
         sources:
+          - "hanen_bilingual_myths"
+          - "healthychildren_bilingual_myths"
+          - "habilnet_bilingual_parents"
           - "asha_multilingual_public"
-          - "asha_practice_portal_multilingual_service_delivery"
-          - "pmc_bilingual_science"
-          - "pmc_code_switching_exposure_children"
-          - "pmc_code_switching_parents_infants"
+          - "zerotothree_dual_language"
+          - "colorin_bilingual_parents"
         format: "myth_fact"
         media: ["image_card"]
 
@@ -75,41 +81,50 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["TH"]
         sources:
-          - "asha_multilingual_public"
-          - "asha_practice_portal_multilingual_service_delivery"
+          - "raisingchildren_bilingual"
+          - "habilnet_bilingual_parents"
+          - "cal_dual_language_home_support"
+          - "docdeti_bilingualism"
+          - "kidskey_speech_games"
+          - "carla_family_resources"
+          - "russkiymir_bilingual_family"
           - "colorin_bilingual_parents"
-          - "pmc_bilingual_science"
-          - "logoportal_latest"
         format: "bilingual_parents"
         media: ["image_card"]
 
-      # ПЯТНИЦА: Вопрос недели (временно; позже замените на tts_audio)
+      # ПЯТНИЦА: Вопрос недели
       - id: question_week
         title: "Вопрос недели"
         kind: question_week
         cadence: "WEEKLY"
         byweekday: ["FR"]
         sources:
+          - "healthychildren_bilingual_myths"
+          - "healthychildren_language_development"
+          - "zerotothree_dual_language"
+          - "habilnet_bilingual_parents"
           - "asha_multilingual_public"
-          - "colorin_bilingual_parents"
         format: "question_week"
         media: ["image_card"]
 
       # ВОСКРЕСЕНЬЕ: Возрастная норма
-      # ✅ Milestones — ПЕРВЫМ, чтобы рубрика реально была про нормы.
       - id: age_norms
         title: "Возрастная норма"
         kind: norms
         cadence: "WEEKLY"
         byweekday: ["SU"]
         sources:
+          - "cdc_developmental_milestones"
           - "asha_developmental_milestones"
-          - "logoportal_latest"
-          - "logopediya_documents_rss"
+          - "healthychildren_language_development"
+          - "mayoclinic_language_milestones"
+          - "cincinnatichildrens_language_development"
+          - "actionforchildren_communication_milestones"
+          - "gosh_speech_language_12_24_months"
         format: "age_norms"
         media: ["image_card"]
 
-      # Технический отчёт (всегда в drafts), не должен "съедать" лимит постов дня
+      # Технический отчёт (всегда в drafts)
       - id: quality_dashboard
         title: "Quality dashboard"
         kind: dashboard
@@ -129,10 +144,13 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["SA"]
         sources:
+          - "asha_practice_portal_articulation_phonology"
+          - "asha_practice_portal_multilingual_service_delivery"
+          - "hanen_parent_tips"
+          - "cal_dual_language_home_support"
+          - "tewhariki_multilingual_pathways"
           - "logomag_lib_latest"
           - "logoportal_latest"
           - "logopedy_articles_latest"
-          - "asha_practice_portal_articulation_phonology"
-          - "asha_practice_portal_multilingual_service_delivery"
         format: "pro_friendly"
         media: ["image_card"]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.8.0
+Publisher (cron/GitHub Actions) v4.9.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -36,9 +36,11 @@ Publisher (cron/GitHub Actions) v4.8.0
 15) Добавлен rubric-guard для age_norms: whitelist/blacklist тем и reject при несоответствии рубрике.
 16) Усилен age consistency для age_norms: узкий возрастной диапазон, базовая проверка milestone-age fit, stronger titles.
 17) Добавлен site-specific extractor для logopedy.ru + boilerplate guard + защита от ложных semantic collisions score=1.000.
+18) Для Monday/tip_of_day добавлена диверсификация candidate pool: round-robin по источникам, cap по домену и чистая test DB v10.
 """
 
 import asyncio
+from collections import Counter, deque
 from io import BytesIO
 import json
 import hashlib
@@ -108,7 +110,9 @@ SEMANTIC_THRESHOLD_POST = float(os.getenv("SEMANTIC_THRESHOLD_POST", "0.86"))
 MAX_LLM_REGEN_ATTEMPTS = int(os.getenv("MAX_LLM_REGEN_ATTEMPTS", "3"))
 RECENT_ALERT_HOURS = int(os.getenv("RECENT_ALERT_HOURS", "36"))
 STATE_SCOPE = "test" if TARGET_CHANNEL == "test" else "prod"
-PUBLICATION_DB_NAME = "publication_history_test.sqlite3" if STATE_SCOPE == "test" else "publication_history.sqlite3"
+TEST_DB_VERSION = os.getenv("TEST_DB_VERSION", "v10").strip() or "v10"
+PUBLICATION_DB_NAME = f"publication_history_test_{TEST_DB_VERSION}.sqlite3" if STATE_SCOPE == "test" else "publication_history.sqlite3"
+TIP_OF_DAY_DOMAIN_CAP = int(os.getenv("TIP_OF_DAY_DOMAIN_CAP", "3"))
 
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
 MAX_CANDIDATES_PER_RUBRIC = int(os.getenv("MAX_CANDIDATES_PER_RUBRIC", "25"))
@@ -858,6 +862,127 @@ def validate_rubric_post_fit(rubric_id: str, plain_text: str, rubric_title: str,
         return "rubric_topic_mismatch_post_after_regen"
 
     return None
+
+
+
+
+def _attach_source_id(items: List[Dict[str, str]], source_id: str) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for it in items:
+        row = dict(it)
+        row["source_id"] = source_id
+        out.append(row)
+    return out
+
+
+def _round_robin_candidates(
+    items_by_source: Dict[str, List[Dict[str, str]]],
+    seed: int,
+    max_items: int,
+    domain_cap: int,
+) -> List[Dict[str, str]]:
+    rng = random.Random(seed)
+    source_ids = list(items_by_source.keys())
+    rng.shuffle(source_ids)
+
+    queues: Dict[str, deque] = {}
+    for sid in source_ids:
+        bucket = list(items_by_source.get(sid) or [])
+        rng.shuffle(bucket)
+        queues[sid] = deque(bucket)
+
+    selected: List[Dict[str, str]] = []
+    overflow: List[Dict[str, str]] = []
+    seen_urls: set[str] = set()
+    domain_counts: Counter = Counter()
+
+    progressed = True
+    while len(selected) < max_items and progressed:
+        progressed = False
+        for sid in source_ids:
+            q = queues.get(sid)
+            if not q:
+                continue
+            picked = None
+            while q:
+                cand = q.popleft()
+                url = (cand.get("link") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                dom = safe_domain(url)
+                if dom and domain_counts.get(dom, 0) >= domain_cap:
+                    overflow.append(cand)
+                    continue
+                picked = cand
+                break
+            if picked is None:
+                continue
+            selected.append(picked)
+            seen_urls.add((picked.get("link") or "").strip())
+            dom = safe_domain((picked.get("link") or "").strip())
+            if dom:
+                domain_counts[dom] += 1
+            progressed = True
+            if len(selected) >= max_items:
+                break
+
+    if len(selected) < max_items:
+        remainder: List[Dict[str, str]] = []
+        remainder.extend(overflow)
+        for sid in source_ids:
+            q = queues.get(sid)
+            if q:
+                remainder.extend(list(q))
+        rng.shuffle(remainder)
+        for cand in remainder:
+            url = (cand.get("link") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            selected.append(cand)
+            seen_urls.add(url)
+            if len(selected) >= max_items:
+                break
+
+    return selected
+
+
+def diversify_candidates_for_rubric(
+    rubric_id: str,
+    items_by_source: Dict[str, List[Dict[str, str]]],
+    seed: int,
+    max_items: int,
+) -> List[Dict[str, str]]:
+    rid = (rubric_id or "").strip().lower()
+    flattened: List[Dict[str, str]] = []
+    for bucket in items_by_source.values():
+        flattened.extend(bucket)
+
+    if rid != "tip_of_day":
+        rng = random.Random(seed)
+        rng.shuffle(flattened)
+        return flattened
+
+    diversified = _round_robin_candidates(
+        items_by_source=items_by_source,
+        seed=seed,
+        max_items=max(max_items, 60),
+        domain_cap=max(1, TIP_OF_DAY_DOMAIN_CAP),
+    )
+    return diversified or flattened
+
+
+def _describe_candidate_mix(items: List[Dict[str, str]], limit: int = 12) -> str:
+    domains = Counter()
+    sources = Counter()
+    for it in items[:limit]:
+        url = (it.get("link") or "").strip()
+        dom = safe_domain(url) or "(none)"
+        sid = (it.get("source_id") or "?")
+        domains[dom] += 1
+        sources[sid] += 1
+    domain_part = ", ".join(f"{k}:{v}" for k, v in domains.most_common(6)) or "n/a"
+    source_part = ", ".join(f"{k}:{v}" for k, v in sources.most_common(6)) or "n/a"
+    return f"sources[{source_part}] domains[{domain_part}]"
 
 
 # =========================
@@ -1910,28 +2035,32 @@ async def amain() -> None:
                     rubric_soft_skips += 1
                 return False
 
-            all_items: List[Dict[str, str]] = []
+            items_by_source: Dict[str, List[Dict[str, str]]] = {}
             for sid in rubric.get("sources", []) or []:
                 src = sources.get(sid)
                 if not src:
                     note("unknown_source_id", sid, severity="soft")
                     continue
                 try:
-                    all_items.extend(fetch_source(src))
+                    fetched = _attach_source_id(fetch_source(src), sid)
+                    items_by_source[sid] = fetched
                 except Exception as e:
                     note("source_fetch_failed", f"{sid}: {e}", severity="hard")
+
+            all_items = diversify_candidates_for_rubric(
+                rubric_id=rubric_id,
+                items_by_source=items_by_source,
+                seed=int(hashlib.sha1(f"{now.date()}|{rubric_id}|{aud}".encode("utf-8")).hexdigest()[:8], 16),
+                max_items=MAX_CANDIDATES_PER_RUBRIC,
+            )
 
             if not all_items:
                 note("no_candidates", rubric_id, severity="soft")
                 stop_events.append(f"no_candidates:{rubric_id}")
                 continue
 
-            seed = int(hashlib.sha1(f"{now.date()}|{rubric_id}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
-            rng = random.Random(seed)
-            rng.shuffle(all_items)
-
             print(
-                f"[RUBRIC] rubric={rubric_id} audience={aud} candidates_total={len(all_items)} max_scan={MAX_CANDIDATES_PER_RUBRIC}",
+                f"[RUBRIC] rubric={rubric_id} audience={aud} candidates_total={len(all_items)} max_scan={MAX_CANDIDATES_PER_RUBRIC} mix={_describe_candidate_mix(all_items)}",
                 flush=True,
             )
 

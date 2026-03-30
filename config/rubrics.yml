@@ -36,9 +36,6 @@ audiences:
           - "handyhandouts_parent_tips"
           - "fraser_parent_speech_tips"
           - "nationwidechildrens_speech_language"
-          - "naeyc_family_communication"
-          - "logorina_latest"
-          - "logomag_lib_latest"
         format: "tip_of_day"
         media: ["image_card"]
 

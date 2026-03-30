@@ -290,28 +290,28 @@ def _build_posted_zero_alert_plain(
     hard_top = sorted(hard_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
 
     parts: List[str] = [
-        "⚠️ <b>Publisher diagnostic: пост не опубликован (Posted: 0)</b>",
-        f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
-        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
-        f"STATE_SCOPE={_escape(state_scope)} | History DB={_escape(db_name)}",
-        f"Rubrics attempted: {_escape(', '.join(attempted_rubrics) or '—')}",
-        f"Soft skips: {_escape(str(soft_total))} | Hard skips: {_escape(str(hard_total))}",
+        "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
+        f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
+        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        f"STATE_SCOPE={state_scope} | History DB={db_name}",
+        f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
+        f"Soft skips: {soft_total} | Hard skips: {hard_total}",
     ]
 
     if hard_top:
-        parts.extend(["", "<b>Hard skip reasons:</b>"])
+        parts.extend(["", "Hard skip reasons:"])
         for reason, count in hard_top:
-            parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+            parts.append(f"• {reason}: {count}")
 
     if soft_top:
-        parts.extend(["", "<b>Soft skip reasons:</b>"])
+        parts.extend(["", "Soft skip reasons:"])
         for reason, count in soft_top:
-            parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+            parts.append(f"• {reason}: {count}")
 
     if samples:
-        parts.extend(["", "<b>Examples:</b>"])
+        parts.extend(["", "Examples:"])
         for sample in samples[:10]:
-            parts.append(_escape(sample))
+            parts.append(sample)
 
     return "\n".join(parts)
 

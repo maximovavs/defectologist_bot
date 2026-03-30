@@ -1,8 +1,8 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.3.1-safe
+Publisher (cron/GitHub Actions) v4.3.2-safe
 
-Основа: production v4.3.0
+Основа: production v4.3.1-safe
 Минимальные безопасные улучшения:
 1) Разделение test/prod history DB.
 2) Soft skip / hard skip: лимит рубрики тратится только на hard skips.
@@ -10,6 +10,8 @@ Publisher (cron/GitHub Actions) v4.3.1-safe
 4) Мягкий topic guard для age_norms.
 5) Более умный выбор H1 для обложки.
 6) Диагностический alert при Posted: 0.
+7) Новый мягкий post-fit guard для Monday / tip_of_day.
+8) Диагностика HTML fallback для Telegram send/caption.
 """
 
 import asyncio
@@ -50,7 +52,7 @@ CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.3.1-safe (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.3.2-safe (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -105,6 +107,7 @@ GAME_HEADING_RE = re.compile(r"^🎲\s*Как играть\s*:?\s*$", re.IGNOREC
 TRY_TODAY_HEADING_RE = re.compile(r"^🧩\s*Что попробовать сегодня\s*:?\s*$", re.IGNORECASE)
 BILINGUAL_HEADING_RE = re.compile(r"^🌍\s*Что помогает в двуязычной семье\s*:?\s*$", re.IGNORECASE)
 HOME_HEADING_RE = re.compile(r"^🏠\s*Что можно попробовать дома\s*:?\s*$", re.IGNORECASE)
+EXAMPLE_HEADING_RE = re.compile(r"^👄\s*Пример\s*:?\s*$", re.IGNORECASE)
 
 AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
 AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
@@ -140,6 +143,7 @@ SOFT_SKIP_REASONS = {
     "dup_semantic_post",
     "rubric_topic_mismatch_source",
     "rubric_topic_mismatch_post",
+    "tip_of_day_post_too_generic",
     "unknown_source_id",
     "llm_invalid_output",
 }
@@ -162,6 +166,28 @@ AGE_NORMS_BAD_MARKERS = [
 AGE_NORMS_GOOD_MARKERS = [
     "возраст", "норма", "ориентир", "milestone", "development",
     "communication", "речевое развитие", "что умеет", "что обычно",
+]
+
+TIP_OF_DAY_BAD_MARKERS = [
+    "совет логопеда дня",
+    "сегодня работаем над",
+    "сегодня поговорим",
+    "развитие речи",
+    "общее недоразвитие речи",
+    "онр",
+    "дизартр",
+    "алали",
+    "дисграф",
+    "дислекс",
+    "диагноз",
+    "коррекц",
+]
+
+TIP_OF_DAY_GOOD_MARKERS = [
+    "👶 возраст:",
+    "🧩 что попробовать сегодня",
+    "👄 пример",
+    "💡 что это дает",
 ]
 
 
@@ -310,6 +336,20 @@ def _is_probably_parse_mode_error(exc: Exception) -> bool:
     return "can't parse entities" in text or "unsupported start tag" in text or "bad request" in text
 
 
+def _safe_html_preview(text: str, limit: int = 400) -> str:
+    preview = (text or "").replace("\n", "\\n")
+    if len(preview) > limit:
+        preview = preview[:limit].rstrip() + "…"
+    return preview
+
+
+def _log_telegram_html_fallback(context: str, html_text: str, exc: Exception) -> None:
+    print(
+        f"[WARN] telegram_html_fallback context={context} err={exc} html_preview={_safe_html_preview(html_text)}",
+        flush=True,
+    )
+
+
 def _line_matches_structural(st: str) -> bool:
     return any(
         (
@@ -324,6 +364,7 @@ def _line_matches_structural(st: str) -> bool:
             TRY_TODAY_HEADING_RE.match(st),
             BILINGUAL_HEADING_RE.match(st),
             HOME_HEADING_RE.match(st),
+            EXAMPLE_HEADING_RE.match(st),
         )
     )
 
@@ -541,6 +582,23 @@ def _is_age_norms_content_fit(text: str) -> bool:
     if _contains_any_marker(blob, AGE_NORMS_BAD_MARKERS):
         return False
     return _contains_any_marker(blob, AGE_NORMS_GOOD_MARKERS)
+
+
+def _is_tip_of_day_content_fit(text: str) -> bool:
+    lines = [(x or "").strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
+    if not lines:
+        return False
+
+    title = lines[0].lower().replace("ё", "е")
+    if "совет логопеда дня" in title:
+        return False
+
+    blob = (text or "").lower().replace("ё", "е")
+    if _contains_any_marker(blob, TIP_OF_DAY_BAD_MARKERS):
+        return False
+    if not _contains_any_marker(blob, TIP_OF_DAY_GOOD_MARKERS):
+        return False
+    return True
 
 
 # =========================
@@ -858,6 +916,7 @@ def send_message(chat_id: str, html_text: str) -> None:
         except Exception as e:
             if not _is_probably_parse_mode_error(e):
                 raise
+            _log_telegram_html_fallback("send_message", html_text, e)
 
     fallback_text = _strip_html_tags_for_telegram(html_text)
     fallback_data: Dict[str, Any] = {
@@ -885,8 +944,11 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
             tg_request("sendPhoto", data=data, files={"photo": file_tuple})
             return
-        except Exception:
-            pass
+        except Exception as e:
+            if _is_probably_parse_mode_error(e):
+                _log_telegram_html_fallback("send_photo_caption", html_full_post, e)
+            else:
+                print(f"[WARN] send_photo_with_caption_failed err={e}", flush=True)
 
     tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
     send_message(chat_id, html_full_post)
@@ -1236,7 +1298,7 @@ async def amain() -> None:
                     continue
 
                 if not ok or not plain_raw:
-                    kind = note("llm_invalid_output", canon if ok is False else canon)
+                    kind = note("llm_invalid_output", canon)
                     print(f"[SKIP][{kind}] {llm_note} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
@@ -1257,6 +1319,17 @@ async def amain() -> None:
                 if rubric_id == "age_norms" and not _is_age_norms_content_fit(plain):
                     kind = note("rubric_topic_mismatch_post", canon)
                     print(f"[SKIP][{kind}] rubric_topic_mismatch_post url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+
+                if rubric_id == "tip_of_day" and not _is_tip_of_day_content_fit(plain):
+                    kind = note("tip_of_day_post_too_generic", canon)
+                    print(f"[SKIP][{kind}] tip_of_day_post_too_generic url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:

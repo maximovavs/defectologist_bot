@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.7.0
+Publisher (cron/GitHub Actions) v4.8.0
 
 Что изменено:
 1) LLM генерирует deep narrative summary вместо сухих тезисов.
@@ -35,6 +35,7 @@ Publisher (cron/GitHub Actions) v4.7.0
 14) Добавлен prefilter мусорных documents/* URL для age_norms.
 15) Добавлен rubric-guard для age_norms: whitelist/blacklist тем и reject при несоответствии рубрике.
 16) Усилен age consistency для age_norms: узкий возрастной диапазон, базовая проверка milestone-age fit, stronger titles.
+17) Добавлен site-specific extractor для logopedy.ru + boilerplate guard + защита от ложных semantic collisions score=1.000.
 """
 
 import asyncio
@@ -280,6 +281,9 @@ def classify_skip_severity(reason: str) -> str:
         "age_consistency_unparsed_age_line",
         "age_consistency_range_too_wide",
         "age_consistency_milestone_mismatch",
+        "evidence_boilerplate_extracted",
+        "evidence_low_information",
+        "extractor_collision_suspected",
     }
     if reason in soft_exact:
         return "soft"
@@ -1028,6 +1032,188 @@ def get_canonical(url: str) -> str:
         return url
 
 
+_GENERIC_EVIDENCE_STOP_MARKERS = [
+    "нравится статья",
+    "расскажи друзьям",
+    "поделиться",
+    "поделитесь",
+    "комментари",
+    "похожие материалы",
+    "похожие статьи",
+    "рекомендуем также",
+]
+
+_LOGOPEDY_BOILERPLATE_MARKERS = [
+    "логопеды россии",
+    "логопедические центры",
+    "полезные материалы",
+    "рабочие материалы",
+    "студентам",
+    "новые статьи на сайте",
+    "зонды постановочные",
+    "присоединяйтесь к нам",
+    "разместить материал",
+    "вход/выход",
+    "регистрация",
+    "логопедические центры",
+]
+
+
+def _is_logopedy_useful_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url or "")
+        return parsed.netloc.lower().endswith("logopedy.ru") and "/portal/logopeduseful/" in (parsed.path or "")
+    except Exception:
+        return False
+
+
+def _looks_like_boilerplate_line(text: str) -> bool:
+    low = (text or "").lower().replace("ё", "е")
+    return any(marker in low for marker in _LOGOPEDY_BOILERPLATE_MARKERS)
+
+
+def _select_article_root_from_h1(soup: BeautifulSoup, h1_tag: Any) -> Any:
+    node = getattr(h1_tag, "parent", None)
+    while node is not None and getattr(node, "name", None) not in (None, "body", "html"):
+        try:
+            blocks = node.find_all(["p", "li", "h2", "h3"])
+            text_len = len(norm_space(node.get_text(" ", strip=True)))
+            if len(blocks) >= 6 and text_len >= 900:
+                return node
+        except Exception:
+            pass
+        node = getattr(node, "parent", None)
+    return getattr(h1_tag, "parent", None) or soup.body or soup
+
+
+def _collect_text_chunks_from_root(root: Any, max_chars: int, stop_markers: List[str]) -> List[str]:
+    chunks: List[str] = []
+    total_len = 0
+    for el in root.find_all(["h2", "h3", "p", "li"]):
+        txt = norm_space(el.get_text(" ", strip=True))
+        if not txt:
+            continue
+        low = txt.lower().replace("ё", "е")
+        min_len = 20 if getattr(el, "name", "") in ("p", "li") else 8
+        if len(txt) < min_len:
+            continue
+        if any(bad in low for bad in ["cookie", "privacy", "политик", "подпис", "реклама", "скачать", "регистрация"]):
+            continue
+        if _looks_like_boilerplate_line(low):
+            continue
+        if any(marker in low for marker in stop_markers):
+            if len(chunks) >= 4:
+                break
+            continue
+        chunks.append(txt)
+        total_len += len(txt)
+        if total_len > max_chars * 1.45:
+            break
+    return chunks
+
+
+def _dedupe_preserve_order(lines: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for line in lines:
+        key = line.lower().replace("ё", "е")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out
+
+
+def _extract_logopedy_useful_evidence(url: str, soup: BeautifulSoup, max_chars: int) -> str:
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form"]):
+        tag.decompose()
+
+    h1 = soup.find("h1")
+    if not h1:
+        return ""
+
+    title = norm_space(h1.get_text(" ", strip=True))
+    root = _select_article_root_from_h1(soup, h1)
+    chunks: List[str] = []
+    if title:
+        chunks.append(title)
+
+    chunks.extend(_collect_text_chunks_from_root(root, max_chars=max_chars, stop_markers=_GENERIC_EVIDENCE_STOP_MARKERS))
+    uniq = _dedupe_preserve_order(chunks)
+    out = "\n".join(uniq).strip()
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit("\n", 1)[0].strip()
+    return out
+
+
+def _extract_generic_evidence(url: str, soup: BeautifulSoup, max_chars: int) -> str:
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    h1 = soup.find("h1")
+    root = None
+    title = ""
+    if h1:
+        title = norm_space(h1.get_text(" ", strip=True))
+        root = _select_article_root_from_h1(soup, h1)
+
+    if root is None:
+        root = (
+            soup.select_one("div#dle-content")
+            or soup.find("article")
+            or soup.find("main")
+            or soup.body
+            or soup
+        )
+
+    chunks: List[str] = []
+    if title:
+        chunks.append(title)
+    chunks.extend(_collect_text_chunks_from_root(root, max_chars=max_chars, stop_markers=_GENERIC_EVIDENCE_STOP_MARKERS))
+
+    uniq = _dedupe_preserve_order(chunks)
+    out = "\n".join(uniq).strip()
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit("\n", 1)[0].strip()
+    return out
+
+
+def assess_evidence_quality(url: str, evidence_text: str) -> Optional[str]:
+    text = (evidence_text or "").strip()
+    if not text:
+        return None
+
+    low = text.lower().replace("ё", "е")
+    lines = [norm_space(x) for x in text.splitlines() if norm_space(x)]
+    tokens = re.findall(r"[a-zа-я0-9]+", low, flags=re.IGNORECASE)
+    unique_ratio = (len(set(tokens)) / len(tokens)) if tokens else 0.0
+
+    if _is_logopedy_useful_url(url):
+        boilerplate_hits = sum(1 for marker in _LOGOPEDY_BOILERPLATE_MARKERS if marker in low)
+        first_lines_hits = sum(1 for line in lines[:12] if _looks_like_boilerplate_line(line))
+        if boilerplate_hits >= 2 or first_lines_hits >= 2:
+            return "evidence_boilerplate_extracted"
+        if len(tokens) < 120 and unique_ratio < 0.38:
+            return "evidence_low_information"
+        if len(lines) < 5 and len(tokens) < 160:
+            return "evidence_low_information"
+
+    return None
+
+
+def is_probable_false_semantic_collision(candidate_url: str, evidence_text: str, hit: Any) -> bool:
+    if float(getattr(hit, "similarity", 0.0) or 0.0) < 0.999:
+        return False
+    cand_dom = safe_domain(candidate_url)
+    hit_dom = safe_domain(getattr(hit, "canonical_url", ""))
+    if not cand_dom or cand_dom != hit_dom:
+        return False
+    if _is_logopedy_useful_url(candidate_url):
+        return True
+    quality_reason = assess_evidence_quality(candidate_url, evidence_text)
+    return quality_reason in {"evidence_boilerplate_extracted", "evidence_low_information"}
+
+
 def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     r = requests.get(url, headers=HEADERS, timeout=35, verify=_verify_for_url(url))
     r.raise_for_status()
@@ -1037,46 +1223,9 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
         return ""
 
     soup = BeautifulSoup(r.text, "lxml")
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-
-    root = (
-        soup.select_one("div#dle-content")
-        or soup.find("article")
-        or soup.find("main")
-        or soup.body
-        or soup
-    )
-
-    chunks: List[str] = []
-    h1 = soup.find("h1")
-    if h1:
-        chunks.append(norm_space(h1.get_text(" ", strip=True)))
-
-    for el in root.select("h2, h3, p, li"):
-        txt = norm_space(el.get_text(" ", strip=True))
-        if len(txt) < 20:
-            continue
-        low = txt.lower()
-        if any(bad in low for bad in ["cookie", "privacy", "политик", "подпис", "реклама", "скачать", "регистрация"]):
-            continue
-        chunks.append(txt)
-        if sum(len(x) for x in chunks) > max_chars * 1.35:
-            break
-
-    seen = set()
-    uniq: List[str] = []
-    for c in chunks:
-        k = c.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(c)
-
-    out = "\n".join(uniq).strip()
-    if len(out) > max_chars:
-        out = out[:max_chars].rsplit("\n", 1)[0].strip()
-    return out
+    if _is_logopedy_useful_url(url):
+        return _extract_logopedy_useful_evidence(url, soup, max_chars=max_chars)
+    return _extract_generic_evidence(url, soup, max_chars=max_chars)
 
 
 # =========================
@@ -1852,6 +2001,13 @@ async def amain() -> None:
                     print(f"[SKIP][soft] no_evidence_short url={canon}", flush=True)
                     continue
 
+                evidence_quality_reason = assess_evidence_quality(canon, evidence)
+                if evidence_quality_reason:
+                    if record_rubric_skip(evidence_quality_reason, canon, severity="soft"):
+                        break
+                    print(f"[SKIP][soft] {evidence_quality_reason} url={canon}", flush=True)
+                    continue
+
                 source_fit_reason = validate_rubric_source_fit(
                     rubric_id=rubric_id,
                     candidate_title=cand.get("title", ""),
@@ -1885,6 +2041,15 @@ async def amain() -> None:
                     compare="evidence",
                 )
                 if sem_source_hit:
+                    if is_probable_false_semantic_collision(canon, evidence, sem_source_hit):
+                        if record_rubric_skip("extractor_collision_suspected", canon, severity="soft"):
+                            break
+                        print(
+                            f"[SKIP][soft] extractor_collision_suspected url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
+                            flush=True,
+                        )
+                        continue
+
                     if record_rubric_skip("dup_semantic_source", canon, severity="soft"):
                         break
                     print(
@@ -1899,7 +2064,7 @@ async def amain() -> None:
                             limit=120,
                             compare="evidence",
                         )
-                        if recent_hit:
+                        if recent_hit and not is_probable_false_semantic_collision(canon, evidence, recent_hit):
                             semantic_alerts_for_rubric.append({
                                 "candidate_url": canon,
                                 "matched_url": recent_hit.canonical_url,

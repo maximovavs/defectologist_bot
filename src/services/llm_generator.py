@@ -257,6 +257,19 @@ MONDAY_GENERIC_LEAD_FRAGMENTS = [
     "развитие речи",
 ]
 
+MONDAY_GENERIC_BENEFIT_FRAGMENTS = [
+    "развивает речь",
+    "развивает навыки диалога",
+    "развивает диалог",
+    "помогает общению",
+    "улучшает общение",
+    "улучшает речь",
+    "дает возможность ребенку развить",
+    "дает возможность развить",
+]
+
+MONDAY_MIN_TOTAL_CHARS = int(os.getenv("MONDAY_MIN_TOTAL_CHARS", "170"))
+
 SUNDAY_PATHOLOGY_FRAGMENTS = [
     "задерж",
     "нарушен",
@@ -402,7 +415,15 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     out = (text or "").strip()
     if not out:
         return False, "empty"
-    if len(out) < 260:
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    min_total_chars = 260
+    if dk == "MO" or rf == "tip_of_day":
+        min_total_chars = MONDAY_MIN_TOTAL_CHARS
+
+    if len(out) < min_total_chars:
         return False, "too_short"
     if _looks_like_structural_first_line(out):
         return False, "missing_h1"
@@ -413,9 +434,6 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if _has_template_leak(out):
         return False, "template_leak"
-
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
 
     if dk == "MO" or rf == "tip_of_day":
         ok, reason = _validate_tip_of_day_output(out)

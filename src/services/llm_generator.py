@@ -84,25 +84,62 @@ def _find_line(lines: List[str], prefix: str) -> str:
     return ""
 
 
-def _line_after_prefix(lines: List[str], prefix: str) -> str:
-    probe = (prefix or "").strip().lower()
-    for idx, line in enumerate(lines):
-        st = line.strip()
-        if st.lower().startswith(probe):
-            remainder = st.split(":", 1)[1].strip() if ":" in st else ""
-            if remainder:
-                return remainder
-            for nxt in lines[idx + 1:]:
-                ns = nxt.strip()
-                if not ns:
-                    continue
-                if ns.startswith("#"):
-                    continue
-                if _looks_like_structural_first_line(ns):
-                    return ""
-                return ns
-            return ""
+_AGE_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bbirth\s*(?:to|-)\s*3\s*years?\b", re.IGNORECASE), "0–3 года"),
+    (re.compile(r"\b0\s*(?:to|-|–)\s*3\s*years?\b", re.IGNORECASE), "0–3 года"),
+    (re.compile(r"\b12\s*(?:to|-|–)\s*24\s*months?\b", re.IGNORECASE), "1–2 года"),
+    (re.compile(r"\b18\s*(?:to|-|–)\s*24\s*months?\b", re.IGNORECASE), "1,5–2 года"),
+    (re.compile(r"\b24\s*(?:to|-|–)\s*36\s*months?\b", re.IGNORECASE), "2–3 года"),
+    (re.compile(r"\b2\s*(?:to|-|–)\s*3\s*years?\b", re.IGNORECASE), "2–3 года"),
+    (re.compile(r"\b3\s*(?:to|-|–)\s*5\s*years?\b", re.IGNORECASE), "3–5 лет"),
+    (re.compile(r"\b4\s*(?:to|-|–)\s*5\s*years?\b", re.IGNORECASE), "4–5 лет"),
+    (re.compile(r"\b5\s*(?:to|-|–)\s*7\s*years?\b", re.IGNORECASE), "5–7 лет"),
+]
+_AGE_HINTS: List[Tuple[str, str]] = [
+    ("birth to 3 years", "0–3 года"),
+    ("birth-3 years", "0–3 года"),
+    ("toddlers", "1–3 года"),
+    ("toddler", "1–3 года"),
+    ("preschool", "3–5 лет"),
+    ("preschoolers", "3–5 лет"),
+    ("baby", "0–1 год"),
+    ("infant", "0–1 год"),
+]
+
+
+def _infer_age_range_from_text(*chunks: str) -> str:
+    blob = "\n".join(x for x in chunks if x).strip()
+    if not blob:
+        return ""
+    for pattern, age in _AGE_PATTERNS:
+        if pattern.search(blob):
+            return age
+    lowered = blob.lower()
+    for hint, age in _AGE_HINTS:
+        if hint in lowered:
+            return age
     return ""
+
+
+def _inject_age_line_if_missing(text: str, inferred_age: str) -> str:
+    if not text.strip():
+        return text
+    if _find_line(_extract_nonempty_lines(text), "👶 Возраст:"):
+        return text
+    age = norm_space(inferred_age)
+    if not age:
+        return text
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    out: List[str] = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if not inserted and line.strip():
+            out.append("")
+            out.append(f"👶 Возраст: {age}")
+            out.append("")
+            inserted = True
+    return "\n".join(out).strip() if inserted else text
 
 
 def _first_narrative_line_after_title(lines: List[str]) -> str:
@@ -220,33 +257,6 @@ MONDAY_GENERIC_LEAD_FRAGMENTS = [
     "развитие речи",
 ]
 
-MONDAY_GENERIC_BENEFIT_FRAGMENTS = [
-    "развивает речь",
-    "улучшает речь",
-    "помогает развитию речи",
-    "развивает навыки диалога",
-    "помогает общению",
-    "развивает коммуникацию",
-    "развивает речевые навыки",
-    "способствует развитию речи",
-    "улучшает коммуникацию",
-]
-
-MONDAY_PATHOLOGY_FRAGMENTS = [
-    "онр",
-    "общее недоразвитие речи",
-    "дизартр",
-    "алали",
-    "дисграф",
-    "дислекс",
-    "заикан",
-    "афаз",
-    "коррекц",
-    "диагноз",
-    "патолог",
-    "дефект",
-]
-
 SUNDAY_PATHOLOGY_FRAGMENTS = [
     "задерж",
     "нарушен",
@@ -339,11 +349,10 @@ def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     if not _find_line(lines, "🧩 Что попробовать сегодня"):
         return False, "monday_no_try_block"
 
-    example_line = _line_after_prefix(lines, "👄 Пример")
-    if not example_line:
+    if not _find_line(lines, "👄 Пример"):
         return False, "monday_no_example_block"
 
-    benefit_line = _line_after_prefix(lines, "💡 Что это дает")
+    benefit_line = _find_line(lines, "💡 Что это дает:")
     if not benefit_line:
         return False, "monday_no_benefit_block"
 
@@ -389,55 +398,6 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
-def _validate_rubric_specific_output(
-    text: str,
-    day_key: str,
-    rubric_format: str,
-    audience: str,
-) -> Tuple[bool, str]:
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
-    aud = (audience or "").strip().lower()
-
-    if aud == "parents" and (dk == "MO" or rf == "tip_of_day"):
-        return _validate_tip_of_day_output(text)
-
-    if aud == "parents" and (dk == "SU" or rf == "age_norms"):
-        return _validate_age_norms_output(text)
-
-    return True, "ok"
-
-
-def _build_rubric_repair_appendix(
-    day_key: str,
-    rubric_format: str,
-    audience: str,
-    reason: str,
-) -> str:
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
-    aud = (audience or "").strip().lower()
-
-    if aud == "parents" and (dk == "MO" or rf == "tip_of_day"):
-        return (
-            " Для Monday обязательно: первая строка — один прикладной совет, а не название рубрики и не обзор темы."
-            " После строки возраста дай одну живую фразу про один домашний шаг на сегодня."
-            " Обязательно сохрани блоки «🧩 Что попробовать сегодня», «👄 Пример» и «💡 Что это дает»."
-            " Пример должен буквально реализовывать тот же прием, что и в заголовке."
-            " В пользе назови один узкий наблюдаемый навык, а не общую фразу про развитие речи."
-            " Не используй клиническую, диагностическую и коррекционную лексику."
-        )
-
-    if aud == "parents" and (dk == "SU" or rf == "age_norms"):
-        return (
-            " Для Sunday обязательно: только возрастные ориентиры и milestones."
-            " Сохрани спокойный родительский тон без патологии, диагностики и коррекции."
-            " Обязательно оставь строку «Ориентиры:» и фразу «Каждый ребенок развивается индивидуально»."
-        )
-
-    return ""
-
-
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -453,6 +413,19 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if _has_template_leak(out):
         return False, "template_leak"
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    if dk == "MO" or rf == "tip_of_day":
+        ok, reason = _validate_tip_of_day_output(out)
+        if not ok:
+            return False, reason
+
+    if dk == "SU" or rf == "age_norms":
+        ok, reason = _validate_age_norms_output(out)
+        if not ok:
+            return False, reason
 
     return True, "ok"
 
@@ -695,7 +668,10 @@ def build_generation_prompt(
             "Опиши один конкретный прием в 2–4 предложениях.\n"
             "Обязательно добавь, что говорит взрослый, что делает ребенок, какие слова или короткие реплики можно использовать.\n"
             "Если тема про двуязычную семью — сведи ее к одному домашнему приему, а не к обзору билингвизма.\n\n"
-            "💡 Что это дает: одним предложением назови один конкретный навык.\n\n"
+            "👄 Пример:\n"
+            "Дай одну-две короткие реплики взрослого и возможный простой ответ ребенка. "
+            "Пример обязан буквально показывать тот же прием, который обещан в заголовке.\n\n"
+            "💡 Что это дает: одним предложением назови один конкретный маленький навык, который родитель сможет заметить.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
@@ -1026,11 +1002,15 @@ async def generate_post_plain_from_evidence_async(
     if regeneration_hint:
         prompt += f"\n\nДополнительное условие для перегенерации: {regeneration_hint}"
 
+    inferred_age = _infer_age_range_from_text(ev, source_url, source_domain)
+
     def postprocess(s: str) -> str:
         s = (s or "").strip().replace("\r\n", "\n")
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
+        if aud == "parents" and ((dk == "MO") or (rf == "tip_of_day") or (dk == "SU") or (rf == "age_norms")):
+            s = _inject_age_line_if_missing(s, inferred_age)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
@@ -1042,10 +1022,7 @@ async def generate_post_plain_from_evidence_async(
     def validate(out: str) -> Tuple[bool, str]:
         if out.strip() == "НЕТ_ДАННЫХ":
             return False, "no_data_in_source"
-        ok_common, reason_common = _validate_output(out, day_key=dk, rubric_format=rf)
-        if not ok_common:
-            return False, reason_common
-        return _validate_rubric_specific_output(out, day_key=dk, rubric_format=rf, audience=aud)
+        return _validate_output(out, day_key=dk, rubric_format=rf)
 
     if prov == "none":
         return "", False, "provider:none"
@@ -1073,12 +1050,28 @@ async def generate_post_plain_from_evidence_async(
                 + "Обязательно начни пост с обычного заголовка первой строкой, а не со строки Возраст/Миф/Вопрос/Источник."
             )
 
-            repair_prompt += _build_rubric_repair_appendix(
-                day_key=dk,
-                rubric_format=rf,
-                audience=aud,
-                reason=reason,
-            )
+            if dk == "MO" or rf == "tip_of_day":
+                monday_extra = ""
+                if "monday_no_age_line" in reason:
+                    monday_extra = (
+                        " Сразу после заголовка обязательно добавь отдельную строку вида «👶 Возраст: 2–3 года». "
+                        "Если возраст явно читается из источника, просто перенеси его в эту строку."
+                    )
+                repair_prompt += (
+                    "Для Monday обязательно: первая строка — один прикладной совет, "
+                    "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
+                    "обязательно сохрани блоки «🧩 Что попробовать сегодня», «👄 Пример» и «💡 Что это дает», "
+                    "пример должен буквально реализовывать тот же прием, что и в заголовке, "
+                    "никаких обзоров темы и общих формулировок."
+                    + monday_extra
+                )
+
+            if dk == "SU" or rf == "age_norms":
+                repair_prompt += (
+                    "Для Sunday обязательно: только возрастные ориентиры и milestones, "
+                    "без патологической, диагностической и коррекционной лексики, "
+                    "с фразой «Каждый ребенок развивается индивидуально»."
+                )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key, temperature=min(1.0, temperature + 0.15)))
             ok2, reason2 = validate(out2)

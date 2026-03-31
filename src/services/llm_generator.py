@@ -82,6 +82,78 @@ def _find_line(lines: List[str], prefix: str) -> str:
     return ""
 
 
+
+
+_AGE_PATTERNS = [
+    (re.compile(r"\b(\d{1,2})\s*[–-]\s*(\d{1,2})\s*months?\b", re.IGNORECASE), "months"),
+    (re.compile(r"\b(\d{1,2})\s*[–-]\s*(\d{1,2})\s*years?\b", re.IGNORECASE), "years"),
+    (re.compile(r"\bbirth\s*(?:to|-)\s*(\d{1,2})\s*years?\b", re.IGNORECASE), "birth_years"),
+]
+
+_AGE_HINTS = [
+    ("birth to 3 years", "0–3 года"),
+    ("birth-3 years", "0–3 года"),
+    ("12-24 months", "12–24 месяца"),
+    ("12–24 months", "12–24 месяца"),
+    ("24-36 months", "24–36 месяцев"),
+    ("24–36 months", "24–36 месяцев"),
+    ("6-12 months", "6–12 месяцев"),
+    ("6–12 months", "6–12 месяцев"),
+    ("18-24 months", "18–24 месяца"),
+    ("18–24 months", "18–24 месяца"),
+    ("2-3 years", "2–3 года"),
+    ("2–3 years", "2–3 года"),
+    ("3-4 years", "3–4 года"),
+    ("3–4 years", "3–4 года"),
+    ("toddler", "1–3 года"),
+    ("toddlers", "1–3 года"),
+    ("preschool", "3–5 лет"),
+    ("preschoolers", "3–5 лет"),
+]
+
+
+def _infer_age_range_from_text(*chunks: str) -> str:
+    blob = "\n".join(x for x in chunks if x).strip()
+    if not blob:
+        return ""
+    for pattern, kind in _AGE_PATTERNS:
+        m = pattern.search(blob)
+        if not m:
+            continue
+        if kind == "months":
+            return f"{m.group(1)}–{m.group(2)} месяцев"
+        if kind == "years":
+            return f"{m.group(1)}–{m.group(2)} года"
+        if kind == "birth_years":
+            return f"0–{m.group(1)} года"
+    lowered = blob.lower()
+    for hint, age in _AGE_HINTS:
+        if hint in lowered:
+            return age
+    return ""
+
+
+def _inject_age_line_if_missing(text: str, inferred_age: str) -> str:
+    if not text.strip():
+        return text
+    if _find_line(_extract_nonempty_lines(text), "👶 Возраст:"):
+        return text
+    age = norm_space(inferred_age)
+    if not age:
+        return text
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    out: List[str] = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if not inserted and line.strip():
+            out.append("")
+            out.append(f"👶 Возраст: {age}")
+            out.append("")
+            inserted = True
+    return "\n".join(out).strip() if inserted else text
+
+
 def _first_narrative_line_after_title(lines: List[str]) -> str:
     skipped_prefixes = (
         "👶 возраст:",
@@ -199,6 +271,37 @@ SUNDAY_GENERIC_TITLE_FRAGMENTS = [
     "речь ребенка",
 ]
 
+TUESDAY_BAD_H1_MARKERS = [
+    "играем и говорим",
+    "играем со звуками и словами",
+    "игры для речи",
+    "игры для развития речи",
+    "развиваем речь",
+    "учим слова",
+    "как помочь ребенку говорить",
+]
+
+TUESDAY_GENERIC_BENEFIT_FRAGMENTS = [
+    "развивает речь",
+    "улучшает речь",
+    "улучшает понимание",
+    "расширяет словарный запас",
+    "развивает коммуникацию",
+    "развивает навыки общения",
+]
+
+TUESDAY_TOO_WIDE_AGE_HINTS = [
+    "6–36",
+    "6-36",
+    "1–5",
+    "1-5",
+    "дошкольный возраст",
+]
+
+TUESDAY_PLAY_HEADING_RE = re.compile(r"^🎲\s*Как играть\s*:?\s*$", re.IGNORECASE)
+TUESDAY_BENEFIT_HEADING_RE = re.compile(r"^💡\s*Что это дает\s*:?\s*$", re.IGNORECASE)
+
+
 
 def _normalize_scan_text(text: str) -> str:
     return norm_space(text).replace("ё", "е").lower()
@@ -231,6 +334,131 @@ def _contains_any_fragment(text: str, fragments: List[str]) -> Optional[str]:
     return None
 
 
+
+def _find_heading_index(lines: List[str], pattern: re.Pattern[str]) -> int:
+    for idx, line in enumerate(lines):
+        if pattern.match(line.strip()):
+            return idx
+    return -1
+
+
+def _looks_like_structural_line(line: str) -> bool:
+    st = line.strip().lower()
+    return st.startswith((
+        "👶 возраст:", "👩‍⚕️ аудитория:", "🎲 как играть", "🧩 что попробовать сегодня",
+        "🌍 что помогает в двуязычной семье", "🏠 что можно попробовать дома",
+        "🏠 что можно понаблюдать дома", "💡 что это дает", "🔴 миф:", "❓ вопрос недели:",
+        "ориентиры:", "источник:", "🔗 ", "ℹ️ "
+    ))
+
+
+def _extract_section_lines(text: str, heading_pattern: re.Pattern[str]) -> List[str]:
+    lines = _extract_nonempty_lines(text)
+    start_idx = _find_heading_index(lines, heading_pattern)
+    if start_idx < 0:
+        return []
+    out: List[str] = []
+    for line in lines[start_idx + 1:]:
+        st = line.strip()
+        if not st:
+            continue
+        if _looks_like_structural_line(st):
+            break
+        out.append(st)
+    return out
+
+
+def _extract_age_value(text: str) -> str:
+    line = _find_line(_extract_nonempty_lines(text), "👶 Возраст:")
+    if not line:
+        return ""
+    return norm_space(line.split(":", 1)[1] if ":" in line else "")
+
+
+def _is_narrow_tuesday_age(age_value: str) -> bool:
+    age = _normalize_scan_text(age_value)
+    if not age:
+        return False
+    if any(h in age for h in TUESDAY_TOO_WIDE_AGE_HINTS):
+        return False
+    nums = [int(x) for x in re.findall(r"\d+", age)]
+    if "месяц" in age and len(nums) >= 2:
+        return (max(nums) - min(nums)) <= 18
+    if ("год" in age or "лет" in age) and len(nums) >= 2:
+        return (max(nums) - min(nums)) <= 2
+    return any(tok in age for tok in ["год", "лет", "месяц"])
+
+
+def _looks_like_generic_tuesday_h1(h1: str) -> bool:
+    h = norm_space(h1)
+    if not h:
+        return True
+    if len(h) > 90:
+        return True
+    return _contains_any_fragment(h, TUESDAY_BAD_H1_MARKERS) is not None
+
+
+def _has_too_many_examples(text: str) -> bool:
+    blob = _normalize_scan_text(text)
+    if blob.count("например") > 2:
+        return True
+    if text.count('"') >= 8:
+        return True
+    return False
+
+
+def _validate_tuesday_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "tuesday_empty"
+
+    title = lines[0]
+    if _looks_like_generic_tuesday_h1(title):
+        return False, "tuesday_generic_h1"
+
+    if not _find_line(lines, "👶 Возраст:"):
+        return False, "tuesday_missing_age"
+    if not _is_narrow_tuesday_age(_extract_age_value(text)):
+        return False, "tuesday_wide_age"
+
+    play_idx = _find_heading_index(lines, TUESDAY_PLAY_HEADING_RE)
+    if play_idx < 0:
+        return False, "tuesday_missing_play_block"
+
+    intro_lines: List[str] = []
+    for line in lines[1:play_idx]:
+        st = line.strip()
+        if not st:
+            continue
+        if st.lower().startswith("👶 возраст:"):
+            continue
+        if _looks_like_structural_line(st):
+            continue
+        intro_lines.append(st)
+    if not intro_lines:
+        return False, "tuesday_missing_intro"
+
+    play_lines = _extract_section_lines(text, TUESDAY_PLAY_HEADING_RE)
+    if len(play_lines) < 1:
+        return False, "tuesday_empty_play_block"
+    if len(play_lines) > 5:
+        return False, "tuesday_multi_technique"
+    if _has_too_many_examples(" ".join(play_lines)):
+        return False, "tuesday_too_many_examples"
+
+    benefit_line = _find_line(lines, "💡 Что это дает:")
+    benefit_lines = _extract_section_lines(text, TUESDAY_BENEFIT_HEADING_RE)
+    benefit_text = " ".join(benefit_lines).strip()
+    if not benefit_text and benefit_line:
+        benefit_text = benefit_line.split(":", 1)[1].strip() if ":" in benefit_line else benefit_line
+    if not benefit_text:
+        return False, "tuesday_missing_benefit"
+    if _contains_any_fragment(benefit_text, TUESDAY_GENERIC_BENEFIT_FRAGMENTS):
+        return False, "tuesday_generic_benefit"
+
+    return True, "ok"
+
+
 def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -260,75 +488,6 @@ def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
 
     if len(lead) < 24:
         return False, "monday_lead_too_short"
-
-    return True, "ok"
-
-
-def _infer_tuesday_age_from_context(evidence_text: str, source_url: str) -> str:
-    blob = f"{source_url}\n{evidence_text or ''}"
-    blob_norm = blob.replace("–", "-")
-
-    if re.search(r"birth[- ]to[- ]3[- ]years|birth to 3 years", blob_norm, flags=re.IGNORECASE):
-        return "12–36 месяцев"
-
-    m = re.search(r"(\d{1,2})\s*[-to]{1,3}\s*(\d{1,2})\s*months?", blob_norm, flags=re.IGNORECASE)
-    if m:
-        a, b = int(m.group(1)), int(m.group(2))
-        if a < b:
-            return f"{a}–{b} месяцев"
-
-    m = re.search(r"(\d{1,2})\s*[-to]{1,3}\s*(\d{1,2})\s*month-olds?", blob_norm, flags=re.IGNORECASE)
-    if m:
-        a, b = int(m.group(1)), int(m.group(2))
-        if a < b:
-            return f"{a}–{b} месяцев"
-
-    m = re.search(r"(\d{1,2})\s*[-to]{1,3}\s*(\d{1,2})\s*years?", blob_norm, flags=re.IGNORECASE)
-    if m:
-        a, b = int(m.group(1)), int(m.group(2))
-        if a < b:
-            return f"{a}–{b} года"
-
-    return ""
-
-
-def _ensure_tuesday_age_line(text: str, evidence_text: str, source_url: str) -> str:
-    lines = (text or "").replace("\r\n", "\n").split("\n")
-    stripped = [x.strip() for x in lines if x.strip()]
-    if any(line.lower().startswith("👶 возраст:") for line in stripped):
-        return text
-
-    inferred = _infer_tuesday_age_from_context(evidence_text, source_url)
-    if not inferred or not stripped:
-        return text
-
-    out=[]
-    inserted=False
-    for idx, line in enumerate(lines):
-        out.append(line)
-        if not inserted and line.strip():
-            out.append(f"👶 Возраст: {inferred}")
-            out.append("")
-            inserted=True
-    return "\n".join(out).strip()
-
-
-def _looks_like_generic_tuesday_h1(title: str) -> bool:
-    return _contains_any_fragment(title, TUESDAY_BAD_H1_MARKERS) is not None
-
-
-def _validate_tuesday_output(text: str) -> Tuple[bool, str]:
-    lines = _extract_nonempty_lines(text)
-    if not lines:
-        return False, "tuesday_empty"
-
-    title = lines[0]
-    if _looks_like_generic_tuesday_h1(title):
-        return False, "tuesday_generic_h1"
-
-    age_line = _find_line(lines, "👶 Возраст:")
-    if not age_line:
-        return False, "tuesday_missing_age"
 
     return True, "ok"
 
@@ -368,280 +527,35 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     out = (text or "").strip()
     if not out:
         return False, "empty"
-    if len(out) < 260:
-        return False, "too_short"
-
-    banned = _contains_banned(out)
-    if banned:
-        return False, f"banned_phrase:{banned}"
-
-    if _has_template_leak(out):
-        return False, "template_leak"
 
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
-
-    if dk == "MO" or rf == "tip_of_day":
-        ok, reason = _validate_tip_of_day_output(out)
-        if not ok:
-            return False, reason
-
-    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        ok, reason = _validate_tuesday_output(out)
-        if not ok:
-            return False, reason
-
-    if dk == "SU" or rf == "age_norms":
-        ok, reason = _validate_age_norms_output(out)
-        if not ok:
-            return False, reason
-
-    return True, "ok"
-
-
-# -----------------------
-# Provider config / throttle / backoff
-# -----------------------
-
-LLM_CALL_DELAY_SEC = float(os.getenv("LLM_CALL_DELAY_SEC", "2.0"))
-LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
-LLM_BACKOFF_MIN = float(os.getenv("LLM_BACKOFF_MIN", "15"))
-LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))
-
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-
-_throttle_lock = asyncio.Lock()
-_next_allowed_ts = 0.0
-_gemini_region_blocked = False
-
-
-async def _throttle() -> None:
-    global _next_allowed_ts
-    async with _throttle_lock:
-        now = time.time()
-        if now < _next_allowed_ts:
-            await asyncio.sleep(_next_allowed_ts - now)
-        _next_allowed_ts = time.time() + LLM_CALL_DELAY_SEC
-
-
-def _is_quota_error(status: int, text: str) -> bool:
-    t = (text or "").lower()
-    return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
-
-
-def _is_gemini_region_block_text(text: str) -> bool:
-    t = (text or "").lower()
-    return "user location is not supported" in t or "location is not supported" in t
-
-
-async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: int = 70) -> requests.Response:
-    def _do() -> requests.Response:
-        return requests.post(url, headers=headers, json=payload, timeout=timeout)
-
-    return await asyncio.to_thread(_do)
-
-
-async def groq_chat(prompt: str, api_key: str) -> str:
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
-
-    last_err = ""
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
-        await _throttle()
-        resp = await _post_json(url, headers, payload, timeout=80)
-
-        if resp.status_code == 200:
-            j = resp.json()
-            return (j["choices"][0]["message"]["content"] or "").strip()
-
-        txt = resp.text or ""
-        last_err = f"{resp.status_code}: {txt[:240]}"
-        if _is_quota_error(resp.status_code, txt):
-            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
-            wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-            wait = wait * random.uniform(0.85, 1.15)
-            await asyncio.sleep(wait)
-            continue
-
-        resp.raise_for_status()
-
-    raise RuntimeError(f"groq_failed_after_retries:{last_err}")
-
-
-async def gemini_generate(prompt: str, api_key: str) -> str:
-    global _gemini_region_blocked
-    if _gemini_region_blocked:
-        raise RuntimeError("gemini_disabled_region")
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
-    await _throttle()
-    resp = await _post_json(url, headers, payload, timeout=80)
-
-    if resp.status_code == 200:
-        j = resp.json()
-        return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
-
-    txt = resp.text or ""
-    if _is_gemini_region_block_text(txt):
-        _gemini_region_blocked = True
-        raise RuntimeError("gemini_blocked_region")
-
-    if resp.status_code == 404:
-        raise RuntimeError(f"gemini_model_not_found:{GEMINI_MODEL}")
-
-    resp.raise_for_status()
-    raise RuntimeError(f"gemini_failed:{resp.status_code}")
-
-
-# -----------------------
-# Prompt templates
-# -----------------------
-
-def _common_rules(max_chars: int) -> str:
-    return (
-        "Ты — практикующий Логопед-дефектолог и сильный Telegram-редактор.\n"
-        "Пиши по-русски.\n"
-        f"Весь пост не должен превышать {max_chars} символов.\n"
-        "Опирайся только на EVIDENCE ниже.\n"
-        "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
-        "Опирайся преимущественно на перефразирование, не используй прямые цитаты из текста.\n"
-        "Нельзя копировать длинные фразы из статьи.\n"
-        "Нельзя печатать служебные слова EVIDENCE, ШАБЛОН и placeholders.\n"
-        "Категорически запрещено использовать канцелярские фразы вроде: "
-        "«развитие речи очень важно», «родители часто сталкиваются с проблемой», "
-        "«создайте благоприятную среду», «это важный аспект общего развития».\n"
-        "Никаких заголовков «Проблема», «Решение», «Результат», «Как сделать дома».\n"
-        "Твоя задача — вытащить практическую суть: игру, упражнение, прием, последовательность действий, примеры слов, формулировки для родителя.\n"
-        "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
-        "Не ставь диагнозы и не назначай лечение.\n"
-        "Не используй Markdown и кодовые блоки.\n"
-        "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
-        "Используй формат вроде: #билингвизм #запуск_речи\n"
-        "Никогда не пиши больше двух тематических хештегов.\n"
-    )
-
-
-def _ensure_source_and_link(
-    text: str,
-    source_domain: str,
-    source_url: str,
-) -> str:
-    lines = [x.rstrip() for x in (text or "").replace("\r\n", "\n").split("\n")]
-    while lines and not lines[-1].strip():
-        lines.pop()
-
-    has_source_line = any(re.match(r"^Источник:\s*\S.+$", x.strip(), re.IGNORECASE) for x in lines)
-    has_link_line = any(x.strip().startswith("🔗 ") for x in lines)
-
-    if not has_source_line:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(f"Источник: {source_domain}")
-
-    if not has_link_line:
-        lines.append(f"🔗 {source_url}")
-
-    return "\n".join(lines).strip()
-
-
-def build_generation_prompt(
-    day_key: str,
-    rubric_title: str,
-    rubric_format: str,
-    audience: str,
-    title_suffix: str,
-    source_domain: str,
-    source_url: str,
-    evidence_text: str,
-    disclaimer: str,
-    hashtags: List[str],
-    max_chars: int,
-) -> str:
-    aud = (audience or "parents").strip().lower()
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
-    rules = _common_rules(max_chars)
-
-    if aud == "pros":
-        template = (
-            "Первая строка — короткий информативный заголовок по сути материала, а не название рубрики.\n"
-            "👩‍⚕️ Аудитория: специалисты\n\n"
-            "Введение\n"
-            "2–3 предложения: кратко сформулируй клинический вопрос и цель материала.\n\n"
-            "Методы\n"
-            "2–4 предложения: опиши дизайн, приемы, наблюдения, критерии или методическую логику.\n\n"
-            "Главные выводы\n"
-            "3–5 предложений: передай самые важные результаты экспертным языком, без копирования исходных фраз.\n\n"
-            "Практическое применение\n"
-            "2–4 предложения: что специалист может взять в работу уже сейчас.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
-        )
-        return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
-
-    if dk == "MO" or rf == "tip_of_day":
-        template = (
-            "Первая строка — H1 с одним конкретным советом на сегодня.\n"
-            "Не пиши название рубрики и не пиши общую тему.\n"
-            "H1 должен звучать как один домашний прием или одно действие родителя.\n"
-            "Хорошие паттерны: «Повторите последнее слово и сделайте паузу», «Дайте выбор из двух слов», «Положите игрушки в непрозрачный мешочек и просите называть».\n"
-            "Плохие паттерны: «Развитие речи у детей», «Как помочь ребенку говорить», «Билингвизм у детей».\n\n"
-            "👶 Возраст: укажи диапазон\n\n"
-            "Сразу после строки возраста дай одну живую фразу, где есть ОДНО действие на сегодня. "
-            "Не обзор темы, не лекция, не «сегодня работаем над», а прямой домашний шаг.\n\n"
-            "🧩 Что попробовать сегодня:\n"
-            "Опиши один конкретный прием в 2–4 предложениях.\n"
-            "Обязательно добавь, что говорит взрослый, что делает ребенок, какие слова или короткие реплики можно использовать.\n"
-            "Если тема про двуязычную семью — сведи ее к одному домашнему приему, а не к обзору билингвизма.\n\n"
-            "💡 Что это дает: одним предложением назови один конкретный навык.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
-        )
-        return (
-            rules
-            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который умеет превращать статью в один прикладной совет на сегодня.\n"
-            + "В Monday-рубрике нельзя делать обзор темы: только один совет, один прием, один следующий шаг для родителя.\n"
-            + "\nШАБЛОН:\n"
-            + template
-            + "\nEVIDENCE:\n"
-            + evidence_text.strip()
-            + "\n"
-        )
-
+    min_chars = 260
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
         template = (
-            "Первая строка — конкретное действие для одной игры, а не название рубрики и не общая тема.\n"
-            "Хорошие примеры H1: «Пойте короткую песенку и добавляйте жест», «Повторяйте одно слово в движении».\n"
-            "Плохие примеры H1: «Играем и говорим», «Развиваем речь в игре», «Игры для речи».\n"
-            "👶 Возраст: укажи узкий диапазон. Если точный возраст неочевиден, все равно поставь реалистичный диапазон по EVIDENCE.\n\n"
-            "После возраста дай одну короткую живую фразу, где и когда эту игру удобно делать. Не повторяй H1 дословно.\n\n"
+            "Первая строка — короткий конкретный заголовок по сути одной игры или одного действия взрослого.\n"
+            "Не пиши название рубрики и не пиши общую тему вроде «Играем и говорим».\n"
+            "👶 Возраст: укажи узкий диапазон. Избегай широких диапазонов вроде 6–36 месяцев.\n\n"
+            "После возраста дай одну короткую живую фразу, где удобно делать эту игру дома.\n"
+            "Не повторяй заголовок и не начинай с общей лекции.\n\n"
             "🎲 Как играть:\n"
-            "Опиши только один игровой сценарий. Не смешивай несколько техник в одном посте.\n"
-            "Напиши, что делает взрослый, что слышит или может ответить ребенок, и дай не больше 1–2 коротких примеров.\n\n"
-            "💡 Что это дает: одним предложением укажи один конкретный наблюдаемый навык.\n\n"
+            "Опиши один конкретный сценарий игры в 2–4 коротких строках.\n"
+            "Напиши, что говорит взрослый, что может ответить ребенок и какие 1–2 примера слов уместны.\n"
+            "Не смешивай несколько техник в одном посте.\n\n"
+            "💡 Что это дает: одним предложением назови один конкретный навык, а не общую пользу вроде «развивает речь».\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор для родителей.\n"
-            + "Во вторник нужен живой, дружелюбный и простой игровой пост: один сценарий, один микроскилл, без перегруза.\n"
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и популярный Telegram-блогер для родителей-экспатов.\n"
+            + "Во вторничной рубрике нужен один игровой сценарий, один микроскилл и живой тон без перегруза.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
             + evidence_text.strip()
             + "\n"
         )
-
     if dk == "WE" or rf == "myth_fact":
         template = (
             "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
@@ -932,13 +846,14 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
+        if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
+            inferred_age = _infer_age_range_from_text(ev, source_url, source_domain)
+            s = _inject_age_line_if_missing(s, inferred_age)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
             source_url=source_url,
         )
-        if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-            s = _ensure_tuesday_age_line(s, evidence_text=ev, source_url=source_url)
         s = enforce_total_chars_keep_structure(s, max_chars)
         return s.strip()
 
@@ -981,9 +896,9 @@ async def generate_post_plain_from_evidence_async(
 
             if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
                 repair_prompt += (
-                    "Для Tuesday обязательно: первая строка — конкретное игровое действие, "
-                    "строка 👶 Возраст обязательна, возраст должен быть узким, "
-                    "в блоке 🎲 Как играть оставь только один сценарий и не больше 1–2 примеров."
+                    "Для Tuesday обязательно: конкретный заголовок по одной игре, "
+                    "узкий возрастной диапазон, отдельный блок «🎲 Как играть:» и один конкретный навык в блоке пользы. "
+                    "Не смешивай несколько техник и не пиши общую тему вместо действия."
                 )
 
             if dk == "SU" or rf == "age_norms":

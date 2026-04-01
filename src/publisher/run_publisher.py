@@ -290,28 +290,28 @@ def _build_posted_zero_alert_plain(
     hard_top = sorted(hard_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
 
     parts: List[str] = [
-        "⚠️ <b>Publisher diagnostic: пост не опубликован (Posted: 0)</b>",
-        f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
-        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
-        f"STATE_SCOPE={_escape(state_scope)} | History DB={_escape(db_name)}",
-        f"Rubrics attempted: {_escape(', '.join(attempted_rubrics) or '—')}",
-        f"Soft skips: {_escape(str(soft_total))} | Hard skips: {_escape(str(hard_total))}",
+        "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
+        f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
+        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        f"STATE_SCOPE={state_scope} | History DB={db_name}",
+        f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
+        f"Soft skips: {soft_total} | Hard skips: {hard_total}",
     ]
 
     if hard_top:
-        parts.extend(["", "<b>Hard skip reasons:</b>"])
+        parts.extend(["", "Hard skip reasons:"])
         for reason, count in hard_top:
-            parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+            parts.append(f"• {reason}: {count}")
 
     if soft_top:
-        parts.extend(["", "<b>Soft skip reasons:</b>"])
+        parts.extend(["", "Soft skip reasons:"])
         for reason, count in soft_top:
-            parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+            parts.append(f"• {reason}: {count}")
 
     if samples:
-        parts.extend(["", "<b>Examples:</b>"])
+        parts.extend(["", "Examples:"])
         for sample in samples[:10]:
-            parts.append(_escape(sample))
+            parts.append(sample)
 
     return "\n".join(parts)
 
@@ -369,59 +369,15 @@ def _line_matches_structural(st: str) -> bool:
     )
 
 
-def _classify_structural_line(line: str) -> tuple[str, Optional[str], Optional[str]]:
+def _is_structural_heading(line: str) -> bool:
     st = (line or "").strip()
     if not st:
-        return "", None, None
-
-    inline_patterns = [
-        (AGE_LINE_RE, "meta"),
-        (AUDIENCE_LINE_RE, "meta"),
-        (MYTH_LINE_RE, "meta"),
-        (QUESTION_LINE_RE, "meta"),
-        (ORIENTIRS_LINE_RE, "meta"),
-        (BENEFIT_LINE_RE, "section"),
-        (SOURCE_LINE_RE, "section"),
-    ]
-    for rx, kind in inline_patterns:
-        if rx.match(st):
-            if ":" in st:
-                label, rest = st.split(":", 1)
-                return kind, label.strip() + ":", rest.strip()
-            return kind, st, None
-
-    heading_patterns = [
-        (GAME_HEADING_RE, "section"),
-        (TRY_TODAY_HEADING_RE, "section"),
-        (BILINGUAL_HEADING_RE, "section"),
-        (HOME_HEADING_RE, "section"),
-        (EXAMPLE_HEADING_RE, "section"),
-    ]
-    for rx, kind in heading_patterns:
-        m = rx.match(st)
-        if m:
-            return kind, st, None
-
+        return False
+    if _line_matches_structural(st):
+        return True
     if st in SECTION_HEADERS:
-        return "section", st, None
-
-    inline_prefixes = [
-        ("🎲 Как играть:", "section"),
-        ("🧩 Что попробовать сегодня:", "section"),
-        ("🌍 Что помогает в двуязычной семье:", "section"),
-        ("🏠 Что можно попробовать дома:", "section"),
-        ("👄 Пример:", "section"),
-    ]
-    for prefix, kind in inline_prefixes:
-        if st.startswith(prefix) and len(st) > len(prefix):
-            return kind, prefix, st[len(prefix):].strip()
-
-    return "", None, None
-
-
-def _is_structural_heading(line: str) -> bool:
-    kind, _, _ = _classify_structural_line(line)
-    return bool(kind)
+        return True
+    return False
 
 
 def _slugify_tag_body(text: str) -> str:
@@ -882,74 +838,32 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
         href = _html.escape(url, quote=True)
         return f'{prefix}<a href="{href}">{_escape(label)}</a>'
 
-    def _ensure_blank(out: List[str]) -> None:
-        if out and out[-1] != "":
-            out.append("")
-
     out: List[str] = []
-    prev_kind = ""
-    prev_inline = False
-
     for idx, raw in enumerate(lines):
         s = raw.rstrip("\n")
         st = s.strip()
 
-        if not st:
-            if out and out[-1] != "":
-                out.append("")
-            prev_kind = "blank"
-            prev_inline = False
-            continue
-
-        if idx == 0:
+        if idx == 0 and st:
             out.append(f"<b>{_escape(st)}</b>")
-            prev_kind = "title"
-            prev_inline = True
             continue
 
-        kind, label, rest = _classify_structural_line(st)
-        if kind:
-            if kind == "section":
-                _ensure_blank(out)
-            elif kind == "meta" and prev_kind not in ("blank", "title", "meta", ""):
-                _ensure_blank(out)
-
-            if label is None:
-                out.append(f"<b>{_escape(st)}</b>")
-                prev_inline = False
-            elif rest:
-                out.append(f"<b>{_escape(label)}</b> {_escape(rest)}")
-                prev_inline = True
-            else:
-                out.append(f"<b>{_escape(label)}</b>")
-                prev_inline = False
-            prev_kind = kind
+        if _is_structural_heading(st):
+            out.append(f"<b>{_escape(st)}</b>")
             continue
 
         if st.startswith("🔗 "):
-            if prev_kind != "section":
-                _ensure_blank(out)
             url = st[2:].strip()
             if url.startswith(("http://", "https://")):
                 out.append(_link_anchor(url, prefix="🔗 "))
             else:
                 out.append(_escape(st))
-            prev_kind = "section"
-            prev_inline = True
             continue
 
         if st.startswith("ℹ️ "):
-            _ensure_blank(out)
             out.append(f"<i>{_escape(st)}</i>")
-            prev_kind = "section"
-            prev_inline = True
             continue
 
-        if prev_kind == "meta":
-            _ensure_blank(out)
         out.append(_escape(s))
-        prev_kind = "text"
-        prev_inline = False
 
     return "\n".join(out).strip()
 

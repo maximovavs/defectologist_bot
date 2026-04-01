@@ -40,8 +40,8 @@ jobs:
       REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
       TARGET_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
       STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
-      TEST_DB_VERSION: "v11"
-      STATE_CACHE_VERSION: "v11"
+      TEST_DB_VERSION: "v12"
+      STATE_CACHE_VERSION: "v12"
 
       # важно для logorina.ru (плохой TLS)
       INSECURE_TLS_DOMAINS: "logorina.ru"

@@ -71,7 +71,8 @@ jobs:
       POLLINATIONS_HEIGHT: "720"
 
       # Telegram рендеринг ссылок
-      TELEGRAM_PARSE_MODE: "MarkdownV2"
+      # TELEGRAM_PARSE_MODE: "MarkdownV2"
+      TELEGRAM_PARSE_MODE: "HTML"
 
       # sentence-transformers dedup
       SEMANTIC_THRESHOLD: "0.85"

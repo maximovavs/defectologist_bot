@@ -232,6 +232,21 @@ TUESDAY_TOO_WIDE_AGE_HINTS = [
 
 TUESDAY_MIN_TOTAL_CHARS = 150
 
+MYTH_FACT_GENERIC_TITLE_FRAGMENTS = [
+    "миф / факт",
+    "миф/факт",
+    "для родителей",
+]
+
+MYTH_FACT_TOO_WIDE_AGE_HINTS = [
+    "1-5 лет",
+    "1–5 лет",
+    "0-5 лет",
+    "0–5 лет",
+    "6-36",
+    "6–36",
+    "дошкольный возраст",
+]
 
 
 def _normalize_scan_text(text: str) -> str:
@@ -432,6 +447,83 @@ def _validate_tuesday_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def _is_narrow_myth_fact_age(age_line: str) -> bool:
+    st = norm_space(age_line)
+    if not st:
+        return False
+    low = _normalize_scan_text(st)
+    if any(h in low for h in MYTH_FACT_TOO_WIDE_AGE_HINTS):
+        return False
+    m = re.search(r"(\d{1,2})\s*[–\-]\s*(\d{1,2})", st)
+    if not m:
+        return True
+    a = int(m.group(1))
+    b = int(m.group(2))
+    if "меся" in low or "month" in low:
+        return (b - a) <= 18
+    if "год" in low or "лет" in low or "year" in low:
+        return (b - a) <= 2
+    return True
+
+
+def _ensure_myth_fact_age_line(text: str, evidence_text: str, source_url: str) -> str:
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    existing_idx = None
+    existing_line = ""
+    for idx, line in enumerate(lines):
+        if line.strip().lower().startswith("👶 возраст:"):
+            existing_idx = idx
+            existing_line = line.strip()
+            break
+
+    inferred = _infer_age_line_from_context(evidence_text, source_url)
+
+    if existing_idx is None:
+        if not inferred:
+            return (text or "").strip()
+        insert_at = None
+        for idx, line in enumerate(lines):
+            if line.strip():
+                insert_at = idx + 1
+                break
+        if insert_at is None:
+            return (text or "").strip()
+        out = lines[:insert_at] + ["", inferred, ""] + lines[insert_at:]
+        return "\n".join(out).strip()
+
+    if _is_narrow_myth_fact_age(existing_line):
+        return (text or "").strip()
+
+    if inferred and _is_narrow_myth_fact_age(inferred):
+        lines[existing_idx] = inferred
+        return "\n".join(lines).strip()
+
+    return (text or "").strip()
+
+
+def _validate_myth_fact_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "myth_fact_empty"
+
+    title = lines[0]
+    title_bad = _contains_any_fragment(title, MYTH_FACT_GENERIC_TITLE_FRAGMENTS)
+    if title_bad:
+        return False, f"myth_fact_generic_title:{title_bad}"
+
+    age_line = _find_line(lines, "👶 Возраст:")
+    if not age_line:
+        return False, "myth_fact_missing_age"
+    if not _is_narrow_myth_fact_age(age_line):
+        return False, "myth_fact_wide_age"
+
+    myth_line = _find_line(lines, "🔴 Миф:")
+    if not myth_line:
+        return False, "myth_fact_missing_myth"
+
+    return True, "ok"
+
+
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -465,6 +557,11 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
         ok, reason = _validate_tuesday_output(out)
+        if not ok:
+            return False, reason
+
+    if dk == "WE" or rf == "myth_fact":
+        ok, reason = _validate_myth_fact_output(out)
         if not ok:
             return False, reason
 
@@ -713,7 +810,7 @@ def build_generation_prompt(
     if dk == "WE" or rf == "myth_fact":
         template = (
             "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
-            "👶 Возраст: укажи диапазон\n"
+            "👶 Возраст: укажи узкий возрастной диапазон. Для myth_fact не используй слишком широкие рамки вроде 1–5 лет или 6–36 месяцев. Лучше 2–4 года, 3–5 лет, 18–24 месяца.\n"
             "🔴 Миф: коротко сформулируй заблуждение из темы статьи.\n\n"
             "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
             "🧩 Что попробовать сегодня:\n"
@@ -996,6 +1093,8 @@ async def generate_post_plain_from_evidence_async(
         s = _strip_placeholder_artifacts(s)
         if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
             s = _ensure_tuesday_age_line(s, ev, source_url)
+        if dk == "WE" or rf == "myth_fact":
+            s = _ensure_myth_fact_age_line(s, ev, source_url)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
@@ -1053,6 +1152,13 @@ async def generate_post_plain_from_evidence_async(
                     "Для Tuesday обязательно: один игровой сценарий, а не набор техник; "
                     "узкий возрастной диапазон; отдельная строка «🎲 Как играть:»; "
                     "один конкретный микроскилл в строке «💡 Что это дает:»."
+                )
+
+            if dk == "WE" or rf == "myth_fact":
+                repair_prompt += (
+                    "Для myth_fact обязательно: узкий возрастной диапазон, без слишком широких рамок вроде 1–5 лет; "
+                    "первая строка — содержательный вывод, а не название рубрики. "
+                    "Сохрани живой родительский тон и четкие блоки мифа, действия и пользы."
                 )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))

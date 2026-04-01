@@ -369,15 +369,59 @@ def _line_matches_structural(st: str) -> bool:
     )
 
 
-def _is_structural_heading(line: str) -> bool:
+def _classify_structural_line(line: str) -> tuple[str, Optional[str], Optional[str]]:
     st = (line or "").strip()
     if not st:
-        return False
-    if _line_matches_structural(st):
-        return True
+        return "", None, None
+
+    inline_patterns = [
+        (AGE_LINE_RE, "meta"),
+        (AUDIENCE_LINE_RE, "meta"),
+        (MYTH_LINE_RE, "meta"),
+        (QUESTION_LINE_RE, "meta"),
+        (ORIENTIRS_LINE_RE, "meta"),
+        (BENEFIT_LINE_RE, "section"),
+        (SOURCE_LINE_RE, "section"),
+    ]
+    for rx, kind in inline_patterns:
+        if rx.match(st):
+            if ":" in st:
+                label, rest = st.split(":", 1)
+                return kind, label.strip() + ":", rest.strip()
+            return kind, st, None
+
+    heading_patterns = [
+        (GAME_HEADING_RE, "section"),
+        (TRY_TODAY_HEADING_RE, "section"),
+        (BILINGUAL_HEADING_RE, "section"),
+        (HOME_HEADING_RE, "section"),
+        (EXAMPLE_HEADING_RE, "section"),
+    ]
+    for rx, kind in heading_patterns:
+        m = rx.match(st)
+        if m:
+            return kind, st, None
+
     if st in SECTION_HEADERS:
-        return True
-    return False
+        return "section", st, None
+
+    inline_prefixes = [
+        ("🎲 Как играть:", "section"),
+        ("🧩 Что попробовать сегодня:", "section"),
+        ("🌍 Что помогает в двуязычной семье:", "section"),
+        ("🏠 Что можно попробовать дома:", "section"),
+        ("👄 Пример:", "section"),
+    ]
+    for prefix, kind in inline_prefixes:
+        if st.startswith(prefix) and len(st) > len(prefix):
+            return kind, prefix, st[len(prefix):].strip()
+
+    return "", None, None
+
+
+def _is_structural_heading(line: str) -> bool:
+    kind, _, _ = _classify_structural_line(line)
+    return bool(kind)
 
 
 def _slugify_tag_body(text: str) -> str:
@@ -425,7 +469,7 @@ def _extract_thematic_tags_and_clean_lines(lines: List[str]) -> tuple[List[str],
 
         clean_lines.append(line)
 
-    return tags[:3], clean_lines
+    return tags[:2], clean_lines
 
 
 def _normalize_tag_token(token: str) -> str:
@@ -456,31 +500,7 @@ def _filter_relevant_thematic_tags(tags: List[str], body_text: str) -> List[str]
     for tag in tags:
         if _body_supports_tag(tag, body_text):
             out.append(tag)
-    return out[:3]
-
-
-def _infer_fallback_thematic_tags(body_text: str, day_key: str) -> List[str]:
-    blob = (body_text or "").lower().replace("ё", "е")
-    candidates: List[str] = []
-
-    def add(tag: str, *markers: str) -> None:
-        if tag in candidates:
-            return
-        if markers and any(m in blob for m in markers):
-            candidates.append(tag)
-
-    add("#двуязычие", "двуязыч", "билингв", "два языка", "оба языка")
-    add("#запуск_речи", "поздно начинает говорить", "позднее развитие речи", "запуск речи", "задержк")
-    add("#речевое_развитие", "реч", "словар", "слово", "говор")
-    add("#коммуникация", "коммуник", "общени", "контакт", "ответ")
-    add("#игры_для_речи", "игра", "играть", "песен", "жест")
-
-    if (day_key or "").upper() == "WE" and "#двуязычие" not in candidates and ("миф" in blob or "язык" in blob):
-        candidates.append("#двуязычие")
-    if (day_key or "").upper() == "TU" and "#игры_для_речи" not in candidates and "#речевое_развитие" not in candidates:
-        candidates.append("#игры_для_речи")
-
-    return candidates[:3]
+    return out[:2]
 
 
 def _extract_source_line(lines: List[str], fallback_domain: str) -> str:
@@ -558,15 +578,9 @@ def finalize_plain_post_for_publication(
 
     body_text = "\n".join(body_lines).strip()
     thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text)
-    if len(thematic_tags) < 2:
-        for tag in _infer_fallback_thematic_tags(body_text, day_key):
-            if tag not in thematic_tags:
-                thematic_tags.append(tag)
-            if len(thematic_tags) >= 3:
-                break
 
     final_tags: List[str] = []
-    for tag in [rubric_tag, age_tag, *thematic_tags[:3]]:
+    for tag in [rubric_tag, age_tag, *thematic_tags]:
         tag = (tag or "").strip()
         if not tag:
             continue
@@ -873,37 +887,71 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             out.append("")
 
     out: List[str] = []
+    prev_kind = ""
+    prev_inline = False
+
     for idx, raw in enumerate(lines):
         s = raw.rstrip("\n")
         st = s.strip()
 
-        if idx == 0 and st:
-            out.append(f"<b>{_escape(st)}</b>")
+        if not st:
+            if out and out[-1] != "":
+                out.append("")
+            prev_kind = "blank"
+            prev_inline = False
             continue
 
-        if _is_structural_heading(st):
-            _ensure_blank(out)
+        if idx == 0:
             out.append(f"<b>{_escape(st)}</b>")
+            prev_kind = "title"
+            prev_inline = True
+            continue
+
+        kind, label, rest = _classify_structural_line(st)
+        if kind:
+            if kind == "section":
+                _ensure_blank(out)
+            elif kind == "meta" and prev_kind not in ("blank", "title", "meta", ""):
+                _ensure_blank(out)
+
+            if label is None:
+                out.append(f"<b>{_escape(st)}</b>")
+                prev_inline = False
+            elif rest:
+                out.append(f"<b>{_escape(label)}</b> {_escape(rest)}")
+                prev_inline = True
+            else:
+                out.append(f"<b>{_escape(label)}</b>")
+                prev_inline = False
+            prev_kind = kind
             continue
 
         if st.startswith("🔗 "):
-            _ensure_blank(out)
+            if prev_kind != "section":
+                _ensure_blank(out)
             url = st[2:].strip()
             if url.startswith(("http://", "https://")):
                 out.append(_link_anchor(url, prefix="🔗 "))
             else:
                 out.append(_escape(st))
+            prev_kind = "section"
+            prev_inline = True
             continue
 
         if st.startswith("ℹ️ "):
             _ensure_blank(out)
             out.append(f"<i>{_escape(st)}</i>")
+            prev_kind = "section"
+            prev_inline = True
             continue
 
+        if prev_kind == "meta":
+            _ensure_blank(out)
         out.append(_escape(s))
+        prev_kind = "text"
+        prev_inline = False
 
     return "\n".join(out).strip()
-
 
 
 # =========================

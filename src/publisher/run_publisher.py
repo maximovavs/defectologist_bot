@@ -290,28 +290,28 @@ def _build_posted_zero_alert_plain(
     hard_top = sorted(hard_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
 
     parts: List[str] = [
-        "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
-        f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
-        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
-        f"STATE_SCOPE={state_scope} | History DB={db_name}",
-        f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
-        f"Soft skips: {soft_total} | Hard skips: {hard_total}",
+        "⚠️ <b>Publisher diagnostic: пост не опубликован (Posted: 0)</b>",
+        f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
+        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
+        f"STATE_SCOPE={_escape(state_scope)} | History DB={_escape(db_name)}",
+        f"Rubrics attempted: {_escape(', '.join(attempted_rubrics) or '—')}",
+        f"Soft skips: {_escape(str(soft_total))} | Hard skips: {_escape(str(hard_total))}",
     ]
 
     if hard_top:
-        parts.extend(["", "Hard skip reasons:"])
+        parts.extend(["", "<b>Hard skip reasons:</b>"])
         for reason, count in hard_top:
-            parts.append(f"• {reason}: {count}")
+            parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
 
     if soft_top:
-        parts.extend(["", "Soft skip reasons:"])
+        parts.extend(["", "<b>Soft skip reasons:</b>"])
         for reason, count in soft_top:
-            parts.append(f"• {reason}: {count}")
+            parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
 
     if samples:
-        parts.extend(["", "Examples:"])
+        parts.extend(["", "<b>Examples:</b>"])
         for sample in samples[:10]:
-            parts.append(sample)
+            parts.append(_escape(sample))
 
     return "\n".join(parts)
 
@@ -425,7 +425,7 @@ def _extract_thematic_tags_and_clean_lines(lines: List[str]) -> tuple[List[str],
 
         clean_lines.append(line)
 
-    return tags[:2], clean_lines
+    return tags[:3], clean_lines
 
 
 def _normalize_tag_token(token: str) -> str:
@@ -456,7 +456,31 @@ def _filter_relevant_thematic_tags(tags: List[str], body_text: str) -> List[str]
     for tag in tags:
         if _body_supports_tag(tag, body_text):
             out.append(tag)
-    return out[:2]
+    return out[:3]
+
+
+def _infer_fallback_thematic_tags(body_text: str, day_key: str) -> List[str]:
+    blob = (body_text or "").lower().replace("ё", "е")
+    candidates: List[str] = []
+
+    def add(tag: str, *markers: str) -> None:
+        if tag in candidates:
+            return
+        if markers and any(m in blob for m in markers):
+            candidates.append(tag)
+
+    add("#двуязычие", "двуязыч", "билингв", "два языка", "оба языка")
+    add("#запуск_речи", "поздно начинает говорить", "позднее развитие речи", "запуск речи", "задержк")
+    add("#речевое_развитие", "реч", "словар", "слово", "говор")
+    add("#коммуникация", "коммуник", "общени", "контакт", "ответ")
+    add("#игры_для_речи", "игра", "играть", "песен", "жест")
+
+    if (day_key or "").upper() == "WE" and "#двуязычие" not in candidates and ("миф" in blob or "язык" in blob):
+        candidates.append("#двуязычие")
+    if (day_key or "").upper() == "TU" and "#игры_для_речи" not in candidates and "#речевое_развитие" not in candidates:
+        candidates.append("#игры_для_речи")
+
+    return candidates[:3]
 
 
 def _extract_source_line(lines: List[str], fallback_domain: str) -> str:
@@ -534,9 +558,15 @@ def finalize_plain_post_for_publication(
 
     body_text = "\n".join(body_lines).strip()
     thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text)
+    if len(thematic_tags) < 2:
+        for tag in _infer_fallback_thematic_tags(body_text, day_key):
+            if tag not in thematic_tags:
+                thematic_tags.append(tag)
+            if len(thematic_tags) >= 3:
+                break
 
     final_tags: List[str] = []
-    for tag in [rubric_tag, age_tag, *thematic_tags]:
+    for tag in [rubric_tag, age_tag, *thematic_tags[:3]]:
         tag = (tag or "").strip()
         if not tag:
             continue
@@ -838,6 +868,10 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
         href = _html.escape(url, quote=True)
         return f'{prefix}<a href="{href}">{_escape(label)}</a>'
 
+    def _ensure_blank(out: List[str]) -> None:
+        if out and out[-1] != "":
+            out.append("")
+
     out: List[str] = []
     for idx, raw in enumerate(lines):
         s = raw.rstrip("\n")
@@ -848,10 +882,12 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             continue
 
         if _is_structural_heading(st):
+            _ensure_blank(out)
             out.append(f"<b>{_escape(st)}</b>")
             continue
 
         if st.startswith("🔗 "):
+            _ensure_blank(out)
             url = st[2:].strip()
             if url.startswith(("http://", "https://")):
                 out.append(_link_anchor(url, prefix="🔗 "))
@@ -860,12 +896,14 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
             continue
 
         if st.startswith("ℹ️ "):
+            _ensure_blank(out)
             out.append(f"<i>{_escape(st)}</i>")
             continue
 
         out.append(_escape(s))
 
     return "\n".join(out).strip()
+
 
 
 # =========================

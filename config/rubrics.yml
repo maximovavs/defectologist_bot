@@ -78,14 +78,11 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["TH"]
         sources:
-          - "raisingchildren_bilingual"
-          - "habilnet_bilingual_parents"
-          - "cal_dual_language_home_support"
-          - "docdeti_bilingualism"
-          - "kidskey_speech_games"
-          - "carla_family_resources"
-          - "russkiymir_bilingual_family"
           - "colorin_bilingual_parents"
+          - "cal_dual_language_home_support"
+          - "zerotothree_dual_language"
+          - "asha_multilingual_public"
+          - "docdeti_bilingualism"
         format: "bilingual_parents"
         media: ["image_card"]
 

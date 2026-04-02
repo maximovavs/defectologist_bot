@@ -78,11 +78,11 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["TH"]
         sources:
-          - "colorin_bilingual_parents"
-          - "cal_dual_language_home_support"
-          - "zerotothree_dual_language"
           - "asha_multilingual_public"
-          - "docdeti_bilingualism"
+          - "asha_practice_portal_multilingual_service_delivery"
+          - "colorin_bilingual_parents"
+          - "pmc_bilingual_science"
+          - "logoportal_latest"
         format: "bilingual_parents"
         media: ["image_card"]
 

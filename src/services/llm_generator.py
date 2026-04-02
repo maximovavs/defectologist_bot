@@ -199,55 +199,6 @@ SUNDAY_GENERIC_TITLE_FRAGMENTS = [
     "речь ребенка",
 ]
 
-TUESDAY_BAD_H1_MARKERS = [
-    "играем и говорим",
-    "играем со звуками и словами",
-    "играем с звуками и словами",
-    "развиваем речь",
-    "игры для речи",
-    "игры для запуска речи",
-    "учим слова",
-    "как помочь ребенку говорить",
-    "игра для развития речи",
-]
-
-TUESDAY_GENERIC_BENEFIT_FRAGMENTS = [
-    "развивает речь",
-    "улучшает речь",
-    "улучшает понимание",
-    "расширяет словарный запас",
-    "развивает коммуникацию",
-    "развивает навыки общения",
-    "развитие речи",
-    "словарного запаса",
-]
-
-TUESDAY_TOO_WIDE_AGE_HINTS = [
-    "6-36",
-    "6–36",
-    "1-5 лет",
-    "1–5 лет",
-    "дошкольный возраст",
-]
-
-TUESDAY_MIN_TOTAL_CHARS = 150
-
-MYTH_FACT_GENERIC_TITLE_FRAGMENTS = [
-    "миф / факт",
-    "миф/факт",
-    "для родителей",
-]
-
-MYTH_FACT_TOO_WIDE_AGE_HINTS = [
-    "1-5 лет",
-    "1–5 лет",
-    "0-5 лет",
-    "0–5 лет",
-    "6-36",
-    "6–36",
-    "дошкольный возраст",
-]
-
 
 def _normalize_scan_text(text: str) -> str:
     return norm_space(text).replace("ё", "е").lower()
@@ -344,198 +295,11 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
-def _infer_age_line_from_context(evidence_text: str, source_url: str) -> str:
-    blob = f"{evidence_text}\n{source_url}"
-    patterns = [
-        (re.compile(r"\b(\d{1,2})\s*[–\-]\s*(\d{1,2})\s*(месяц(?:а|ев)?|month(?:s)?)\b", re.IGNORECASE), "months"),
-        (re.compile(r"\b(\d{1,2})\s*[–\-]\s*(\d{1,2})\s*(года?|лет|year(?:s)?)\b", re.IGNORECASE), "years"),
-        (re.compile(r"\bbirth\s*(?:to|-)\s*(\d{1,2})\s*year(?:s)?\b", re.IGNORECASE), "birth_years"),
-        (re.compile(r"\bfrom\s*(\d{1,2})\s*to\s*(\d{1,2})\s*months?\b", re.IGNORECASE), "months"),
-    ]
-    for rx, kind in patterns:
-        m = rx.search(blob)
-        if not m:
-            continue
-        if kind == "months":
-            return f"👶 Возраст: {m.group(1)}–{m.group(2)} месяцев"
-        if kind == "years":
-            return f"👶 Возраст: {m.group(1)}–{m.group(2)} года"
-        if kind == "birth_years":
-            return f"👶 Возраст: 0–{m.group(1)} года"
-
-    url_low = (source_url or "").lower()
-    m = re.search(r"(\d{1,2})-(\d{1,2})-months", url_low)
-    if m:
-        return f"👶 Возраст: {m.group(1)}–{m.group(2)} месяцев"
-    m = re.search(r"birth-to-(\d{1,2})-years", url_low)
-    if m:
-        return f"👶 Возраст: 0–{m.group(1)} года"
-    return ""
-
-
-def _ensure_tuesday_age_line(text: str, evidence_text: str, source_url: str) -> str:
-    lines = (text or "").replace("\r\n", "\n").split("\n")
-    if any(line.strip().lower().startswith("👶 возраст:") for line in lines):
-        return (text or "").strip()
-
-    age_line = _infer_age_line_from_context(evidence_text, source_url)
-    if not age_line:
-        return (text or "").strip()
-
-    insert_at = None
-    for idx, line in enumerate(lines):
-        if line.strip():
-            insert_at = idx + 1
-            break
-    if insert_at is None:
-        return (text or "").strip()
-
-    out = lines[:insert_at] + ["", age_line, ""] + lines[insert_at:]
-    return "\n".join(out).strip()
-
-
-def _is_narrow_tuesday_age(age_line: str) -> bool:
-    st = norm_space(age_line)
-    if not st:
-        return False
-    low = _normalize_scan_text(st)
-    if any(h in low for h in TUESDAY_TOO_WIDE_AGE_HINTS):
-        return False
-    m = re.search(r"(\d{1,2})\s*[–\-]\s*(\d{1,2})", st)
-    if not m:
-        return True
-    a = int(m.group(1))
-    b = int(m.group(2))
-    if "меся" in low or "month" in low:
-        return (b - a) <= 18
-    if "год" in low or "лет" in low or "year" in low:
-        return (b - a) <= 2
-    return True
-
-
-def _validate_tuesday_output(text: str) -> Tuple[bool, str]:
-    lines = _extract_nonempty_lines(text)
-    if not lines:
-        return False, "tuesday_empty"
-
-    title = lines[0]
-    if len(title) > 90:
-        return False, "tuesday_title_too_long"
-
-    if _contains_any_fragment(title, TUESDAY_BAD_H1_MARKERS):
-        return False, "tuesday_generic_h1"
-
-    age_line = _find_line(lines, "👶 Возраст:")
-    if not age_line:
-        return False, "tuesday_missing_age"
-    if not _is_narrow_tuesday_age(age_line):
-        return False, "tuesday_wide_age"
-
-    if not _find_line(lines, "🎲 Как играть:"):
-        return False, "tuesday_missing_play_block"
-
-    benefit_line = _find_line(lines, "💡 Что это дает:")
-    if not benefit_line:
-        return False, "tuesday_missing_benefit"
-    if _contains_any_fragment(benefit_line, TUESDAY_GENERIC_BENEFIT_FRAGMENTS):
-        return False, "tuesday_generic_benefit"
-
-    lead = _first_narrative_line_after_title(lines)
-    if not lead:
-        return False, "tuesday_missing_intro"
-
-    return True, "ok"
-
-
-def _is_narrow_myth_fact_age(age_line: str) -> bool:
-    st = norm_space(age_line)
-    if not st:
-        return False
-    low = _normalize_scan_text(st)
-    if any(h in low for h in MYTH_FACT_TOO_WIDE_AGE_HINTS):
-        return False
-    m = re.search(r"(\d{1,2})\s*[–\-]\s*(\d{1,2})", st)
-    if not m:
-        return True
-    a = int(m.group(1))
-    b = int(m.group(2))
-    if "меся" in low or "month" in low:
-        return (b - a) <= 18
-    if "год" in low or "лет" in low or "year" in low:
-        return (b - a) <= 2
-    return True
-
-
-def _ensure_myth_fact_age_line(text: str, evidence_text: str, source_url: str) -> str:
-    lines = (text or "").replace("\r\n", "\n").split("\n")
-    existing_idx = None
-    existing_line = ""
-    for idx, line in enumerate(lines):
-        if line.strip().lower().startswith("👶 возраст:"):
-            existing_idx = idx
-            existing_line = line.strip()
-            break
-
-    inferred = _infer_age_line_from_context(evidence_text, source_url)
-
-    if existing_idx is None:
-        if not inferred:
-            return (text or "").strip()
-        insert_at = None
-        for idx, line in enumerate(lines):
-            if line.strip():
-                insert_at = idx + 1
-                break
-        if insert_at is None:
-            return (text or "").strip()
-        out = lines[:insert_at] + ["", inferred, ""] + lines[insert_at:]
-        return "\n".join(out).strip()
-
-    if _is_narrow_myth_fact_age(existing_line):
-        return (text or "").strip()
-
-    if inferred and _is_narrow_myth_fact_age(inferred):
-        lines[existing_idx] = inferred
-        return "\n".join(lines).strip()
-
-    return (text or "").strip()
-
-
-def _validate_myth_fact_output(text: str) -> Tuple[bool, str]:
-    lines = _extract_nonempty_lines(text)
-    if not lines:
-        return False, "myth_fact_empty"
-
-    title = lines[0]
-    title_bad = _contains_any_fragment(title, MYTH_FACT_GENERIC_TITLE_FRAGMENTS)
-    if title_bad:
-        return False, f"myth_fact_generic_title:{title_bad}"
-
-    age_line = _find_line(lines, "👶 Возраст:")
-    if not age_line:
-        return False, "myth_fact_missing_age"
-    if not _is_narrow_myth_fact_age(age_line):
-        return False, "myth_fact_wide_age"
-
-    myth_line = _find_line(lines, "🔴 Миф:")
-    if not myth_line:
-        return False, "myth_fact_missing_myth"
-
-    return True, "ok"
-
-
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
         return False, "empty"
-
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
-    min_chars = 260
-    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        min_chars = TUESDAY_MIN_TOTAL_CHARS
-
-    if len(out) < min_chars:
+    if len(out) < 260:
         return False, "too_short"
 
     banned = _contains_banned(out)
@@ -544,6 +308,9 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if _has_template_leak(out):
         return False, "template_leak"
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
 
     if dk == "MO" or rf == "tip_of_day":
         ok, reason = _validate_tip_of_day_output(out)
@@ -555,17 +322,9 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
         if not ok:
             return False, reason
 
-    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-        ok, reason = _validate_tuesday_output(out)
-        if not ok:
-            return False, reason
-
-    if dk == "WE" or rf == "myth_fact":
-        ok, reason = _validate_myth_fact_output(out)
-        if not ok:
-            return False, reason
-
     return True, "ok"
+
+
 # -----------------------
 # Provider config / throttle / backoff
 # -----------------------
@@ -763,7 +522,8 @@ def build_generation_prompt(
             "Хорошие паттерны: «Повторите последнее слово и сделайте паузу», «Дайте выбор из двух слов», «Положите игрушки в непрозрачный мешочек и просите называть».\n"
             "Плохие паттерны: «Развитие речи у детей», «Как помочь ребенку говорить», «Билингвизм у детей».\n\n"
             "👶 Возраст: укажи диапазон\n\n"
-            "Сразу после строки возраста дай одну живую фразу, где есть ОДНО действие на сегодня. Не обзор темы, не лекция, не «сегодня работаем над», а прямой домашний шаг.\n\n"
+            "Сразу после строки возраста дай одну живую фразу, где есть ОДНО действие на сегодня. "
+            "Не обзор темы, не лекция, не «сегодня работаем над», а прямой домашний шаг.\n\n"
             "🧩 Что попробовать сегодня:\n"
             "Опиши один конкретный прием в 2–4 предложениях.\n"
             "Обязательно добавь, что говорит взрослый, что делает ребенок, какие слова или короткие реплики можно использовать.\n"
@@ -785,15 +545,15 @@ def build_generation_prompt(
 
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
         template = (
-            "Первая строка — короткий живой заголовок по сути одной игры, а не название рубрики и не общая тема.\n"
-            "👶 Возраст: укажи узкий диапазон, не слишком широкий.\n\n"
-            "После возраста дай одну короткую фразу, где и когда эту игру удобно делать дома.\n"
-            "Не повторяй заголовок и не начинай с общей лекции.\n\n"
+            "Первая строка — короткий живой заголовок по сути игры, а не название рубрики.\n"
+            "👶 Возраст: укажи диапазон\n\n"
+            "Сразу начни с одного живого предложения о том, над чем сегодня играем.\n"
+            "Без общих слов и без вступительной лекции.\n\n"
             "🎲 Как играть:\n"
-            "Опиши только один конкретный игровой сценарий.\n"
-            "В 2–4 коротких строках напиши, что делает взрослый, что слышит ребенок и какой простой отклик можно ждать.\n"
-            "Не смешивай несколько техник сразу и не давай больше 1–2 примеров.\n\n"
-            "💡 Что это дает: одним предложением назови один конкретный маленький навык, а не общую пользу вроде развития речи вообще.\n\n"
+            "Опиши одну конкретную игру или упражнение пошагово.\n"
+            "Напиши, что говорит родитель, что отвечает ребенок, какой реквизит нужен.\n"
+            "Добавь примеры слов и короткие реплики взрослого.\n\n"
+            "💡 Что это дает: одним предложением укажи конкретный навык.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
@@ -810,7 +570,7 @@ def build_generation_prompt(
     if dk == "WE" or rf == "myth_fact":
         template = (
             "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
-            "👶 Возраст: укажи узкий возрастной диапазон. Для myth_fact не используй слишком широкие рамки вроде 1–5 лет или 6–36 месяцев. Лучше 2–4 года, 3–5 лет, 18–24 месяца.\n"
+            "👶 Возраст: укажи диапазон\n"
             "🔴 Миф: коротко сформулируй заблуждение из темы статьи.\n\n"
             "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
             "🧩 Что попробовать сегодня:\n"
@@ -831,18 +591,24 @@ def build_generation_prompt(
 
     if dk == "TH" or rf == "bilingual_parents":
         template = (
-            "Первая строка — короткий заголовок с конкретной семейной ситуацией или приемом, а не название рубрики.\n"
-            "👶 Возраст: укажи диапазон\n\n"
-            "Сразу начни с реальной ситуации семьи за границей: как звучит русский дома, где ребенок переключается между языками, что напрягает родителей.\n\n"
+            "Первая строка — спокойный родительский заголовок для рубрики про русский язык за границей.\n"
+            "Допустим более широкий и брендовый формат, близкий к канальному стилю, например: «Русский за границей • для родителей».\n"
+            "Не делай заголовок обрывочным, слишком длинным или перегруженным фактами.\n"
+            "👶 Возраст: укажи узкий или умеренный диапазон.\n\n"
+            "Дальше дай 2–4 живых предложения о знакомой семейной ситуации: как дома звучит русский язык, где ребенок переключается между языками, что может напрягать родителей.\n"
+            "Тон — теплый, уверенный, без академической тяжести.\n\n"
             "🌍 Что помогает в двуязычной семье:\n"
-            "Перескажи 2–4 конкретных приема из текста человеческим языком. Никакой теории ради теории.\n\n"
-            "💡 Что это дает: одним предложением объясни практический смысл.\n\n"
+            "Дай 2–4 конкретных приема или домашних идей. Лучше коротким списком, каждая строка начинается с дефиса.\n"
+            "Подходят понятные вещи из жизни семьи: игры, чтение, театр теней, песенки, ритуалы, короткие речевые игры.\n"
+            "Не уходи в общую теорию двуязычия и не смешивай слишком много абстрактных рекомендаций.\n\n"
+            "💡 Что это дает: одним коротким и теплым предложением объясни практический смысл для ребенка и семьи.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор Telegram-рубрики для семей-экспатов. Пиши так, чтобы пост ощущался готовым канальным материалом: тепло, собранно, практично.\n"
+            + "Для этой Thursday-рубрики допустим более спокойный и рубричный заголовок, чем в Monday, если тело поста остается живым и полезным.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -852,7 +618,7 @@ def build_generation_prompt(
 
     if dk == "FR" or rf == "question_week":
         template = (
-            "Первая строка — короткий заголовок по сути вопроса и следующего шага, а не название рубрики.\n"
+            "Первая строка — короткий заголовок-ответ по сути вопроса, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
             "❓ Вопрос недели: задай живой вопрос родителя по теме статьи.\n\n"
             "Ответь на него 3–5 предложениями, но не общими словами, а через факты и приемы из текста.\n\n"
@@ -874,19 +640,25 @@ def build_generation_prompt(
 
     if dk == "SU" or rf == "age_norms":
         template = (
-            "Первая строка — короткий спокойный заголовок по возрастному ориентиру, а не клиническая формулировка.\n"
+            "Первая строка — спокойный parent-friendly H1 про возрастной ориентир.\n"
+            "Не пиши название рубрики, не пиши «норма речи», не пиши про нарушения, задержки, диагностику и коррекцию.\n"
+            "Хорошие паттерны: «Что обычно понимает ребенок к 2 годам», «Какие фразы часто появляются ближе к 3 годам».\n\n"
             "👶 Возраст: укажи диапазон\n"
-            "Ориентиры: коротко перечисли 2–4 возрастных ориентира в одной строке.\n\n"
-            "Дальше в 2–4 предложениях объясни смысл без запугивания. Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n\n"
-            "🏠 Что можно попробовать дома:\n"
-            "Дай один домашний прием или наблюдение из текста.\n\n"
-            "💡 Что это дает: одним предложением назови практический смысл.\n\n"
+            "Ориентиры: коротко перечисли 2–4 age / milestone ориентира в одной строке.\n\n"
+            "Дальше в 2–4 спокойных предложениях объясни смысл без запугивания и без патологической лексики.\n"
+            "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n"
+            "Говори только про типичное развитие и наблюдаемые milestones.\n\n"
+            "🏠 Что можно понаблюдать дома:\n"
+            "Дай один мягкий родительский способ заметить навык в повседневной жизни или игре. "
+            "Не упражнение на коррекцию, а наблюдение или естественный бытовой прием.\n\n"
+            "💡 Что это дает: одним предложением объясни, что именно родитель сможет заметить.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
         return (
             rules
             + "\nРОЛЬ:\nТы — Логопед-дефектолог, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.\n"
+            + "В Sunday-рубрике запрещены патологические, коррекционные и диагностические акценты.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -895,7 +667,7 @@ def build_generation_prompt(
         )
 
     template = (
-        "Первая строка — короткий полезный заголовок по сути приема или наблюдения, а не название рубрики.\n"
+        "Первая строка — короткий живой заголовок по сути поста, а не название рубрики.\n"
         "👶 Возраст: укажи диапазон\n\n"
         "Сразу начни с сути: над чем сегодня работаем или что можно заметить у ребенка по теме статьи.\n\n"
         "🧩 Что попробовать сегодня:\n"
@@ -1091,10 +863,6 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
-        if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-            s = _ensure_tuesday_age_line(s, ev, source_url)
-        if dk == "WE" or rf == "myth_fact":
-            s = _ensure_myth_fact_age_line(s, ev, source_url)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
@@ -1145,20 +913,6 @@ async def generate_post_plain_from_evidence_async(
                     "Для Sunday обязательно: только возрастные ориентиры и milestones, "
                     "без патологической, диагностической и коррекционной лексики, "
                     "с фразой «Каждый ребенок развивается индивидуально»."
-                )
-
-            if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
-                repair_prompt += (
-                    "Для Tuesday обязательно: один игровой сценарий, а не набор техник; "
-                    "узкий возрастной диапазон; отдельная строка «🎲 Как играть:»; "
-                    "один конкретный микроскилл в строке «💡 Что это дает:»."
-                )
-
-            if dk == "WE" or rf == "myth_fact":
-                repair_prompt += (
-                    "Для myth_fact обязательно: узкий возрастной диапазон, без слишком широких рамок вроде 1–5 лет; "
-                    "первая строка — содержательный вывод, а не название рубрики. "
-                    "Сохрани живой родительский тон и четкие блоки мифа, действия и пользы."
                 )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))

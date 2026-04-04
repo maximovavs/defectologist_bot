@@ -58,7 +58,7 @@ HEADERS = {"User-Agent": USER_AGENT}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip()
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "prod").strip().lower()
+TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip().lower()
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
@@ -557,18 +557,88 @@ def finalize_plain_post_for_publication(
     return footer_text
 
 
-def _extract_h1_from_plain_post(plain_text: str, fallback: str) -> str:
-    for line in (plain_text or "").splitlines():
+def _normalize_title_probe(text: str) -> str:
+    return norm_space(text).replace("ё", "е").lower()
+
+
+def _strip_question_prefix(line: str) -> str:
+    st = (line or "").strip()
+    st = re.sub(r"^❓\s*", "", st)
+    st = re.sub(r"^вопрос недели\s*:\s*", "", st, flags=re.IGNORECASE)
+    st = re.sub(r"^вопрос\s*:\s*", "", st, flags=re.IGNORECASE)
+    return st.strip()
+
+
+def _first_sentence(text: str, max_len: int = 90) -> str:
+    s = norm_space(text)
+    if not s:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", s)
+    first = parts[0].strip() if parts else s
+    if len(first) <= max_len:
+        return first
+    cut = first[:max_len].rstrip(" ,;:-")
+    if " " in cut:
+        cut = cut[:cut.rfind(" ")].rstrip(" ,;:-")
+    return cut + "…"
+
+
+def _extract_cover_title_from_plain_post(
+    plain_text: str,
+    fallback: str,
+    rubric_title: str = "",
+) -> str:
+    lines = [x.strip() for x in (plain_text or "").splitlines() if x.strip()]
+    rubric_probe = _normalize_title_probe(rubric_title)
+    fallback_probe = _normalize_title_probe(fallback)
+
+    narrative_candidates: List[str] = []
+
+    for line in lines:
         st = line.strip()
+        low = _normalize_title_probe(st)
+
         if not st:
             continue
-        if _is_structural_heading(st):
-            continue
-        if st.startswith("🔗 "):
-            continue
+
         if st.startswith("#"):
             continue
-        return st
+
+        if SOURCE_LINE_RE.match(st):
+            continue
+
+        if st.startswith("🔗 "):
+            continue
+
+        if AGE_LINE_RE.match(st):
+            continue
+
+        if AUDIENCE_LINE_RE.match(st):
+            continue
+
+        if _is_structural_heading(st):
+            continue
+
+        if rubric_probe and low.startswith(rubric_probe):
+            continue
+        if fallback_probe and low == fallback_probe:
+            continue
+
+        if QUESTION_LINE_RE.match(st) or low.startswith("вопрос недели"):
+            q = _strip_question_prefix(st)
+            if q:
+                return q
+
+        if len(st) <= 90 and not st.endswith(":"):
+            return st
+
+        narrative_candidates.append(st)
+
+    for candidate in narrative_candidates:
+        sentence = _first_sentence(candidate, max_len=90)
+        if sentence:
+            return sentence
+
     return fallback
 
 
@@ -1412,7 +1482,11 @@ async def amain() -> None:
                         break
                     continue
 
-                h1_title = _extract_h1_from_plain_post(plain, fallback=rubric_title)
+                h1_title = _extract_cover_title_from_plain_post(
+                    plain,
+                    fallback=rubric_title,
+                    rubric_title=rubric_title,
+                )
                 image_prompt = ""
                 image_prompt_note = "skipped"
 

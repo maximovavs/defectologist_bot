@@ -22,9 +22,19 @@ on:
         required: false
         default: "test"
       rubric_id:
-        description: "Rubric ID for manual test run (empty = by schedule)"
+        description: "Какую рубрику тестировать"
         required: false
-        default: ""
+        type: choice
+        default: "auto"
+        options:
+          - "auto"
+          - "tip_of_day | Понедельник — Совет логопеда дня"
+          - "play_and_speak | Вторник — Играем и говорим"
+          - "myth_fact | Среда — Миф / Факт"
+          - "bilingual_corner | Четверг — Русский за границей"
+          - "question_week | Пятница — Вопрос недели"
+          - "age_norms | Воскресенье — Возрастная норма"
+          - "method_piggybank | Суббота — Методическая копилка"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"

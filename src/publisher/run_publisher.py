@@ -69,7 +69,18 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
-RUBRIC_ID = os.getenv("RUBRIC_ID", "").strip().lower()
+
+
+def _normalize_selected_rubric(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value or value.lower() == "auto":
+        return ""
+    if "|" in value:
+        value = value.split("|", 1)[0].strip()
+    return value.lower()
+
+
+RUBRIC_ID = _normalize_selected_rubric(os.getenv("RUBRIC_ID", ""))
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
@@ -295,7 +306,7 @@ def _build_posted_zero_alert_plain(
         "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
         f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
         f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
-        f"RUBRIC_ID={selected_rubric_id or "(auto)"}",
+        f"RUBRIC_ID={selected_rubric_id or '(auto)'}",
         f"STATE_SCOPE={state_scope} | History DB={db_name}",
         f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
         f"Soft skips: {soft_total} | Hard skips: {hard_total}",
@@ -1073,7 +1084,7 @@ async def amain() -> None:
     state_scope = _resolve_state_scope()
     db_path = _resolve_publication_db_path()
     print(
-        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} rubric_id={RUBRIC_ID or "(auto)"}",
+        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} rubric_id={RUBRIC_ID or '(auto)'}",
         flush=True,
     )
 

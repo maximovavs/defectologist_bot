@@ -3,23 +3,20 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.3.0 — narrative generation + thematic hashtags + image prompts
+Patch 5.3.0-hybrid — main baseline + Monday-specific prompt/validator from active
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
 2) Gemini: fallback через x-goog-api-key; региональный блок выключает Gemini на весь прогон.
 3) Родительские рубрики: role-prompting + живой narrative format без заголовков
    «Проблема / Решение / Результат».
-4) В конце поста модель должна сгенерировать 1–2 тематических хештега.
-5) Источник и ссылка достраиваются кодом, если модель их пропустила.
-6) Валидатор мягкий:
-   - текст не пустой
-   - текст не слишком короткий
-   - нет banned phrases
-   - нет template leak
-7) Защита от утечек шаблона:
-   - запрещены #пример_тега / #пример_тега_2
-   - запрещено служебное «Действуй как Логопед-дефектолог» в итоговом тексте
+4) Для Monday / tip_of_day:
+   - отдельный prompt вместо общего fallback
+   - H1 должен быть одним прикладным советом / одним действием
+   - первая фраза должна вести в один конкретный домашний прием на сегодня
+5) В конце поста модель должна сгенерировать 1–2 тематических хештега.
+6) Источник и ссылка достраиваются кодом, если модель их пропустила.
+7) Валидатор мягкий, но для Monday добавлены точечные rubric-specific checks.
 8) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
 """
 
@@ -62,6 +59,55 @@ def _strip_placeholder_artifacts(text: str) -> str:
     return "\n".join(cleaned).strip()
 
 
+def _extract_nonempty_lines(text: str) -> List[str]:
+    return [x.strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in _extract_nonempty_lines(text):
+        return line
+    return ""
+
+
+def _find_line(lines: List[str], prefix: str) -> str:
+    probe = (prefix or "").strip().lower()
+    for line in lines:
+        st = line.strip()
+        if st.lower().startswith(probe):
+            return st
+    return ""
+
+
+def _first_narrative_line_after_title(lines: List[str]) -> str:
+    skipped_prefixes = (
+        "👶 возраст:",
+        "👩‍⚕️ аудитория:",
+        "🎲 как играть",
+        "🧩 что попробовать сегодня",
+        "🌍 что помогает в двуязычной семье",
+        "🏠 что можно попробовать дома",
+        "🏠 что можно понаблюдать дома",
+        "💡 что это дает",
+        "🔴 миф:",
+        "❓ вопрос недели:",
+        "ориентиры:",
+        "источник:",
+        "🔗 ",
+        "ℹ️ ",
+    )
+    for idx, line in enumerate(lines):
+        if idx == 0:
+            continue
+        st = line.strip()
+        low = st.lower()
+        if any(low.startswith(prefix) for prefix in skipped_prefixes):
+            continue
+        if st.startswith("#"):
+            continue
+        return st
+    return ""
+
+
 # -----------------------
 # Output validators
 # -----------------------
@@ -96,6 +142,59 @@ TITLE_TEMPLATE_LEAKS = [
     "#пример_тега_2",
 ]
 
+MONDAY_GENERIC_TITLE_FRAGMENTS = [
+    "совет логопеда дня",
+    "развитие речи",
+    "речи у детей",
+    "помочь детям",
+    "помочь ребенку",
+    "детей, изучающих два языка",
+    "детей изучающих два языка",
+    "двуязычных детей",
+    "билингв",
+    "что важно знать",
+    "сегодня работаем над",
+    "сегодня поговорим",
+]
+
+MONDAY_GENERIC_LEAD_FRAGMENTS = [
+    "сегодня работаем над",
+    "сегодня поговорим",
+    "сегодня разберем",
+    "сегодня обсудим",
+    "поможем ребенку",
+    "помочь ребенку",
+    "помочь детям",
+    "развитие речи",
+]
+
+SUNDAY_PATHOLOGY_FRAGMENTS = [
+    "задерж",
+    "нарушен",
+    "нарушение",
+    "патологи",
+    "диагноз",
+    "диагност",
+    "коррек",
+    "дефицит",
+    "аутиз",
+    "рас",
+    "алали",
+    "дизартр",
+    "дислал",
+    "дисфаз",
+    "овз",
+    "терап",
+    "лечени",
+]
+
+SUNDAY_GENERIC_TITLE_FRAGMENTS = [
+    "возрастная норма",
+    "нормы речи",
+    "развитие речи",
+    "речь ребенка",
+]
+
 
 def _normalize_scan_text(text: str) -> str:
     return norm_space(text).replace("ё", "е").lower()
@@ -119,7 +218,80 @@ def _has_template_leak(text: str) -> bool:
     return False
 
 
-def _validate_output(text: str) -> Tuple[bool, str]:
+def _contains_any_fragment(text: str, fragments: List[str]) -> Optional[str]:
+    blob = _normalize_scan_text(text)
+    for fr in fragments:
+        probe = _normalize_scan_text(fr)
+        if probe and probe in blob:
+            return fr
+    return None
+
+
+def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "monday_empty"
+
+    title = lines[0]
+    if len(title) > 80:
+        return False, "monday_title_too_long"
+
+    title_bad = _contains_any_fragment(title, MONDAY_GENERIC_TITLE_FRAGMENTS)
+    if title_bad:
+        return False, f"monday_generic_title:{title_bad}"
+
+    if title.endswith(":"):
+        return False, "monday_title_trailing_colon"
+
+    if not _find_line(lines, "👶 Возраст:"):
+        return False, "monday_no_age_line"
+
+    lead = _first_narrative_line_after_title(lines)
+    if not lead:
+        return False, "monday_no_lead"
+
+    lead_bad = _contains_any_fragment(lead, MONDAY_GENERIC_LEAD_FRAGMENTS)
+    if lead_bad:
+        return False, f"monday_generic_lead:{lead_bad}"
+
+    if len(lead) < 24:
+        return False, "monday_lead_too_short"
+
+    return True, "ok"
+
+
+def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "sunday_empty"
+
+    title = lines[0]
+    if len(title) > 90:
+        return False, "sunday_title_too_long"
+
+    title_bad = _contains_any_fragment(title, SUNDAY_GENERIC_TITLE_FRAGMENTS)
+    if title_bad:
+        return False, f"sunday_generic_title:{title_bad}"
+
+    if not _find_line(lines, "👶 Возраст:"):
+        return False, "sunday_no_age_line"
+
+    orientirs = _find_line(lines, "Ориентиры:")
+    if not orientirs:
+        return False, "sunday_no_orientirs"
+
+    blob = _normalize_scan_text(text)
+    if "индивидуаль" not in blob:
+        return False, "sunday_no_individual_phrase"
+
+    pathology_bad = _contains_any_fragment(text, SUNDAY_PATHOLOGY_FRAGMENTS)
+    if pathology_bad:
+        return False, f"sunday_pathology:{pathology_bad}"
+
+    return True, "ok"
+
+
+def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
         return False, "empty"
@@ -132,6 +304,14 @@ def _validate_output(text: str) -> Tuple[bool, str]:
 
     if _has_template_leak(out):
         return False, "template_leak"
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    if dk == "MO" or rf == "tip_of_day":
+        ok, reason = _validate_tip_of_day_output(out)
+        if not ok:
+            return False, reason
 
     return True, "ok"
 
@@ -167,7 +347,7 @@ def _is_quota_error(status: int, text: str) -> bool:
     return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
 
 
-def _is_gemini_region_block(text: str) -> bool:
+def _is_gemini_region_block_text(text: str) -> bool:
     t = (text or "").lower()
     return "user location is not supported" in t or "location is not supported" in t
 
@@ -228,7 +408,7 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
         return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
 
     txt = resp.text or ""
-    if _is_gemini_region_block(txt):
+    if _is_gemini_region_block_text(txt):
         _gemini_region_blocked = True
         raise RuntimeError("gemini_blocked_region")
 
@@ -310,156 +490,364 @@ def build_generation_prompt(
 
     if aud == "pros":
         template = (
-            f"{rubric_title} {title_suffix}\n"
-            "👩‍⚕️ Аудитория: специалисты\n\n"
-            "Введение\n"
-            "2–3 предложения: кратко сформулируй клинический вопрос и цель материала.\n\n"
-            "Методы\n"
-            "2–4 предложения: опиши дизайн, приемы, наблюдения, критерии или методическую логику.\n\n"
-            "Главные выводы\n"
-            "3–5 предложений: передай самые важные результаты экспертным языком, без копирования исходных фраз.\n\n"
-            "Практическое применение\n"
-            "2–4 предложения: что специалист может взять в работу уже сейчас.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
-        )
-        return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+            f"{rubric_title} {title_suffix}
+"
+            "👩‍⚕️ Аудитория: специалисты
 
-    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
+"
+            "Введение
+"
+            "2–3 предложения: кратко сформулируй клинический вопрос и цель материала.
+
+"
+            "Методы
+"
+            "2–4 предложения: опиши дизайн, приемы, наблюдения, критерии или методическую логику.
+
+"
+            "Главные выводы
+"
+            "3–5 предложений: передай самые важные результаты экспертным языком, без копирования исходных фраз.
+
+"
+            "Практическое применение
+"
+            "2–4 предложения: что специалист может взять в работу уже сейчас.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
+        )
+        return rules + "
+ШАБЛОН:
+" + template + "
+EVIDENCE:
+" + evidence_text.strip() + "
+"
+
+    if dk == "MO" or rf == "tip_of_day":
         template = (
-            f"{rubric_title} {title_suffix}\n"
-            "👶 Возраст: укажи диапазон\n\n"
-            "Сразу начни с одного живого предложения о том, над чем сегодня играем.\n"
-            "Без общих слов и без вступительной лекции.\n\n"
-            "🎲 Как играть:\n"
-            "Опиши одну конкретную игру или упражнение пошагово.\n"
-            "Напиши, что говорит родитель, что отвечает ребенок, какой реквизит нужен.\n"
-            "Добавь примеры слов и короткие реплики взрослого.\n\n"
-            "💡 Что это дает: одним предложением укажи конкретный навык.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            "Первая строка — H1 с одним конкретным советом на сегодня.
+"
+            "Не пиши название рубрики и не пиши общую тему.
+"
+            "H1 должен звучать как один домашний прием или одно действие родителя.
+"
+            "Хорошие паттерны: «Повторите последнее слово и сделайте паузу», «Дайте выбор из двух слов», «Положите игрушки в непрозрачный мешочек и просите называть».
+"
+            "Плохие паттерны: «Развитие речи у детей», «Как помочь ребенку говорить», «Билингвизм у детей».
+
+"
+            "👶 Возраст: укажи диапазон
+
+"
+            "Сразу после строки возраста дай одну живую фразу, где есть ОДНО действие на сегодня. "
+            "Не обзор темы, не лекция, не «сегодня работаем над», а прямой домашний шаг.
+
+"
+            "🧩 Что попробовать сегодня:
+"
+            "Опиши один конкретный прием в 2–4 предложениях.
+"
+            "Обязательно добавь, что говорит взрослый, что делает ребенок, какие слова или короткие реплики можно использовать.
+"
+            "Если тема про двуязычную семью — сведи ее к одному домашнему приему, а не к обзору билингвизма.
+
+"
+            "💡 Что это дает: одним предложением назови один конкретный навык.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и популярный Telegram-блогер для родителей-экспатов.\n"
-            + "\nШАБЛОН:\n"
+            + "
+РОЛЬ:
+Ты — практикующий Логопед-дефектолог и Telegram-автор, который умеет превращать статью в один прикладной совет на сегодня.
+"
+            + "В Monday-рубрике нельзя делать обзор темы: только один совет, один прием, один следующий шаг для родителя.
+"
+            + "
+ШАБЛОН:
+"
             + template
-            + "\nEVIDENCE:\n"
+            + "
+EVIDENCE:
+"
             + evidence_text.strip()
-            + "\n"
+            + "
+"
+        )
+
+    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
+        template = (
+            f"{rubric_title} {title_suffix}
+"
+            "👶 Возраст: укажи диапазон
+
+"
+            "Сразу начни с одного живого предложения о том, над чем сегодня играем.
+"
+            "Без общих слов и без вступительной лекции.
+
+"
+            "🎲 Как играть:
+"
+            "Опиши одну конкретную игру или упражнение пошагово.
+"
+            "Напиши, что говорит родитель, что отвечает ребенок, какой реквизит нужен.
+"
+            "Добавь примеры слов и короткие реплики взрослого.
+
+"
+            "💡 Что это дает: одним предложением укажи конкретный навык.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
+        )
+        return (
+            rules
+            + "
+РОЛЬ:
+Ты — практикующий Логопед-дефектолог и популярный Telegram-блогер для родителей-экспатов.
+"
+            + "
+ШАБЛОН:
+"
+            + template
+            + "
+EVIDENCE:
+"
+            + evidence_text.strip()
+            + "
+"
         )
 
     if dk == "WE" or rf == "myth_fact":
         template = (
-            f"{rubric_title} {title_suffix}\n"
-            "👶 Возраст: укажи диапазон\n"
-            "🔴 Миф: коротко сформулируй заблуждение из темы статьи.\n\n"
-            "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
-            "🧩 Что попробовать сегодня:\n"
-            "Дай один практический прием или микро-упражнение без канцелярита.\n\n"
-            "💡 Что это дает: одним предложением назови конкретный навык или эффект.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"{rubric_title} {title_suffix}
+"
+            "👶 Возраст: укажи диапазон
+"
+            "🔴 Миф: коротко сформулируй заблуждение из темы статьи.
+
+"
+            "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.
+
+"
+            "🧩 Что попробовать сегодня:
+"
+            "Дай один практический прием или микро-упражнение без канцелярита.
+
+"
+            "💡 Что это дает: одним предложением назови конкретный навык или эффект.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который мягко развеивает мифы и сразу дает полезный следующий шаг.\n"
-            + "\nШАБЛОН:\n"
+            + "
+РОЛЬ:
+Ты — практикующий Логопед-дефектолог и Telegram-автор, который мягко развеивает мифы и сразу дает полезный следующий шаг.
+"
+            + "
+ШАБЛОН:
+"
             + template
-            + "\nEVIDENCE:\n"
+            + "
+EVIDENCE:
+"
             + evidence_text.strip()
-            + "\n"
+            + "
+"
         )
 
     if dk == "TH" or rf == "bilingual_parents":
         template = (
-            f"{rubric_title} {title_suffix}\n"
-            "👶 Возраст: укажи диапазон\n\n"
-            "Сразу начни с реальной ситуации семьи за границей: как звучит русский дома, где ребенок переключается между языками, что напрягает родителей.\n\n"
-            "🌍 Что помогает в двуязычной семье:\n"
-            "Перескажи 2–4 конкретных приема из текста человеческим языком. Никакой теории ради теории.\n\n"
-            "💡 Что это дает: одним предложением объясни практический смысл.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"{rubric_title} {title_suffix}
+"
+            "👶 Возраст: укажи диапазон
+
+"
+            "Сразу начни с реальной ситуации семьи за границей: как звучит русский дома, где ребенок переключается между языками, что напрягает родителей.
+
+"
+            "🌍 Что помогает в двуязычной семье:
+"
+            "Перескажи 2–4 конкретных приема из текста человеческим языком. Никакой теории ради теории.
+
+"
+            "💡 Что это дает: одним предложением объясни практический смысл.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
-            + "\nШАБЛОН:\n"
+            + "
+РОЛЬ:
+Ты — Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.
+"
+            + "
+ШАБЛОН:
+"
             + template
-            + "\nEVIDENCE:\n"
+            + "
+EVIDENCE:
+"
             + evidence_text.strip()
-            + "\n"
+            + "
+"
         )
 
     if dk == "FR" or rf == "question_week":
         template = (
-            f"{rubric_title} {title_suffix}\n"
-            "👶 Возраст: укажи диапазон\n"
-            "❓ Вопрос недели: задай живой вопрос родителя по теме статьи.\n\n"
-            "Ответь на него 3–5 предложениями, но не общими словами, а через факты и приемы из текста.\n\n"
-            "🧩 Что попробовать сегодня:\n"
-            "Дай один конкретный следующий шаг.\n\n"
-            "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"{rubric_title} {title_suffix}
+"
+            "👶 Возраст: укажи диапазон
+"
+            "❓ Вопрос недели: задай живой вопрос родителя по теме статьи.
+
+"
+            "Ответь на него 3–5 предложениями, но не общими словами, а через факты и приемы из текста.
+
+"
+            "🧩 Что попробовать сегодня:
+"
+            "Дай один конкретный следующий шаг.
+
+"
+            "💡 Что это дает: одним предложением назови конкретный навык.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор Telegram-рубрики «вопрос недели», который отвечает по-человечески, но по делу.\n"
-            + "\nШАБЛОН:\n"
+            + "
+РОЛЬ:
+Ты — Логопед-дефектолог и автор Telegram-рубрики «вопрос недели», который отвечает по-человечески, но по делу.
+"
+            + "
+ШАБЛОН:
+"
             + template
-            + "\nEVIDENCE:\n"
+            + "
+EVIDENCE:
+"
             + evidence_text.strip()
-            + "\n"
+            + "
+"
         )
 
     if dk == "SU" or rf == "age_norms":
         template = (
-            f"{rubric_title} {title_suffix}\n"
-            "👶 Возраст: укажи диапазон\n"
-            "Ориентиры: коротко перечисли 2–4 возрастных ориентира в одной строке.\n\n"
-            "Дальше в 2–4 предложениях объясни смысл без запугивания.\n"
-            "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n\n"
-            "🏠 Что можно попробовать дома:\n"
-            "Дай один домашний прием или наблюдение из текста.\n\n"
-            "💡 Что это дает: одним предложением назови практический смысл.\n\n"
-            f"Источник: {source_domain}\n"
-            f"🔗 {source_url}\n"
+            f"{rubric_title} {title_suffix}
+"
+            "👶 Возраст: укажи диапазон
+"
+            "Ориентиры: коротко перечисли 2–4 возрастных ориентира в одной строке.
+
+"
+            "Дальше в 2–4 предложениях объясни смысл без запугивания.
+"
+            "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.
+
+"
+            "🏠 Что можно попробовать дома:
+"
+            "Дай один домашний прием или наблюдение из текста.
+
+"
+            "💡 Что это дает: одним предложением назови практический смысл.
+
+"
+            f"Источник: {source_domain}
+"
+            f"🔗 {source_url}
+"
         )
         return (
             rules
-            + "\nРОЛЬ:\nТы — Логопед-дефектолог, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.\n"
-            + "\nШАБЛОН:\n"
+            + "
+РОЛЬ:
+Ты — Логопед-дефектолог, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.
+"
+            + "
+ШАБЛОН:
+"
             + template
-            + "\nEVIDENCE:\n"
+            + "
+EVIDENCE:
+"
             + evidence_text.strip()
-            + "\n"
+            + "
+"
         )
 
     template = (
-        f"{rubric_title} {title_suffix}\n"
-        "👶 Возраст: укажи диапазон\n\n"
-        "Сразу начни с сути: над чем сегодня работаем или что можно заметить у ребенка по теме статьи.\n\n"
-        "🧩 Что попробовать сегодня:\n"
-        "Дай один конкретный прием, сценарий общения или микро-упражнение из текста.\n\n"
-        "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
-        f"Источник: {source_domain}\n"
-        f"🔗 {source_url}\n"
+        f"{rubric_title} {title_suffix}
+"
+        "👶 Возраст: укажи диапазон
+
+"
+        "Сразу начни с сути: над чем сегодня работаем или что можно заметить у ребенка по теме статьи.
+
+"
+        "🧩 Что попробовать сегодня:
+"
+        "Дай один конкретный прием, сценарий общения или микро-упражнение из текста.
+
+"
+        "💡 Что это дает: одним предложением назови конкретный навык.
+
+"
+        f"Источник: {source_domain}
+"
+        f"🔗 {source_url}
+"
     )
 
     footer = ""
     if disclaimer:
-        footer += f"\nℹ️ {norm_space(disclaimer)}\n"
+        footer += f"
+ℹ️ {norm_space(disclaimer)}
+"
 
     return (
         rules
-        + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который объясняет коротко, тепло и с конкретной пользой.\n"
-        + "\nШАБЛОН:\n"
+        + "
+РОЛЬ:
+Ты — практикующий Логопед-дефектолог и Telegram-автор, который объясняет коротко, тепло и с конкретной пользой.
+"
+        + "
+ШАБЛОН:
+"
         + template
-        + "\nEVIDENCE:\n"
+        + "
+EVIDENCE:
+"
         + evidence_text.strip()
-        + "\n"
+        + "
+"
         + footer
     )
 
@@ -608,15 +996,17 @@ async def generate_post_plain_from_evidence_async(
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
 
     ev = (evidence_text or "").strip()
     if len(ev) < 260:
         return "", False, "no_evidence_short"
 
     prompt = build_generation_prompt(
-        day_key=day_key or "",
+        day_key=dk,
         rubric_title=rubric_title,
-        rubric_format=rubric_format,
+        rubric_format=rf,
         audience=aud,
         title_suffix=title_suffix,
         source_domain=source_domain,
@@ -643,7 +1033,7 @@ async def generate_post_plain_from_evidence_async(
     def validate(out: str) -> Tuple[bool, str]:
         if out.strip() == "НЕТ_ДАННЫХ":
             return False, "no_data_in_source"
-        return _validate_output(out)
+        return _validate_output(out, day_key=dk, rubric_format=rf)
 
     if prov == "none":
         return "", False, "provider:none"
@@ -661,12 +1051,22 @@ async def generate_post_plain_from_evidence_async(
 
             repair_prompt = (
                 prompt
-                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным. "
+                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+                + reason
+                + ". "
                 + "Сделай текст живее, плотнее и конкретнее. "
                 + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
                 + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
-                + "Сразу иди к сути и не делай текст слишком коротким."
+                + "Сразу иди к сути и не делай текст слишком коротким. "
             )
+
+            if dk == "MO" or rf == "tip_of_day":
+                repair_prompt += (
+                    "Для Monday обязательно: первая строка — один прикладной совет, "
+                    "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
+                    "никаких обзоров темы и общих формулировок."
+                )
+
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))
             ok2, reason2 = validate(out2)
             if ok2:

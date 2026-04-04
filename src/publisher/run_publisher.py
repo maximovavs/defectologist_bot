@@ -69,6 +69,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
+RUBRIC_ID = os.getenv("RUBRIC_ID", "").strip().lower()
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
@@ -283,6 +284,7 @@ def _build_posted_zero_alert_plain(
     state_scope: str,
     db_name: str,
     attempted_rubrics: List[str],
+    selected_rubric_id: str = "",
 ) -> str:
     soft_total = sum(soft_skip_reasons.values())
     hard_total = sum(hard_skip_reasons.values())
@@ -293,6 +295,7 @@ def _build_posted_zero_alert_plain(
         "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
         f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
         f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        f"RUBRIC_ID={selected_rubric_id or "(auto)"}",
         f"STATE_SCOPE={state_scope} | History DB={db_name}",
         f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
         f"Soft skips: {soft_total} | Hard skips: {hard_total}",
@@ -1070,7 +1073,7 @@ async def amain() -> None:
     state_scope = _resolve_state_scope()
     db_path = _resolve_publication_db_path()
     print(
-        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name}",
+        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} rubric_id={RUBRIC_ID or "(auto)"}",
         flush=True,
     )
 
@@ -1092,6 +1095,8 @@ async def amain() -> None:
         aud_list = [AUDIENCE]
     else:
         aud_list = ["parents"]
+
+    selected_rubric_id = RUBRIC_ID
 
     posted = 0
     soft_skip_reasons: Dict[str, int] = {}
@@ -1123,14 +1128,21 @@ async def amain() -> None:
         for rubric in rubrics:
             if posted >= max_posts:
                 break
-            if not is_due(rubric, now):
-                continue
+
+            rubric_id = (rubric.get("id") or "").strip() or "unknown"
+            rubric_id_norm = rubric_id.lower()
+
+            if selected_rubric_id:
+                if rubric_id_norm != selected_rubric_id:
+                    continue
+            else:
+                if not is_due(rubric, now):
+                    continue
 
             rf = (rubric.get("format") or "").strip().lower()
             if rf == "quality_dashboard":
                 continue
 
-            rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
             if rubric_id not in attempted_rubrics:
                 attempted_rubrics.append(rubric_id)
@@ -1610,6 +1622,7 @@ async def amain() -> None:
                         state_scope=state_scope,
                         db_name=db_path.name,
                         attempted_rubrics=attempted_rubrics,
+                        selected_rubric_id=selected_rubric_id,
                     ),
                 )
             except Exception as e:

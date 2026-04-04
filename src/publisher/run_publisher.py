@@ -69,10 +69,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
-RUBRIC_ID_RAW = os.getenv("RUBRIC_ID", "")
-INCLUDE_SOURCES_RAW = os.getenv("INCLUDE_SOURCES", "")
-EXCLUDE_SOURCES_RAW = os.getenv("EXCLUDE_SOURCES", "")
-RESET_TEST_DB = os.getenv("RESET_TEST_DB", "").strip().lower() in ("1", "true", "yes", "y")
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
@@ -201,32 +197,6 @@ def load_yaml(path: Path) -> Dict[str, Any]:
 
 def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
-
-
-def _normalize_selected_rubric(raw: str) -> str:
-    value = (raw or "").strip()
-    if not value or value.lower() == "auto":
-        return ""
-    if "|" in value:
-        value = value.split("|", 1)[0].strip()
-    return value.lower()
-
-
-def _parse_source_list(raw: str) -> set[str]:
-    out: set[str] = set()
-    for part in (raw or "").split(","):
-        value = part.strip().lower()
-        if not value:
-            continue
-        if "|" in value:
-            value = value.split("|", 1)[0].strip()
-        out.add(value)
-    return out
-
-
-RUBRIC_ID = _normalize_selected_rubric(RUBRIC_ID_RAW)
-INCLUDE_SOURCES = _parse_source_list(INCLUDE_SOURCES_RAW)
-EXCLUDE_SOURCES = _parse_source_list(EXCLUDE_SOURCES_RAW)
 
 
 def sha1(s: str) -> str:
@@ -1099,27 +1069,10 @@ async def amain() -> None:
     run_started_monotonic = time.monotonic()
     state_scope = _resolve_state_scope()
     db_path = _resolve_publication_db_path()
-
-    if RESET_TEST_DB and state_scope == "test":
-        try:
-            if db_path.exists():
-                db_path.unlink()
-                print(f"[RESET_TEST_DB] removed {db_path}", flush=True)
-            else:
-                print(f"[RESET_TEST_DB] file not found: {db_path}", flush=True)
-        except Exception as e:
-            print(f"[RESET_TEST_DB][WARN] failed to remove {db_path}: {e}", flush=True)
-
     print(
-        f"[START] Publisher started at {now.isoformat()} "
-        f"target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} "
-        f"rubric_id={RUBRIC_ID or '(auto)'} reset_test_db={RESET_TEST_DB}",
+        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name}",
         flush=True,
     )
-    if INCLUDE_SOURCES:
-        print(f"[SOURCE_FILTER] include_sources={sorted(INCLUDE_SOURCES)}", flush=True)
-    if EXCLUDE_SOURCES:
-        print(f"[SOURCE_FILTER] exclude_sources={sorted(EXCLUDE_SOURCES)}", flush=True)
 
     week_key = iso_week_key(now)
     day = weekday_key(now)
@@ -1170,34 +1123,21 @@ async def amain() -> None:
         for rubric in rubrics:
             if posted >= max_posts:
                 break
-
-            rubric_id = (rubric.get("id") or "").strip() or "unknown"
-            rubric_id_norm = rubric_id.lower()
-            if RUBRIC_ID:
-                if rubric_id_norm != RUBRIC_ID:
-                    continue
-            else:
-                if not is_due(rubric, now):
-                    continue
+            if not is_due(rubric, now):
+                continue
 
             rf = (rubric.get("format") or "").strip().lower()
             if rf == "quality_dashboard":
                 continue
 
+            rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
             if rubric_id not in attempted_rubrics:
                 attempted_rubrics.append(rubric_id)
             rubric_skips = 0
 
             all_items: List[Dict[str, str]] = []
-            selected_source_ids: List[str] = []
             for sid in rubric.get("sources", []) or []:
-                sid_norm = (sid or "").strip().lower()
-                if INCLUDE_SOURCES and sid_norm not in INCLUDE_SOURCES:
-                    continue
-                if EXCLUDE_SOURCES and sid_norm in EXCLUDE_SOURCES:
-                    continue
-                selected_source_ids.append(sid)
                 src = sources.get(sid)
                 if not src:
                     kind = note("unknown_source_id", sid)
@@ -1212,11 +1152,6 @@ async def amain() -> None:
                     print(f"[SKIP][{kind}] source_fetch_failed source={sid} err={e}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
-
-            if selected_source_ids:
-                print(f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources={selected_source_ids}", flush=True)
-            else:
-                print(f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources=[]", flush=True)
 
             if not all_items:
                 note("no_candidates", rubric_id)
@@ -1416,7 +1351,7 @@ async def amain() -> None:
                             groq_key=GROQ_API_KEY,
                             gemini_key=GEMINI_API_KEY,
                             max_chars=POST_MAX_CHARS,
-                            day_key=day,
+                            day_key=effective_day,
                         ),
                         timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
                     )
@@ -1454,7 +1389,7 @@ async def amain() -> None:
 
                 plain = finalize_plain_post_for_publication(
                     plain_text=plain_raw,
-                    day_key=day,
+                    day_key=effective_day,
                     source_domain=sd,
                     source_url=canon,
                     max_chars=POST_MAX_CHARS,
@@ -1579,7 +1514,7 @@ async def amain() -> None:
                 try:
                     visual_buffer, visual_meta = build_post_visual(
                         title=h1_title,
-                        day_key=day,
+                        day_key=effective_day,
                         image_prompt=image_prompt,
                         pollinations_token=POLLINATIONS_TOKEN,
                     )

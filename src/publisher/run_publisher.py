@@ -69,18 +69,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
-
-
-def _normalize_selected_rubric(raw: str) -> str:
-    value = (raw or "").strip()
-    if not value or value.lower() == "auto":
-        return ""
-    if "|" in value:
-        value = value.split("|", 1)[0].strip()
-    return value.lower()
-
-
-RUBRIC_ID = _normalize_selected_rubric(os.getenv("RUBRIC_ID", ""))
+RUBRIC_ID_RAW = os.getenv("RUBRIC_ID", "")
+INCLUDE_SOURCES_RAW = os.getenv("INCLUDE_SOURCES", "")
+EXCLUDE_SOURCES_RAW = os.getenv("EXCLUDE_SOURCES", "")
+RESET_TEST_DB = os.getenv("RESET_TEST_DB", "").strip().lower() in ("1", "true", "yes", "y")
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
@@ -211,6 +203,32 @@ def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def _normalize_selected_rubric(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value or value.lower() == "auto":
+        return ""
+    if "|" in value:
+        value = value.split("|", 1)[0].strip()
+    return value.lower()
+
+
+def _parse_source_list(raw: str) -> set[str]:
+    out: set[str] = set()
+    for part in (raw or "").split(","):
+        value = part.strip().lower()
+        if not value:
+            continue
+        if "|" in value:
+            value = value.split("|", 1)[0].strip()
+        out.add(value)
+    return out
+
+
+RUBRIC_ID = _normalize_selected_rubric(RUBRIC_ID_RAW)
+INCLUDE_SOURCES = _parse_source_list(INCLUDE_SOURCES_RAW)
+EXCLUDE_SOURCES = _parse_source_list(EXCLUDE_SOURCES_RAW)
+
+
 def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
@@ -295,7 +313,6 @@ def _build_posted_zero_alert_plain(
     state_scope: str,
     db_name: str,
     attempted_rubrics: List[str],
-    selected_rubric_id: str = "",
 ) -> str:
     soft_total = sum(soft_skip_reasons.values())
     hard_total = sum(hard_skip_reasons.values())
@@ -306,7 +323,6 @@ def _build_posted_zero_alert_plain(
         "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
         f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
         f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
-        f"RUBRIC_ID={selected_rubric_id or '(auto)'}",
         f"STATE_SCOPE={state_scope} | History DB={db_name}",
         f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
         f"Soft skips: {soft_total} | Hard skips: {hard_total}",
@@ -1083,10 +1099,27 @@ async def amain() -> None:
     run_started_monotonic = time.monotonic()
     state_scope = _resolve_state_scope()
     db_path = _resolve_publication_db_path()
+
+    if RESET_TEST_DB and state_scope == "test":
+        try:
+            if db_path.exists():
+                db_path.unlink()
+                print(f"[RESET_TEST_DB] removed {db_path}", flush=True)
+            else:
+                print(f"[RESET_TEST_DB] file not found: {db_path}", flush=True)
+        except Exception as e:
+            print(f"[RESET_TEST_DB][WARN] failed to remove {db_path}: {e}", flush=True)
+
     print(
-        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} rubric_id={RUBRIC_ID or '(auto)'}",
+        f"[START] Publisher started at {now.isoformat()} "
+        f"target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} "
+        f"rubric_id={RUBRIC_ID or '(auto)'} reset_test_db={RESET_TEST_DB}",
         flush=True,
     )
+    if INCLUDE_SOURCES:
+        print(f"[SOURCE_FILTER] include_sources={sorted(INCLUDE_SOURCES)}", flush=True)
+    if EXCLUDE_SOURCES:
+        print(f"[SOURCE_FILTER] exclude_sources={sorted(EXCLUDE_SOURCES)}", flush=True)
 
     week_key = iso_week_key(now)
     day = weekday_key(now)
@@ -1106,8 +1139,6 @@ async def amain() -> None:
         aud_list = [AUDIENCE]
     else:
         aud_list = ["parents"]
-
-    selected_rubric_id = RUBRIC_ID
 
     posted = 0
     soft_skip_reasons: Dict[str, int] = {}
@@ -1142,9 +1173,8 @@ async def amain() -> None:
 
             rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_id_norm = rubric_id.lower()
-
-            if selected_rubric_id:
-                if rubric_id_norm != selected_rubric_id:
+            if RUBRIC_ID:
+                if rubric_id_norm != RUBRIC_ID:
                     continue
             else:
                 if not is_due(rubric, now):
@@ -1160,7 +1190,14 @@ async def amain() -> None:
             rubric_skips = 0
 
             all_items: List[Dict[str, str]] = []
+            selected_source_ids: List[str] = []
             for sid in rubric.get("sources", []) or []:
+                sid_norm = (sid or "").strip().lower()
+                if INCLUDE_SOURCES and sid_norm not in INCLUDE_SOURCES:
+                    continue
+                if EXCLUDE_SOURCES and sid_norm in EXCLUDE_SOURCES:
+                    continue
+                selected_source_ids.append(sid)
                 src = sources.get(sid)
                 if not src:
                     kind = note("unknown_source_id", sid)
@@ -1175,6 +1212,11 @@ async def amain() -> None:
                     print(f"[SKIP][{kind}] source_fetch_failed source={sid} err={e}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
+
+            if selected_source_ids:
+                print(f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources={selected_source_ids}", flush=True)
+            else:
+                print(f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources=[]", flush=True)
 
             if not all_items:
                 note("no_candidates", rubric_id)
@@ -1633,7 +1675,6 @@ async def amain() -> None:
                         state_scope=state_scope,
                         db_name=db_path.name,
                         attempted_rubrics=attempted_rubrics,
-                        selected_rubric_id=selected_rubric_id,
                     ),
                 )
             except Exception as e:

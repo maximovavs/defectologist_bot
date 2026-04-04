@@ -21,6 +21,10 @@ on:
         description: "Куда публиковать при ручном запуске: test | prod"
         required: false
         default: "test"
+      rubric_id:
+        description: "Rubric ID for manual test run (empty = by schedule)"
+        required: false
+        default: ""
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -39,6 +43,7 @@ jobs:
       AUDIENCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.audience || 'both' }}
       REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
       TARGET_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
+      RUBRIC_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rubric_id || '' }}
       STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
       TEST_DB_VERSION: "v12"
       STATE_CACHE_VERSION: "v12"
@@ -71,7 +76,6 @@ jobs:
       POLLINATIONS_HEIGHT: "720"
 
       # Telegram рендеринг ссылок
-      # TELEGRAM_PARSE_MODE: "MarkdownV2"
       TELEGRAM_PARSE_MODE: "HTML"
 
       # sentence-transformers dedup

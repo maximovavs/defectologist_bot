@@ -35,6 +35,22 @@ on:
           - "question_week | Пятница — Вопрос недели"
           - "age_norms | Воскресенье — Возрастная норма"
           - "method_piggybank | Суббота — Методическая копилка"
+      include_sources:
+        description: "Только эти source IDs (через запятую, пусто = все)"
+        required: false
+        default: ""
+      exclude_sources:
+        description: "Исключить source IDs (через запятую, пусто = ничего не исключать)"
+        required: false
+        default: ""
+      reset_test_db:
+        description: "Сбросить test history DB перед ручным прогоном"
+        required: false
+        type: choice
+        default: "no"
+        options:
+          - "no"
+          - "yes"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -54,6 +70,9 @@ jobs:
       REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
       TARGET_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
       RUBRIC_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rubric_id || '' }}
+      INCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.include_sources || '' }}
+      EXCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.exclude_sources || '' }}
+      RESET_TEST_DB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.reset_test_db || 'no' }}
       STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
       TEST_DB_VERSION: "v12"
       STATE_CACHE_VERSION: "v12"

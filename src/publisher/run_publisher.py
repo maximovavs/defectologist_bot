@@ -43,19 +43,6 @@ from src.services.publication_store import PublicationStore
 from src.services.visual_pipeline import build_post_visual
 
 
-def _parse_env_csv_list(raw: str) -> List[str]:
-    return [x.strip().lower() for x in (raw or "").split(",") if x.strip()]
-
-
-def _normalize_selected_rubric(raw: str) -> str:
-    value = (raw or "").strip()
-    if not value or value.lower() == "auto":
-        return ""
-    if "|" in value:
-        value = value.split("|", 1)[0].strip()
-    return value.lower()
-
-
 # =========================
 # Paths / env
 # =========================
@@ -82,10 +69,25 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
+
+
+def _normalize_selected_rubric(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value or value.lower() == "auto":
+        return ""
+    if "|" in value:
+        value = value.split("|", 1)[0].strip()
+    return value.lower()
+
+
+def _parse_csv_env(raw: str) -> List[str]:
+    return [x.strip() for x in (raw or "").split(",") if x.strip()]
+
+
 RUBRIC_ID = _normalize_selected_rubric(os.getenv("RUBRIC_ID", ""))
-INCLUDE_SOURCES = _parse_env_csv_list(os.getenv("INCLUDE_SOURCES", ""))
-EXCLUDE_SOURCES = _parse_env_csv_list(os.getenv("EXCLUDE_SOURCES", ""))
-RESET_TEST_DB = os.getenv("RESET_TEST_DB", "").strip().lower() in ("1", "true", "yes", "y")
+INCLUDE_SOURCES = _parse_csv_env(os.getenv("INCLUDE_SOURCES", ""))
+EXCLUDE_SOURCES = _parse_csv_env(os.getenv("EXCLUDE_SOURCES", ""))
+RESET_TEST_DB = os.getenv("RESET_TEST_DB", "no").strip().lower() in ("1", "true", "yes")
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
@@ -130,6 +132,7 @@ AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
 AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
 SOURCE_LINE_RE = re.compile(r"^Источник:\s*\S.+$", re.IGNORECASE)
 BENEFIT_LINE_RE = re.compile(r"^💡\s*Что это дает\s*:\s*.+\S$", re.IGNORECASE)
+BENEFIT_HEADING_RE = re.compile(r"^💡\s*Что это дает\s*:\s*$", re.IGNORECASE)
 MYTH_LINE_RE = re.compile(r"^🔴\s*Миф\s*:\s*.+\S$", re.IGNORECASE)
 QUESTION_LINE_RE = re.compile(r"^❓\s*Вопрос недели\s*:\s*.+\S$", re.IGNORECASE)
 ORIENTIRS_LINE_RE = re.compile(r"^Ориентиры:\s*.+\S$", re.IGNORECASE)
@@ -374,6 +377,7 @@ def _line_matches_structural(st: str) -> bool:
             AUDIENCE_LINE_RE.match(st),
             SOURCE_LINE_RE.match(st),
             BENEFIT_LINE_RE.match(st),
+            BENEFIT_HEADING_RE.match(st),
             MYTH_LINE_RE.match(st),
             QUESTION_LINE_RE.match(st),
             ORIENTIRS_LINE_RE.match(st),
@@ -1096,15 +1100,12 @@ async def amain() -> None:
         except Exception as e:
             print(f"[RESET_TEST_DB][WARN] failed to remove {db_path}: {e}", flush=True)
     print(
-        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} rubric_id={RUBRIC_ID or '(auto)'} reset_test_db={RESET_TEST_DB}",
+        f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} rubric_id={RUBRIC_ID or "(auto)"} reset_test_db={RESET_TEST_DB}",
         flush=True,
     )
 
     week_key = iso_week_key(now)
     day = weekday_key(now)
-    selected_rubric_id = RUBRIC_ID
-    selected_include_sources = INCLUDE_SOURCES
-    selected_exclude_sources = EXCLUDE_SOURCES
 
     max_posts = int(pub_cfg.get("max_posts_per_run", 1))
     disclaimer = channel_cfg.get("disclaimer", "") or ""
@@ -1153,41 +1154,35 @@ async def amain() -> None:
             if posted >= max_posts:
                 break
 
-            rf = (rubric.get("format") or "").strip().lower()
-            if rf == "quality_dashboard":
-                continue
-
             rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_id_norm = rubric_id.lower()
-            if selected_rubric_id:
-                if rubric_id_norm != selected_rubric_id:
+            if RUBRIC_ID:
+                if rubric_id_norm != RUBRIC_ID:
                     continue
             else:
                 if not is_due(rubric, now):
                     continue
 
+            rf = (rubric.get("format") or "").strip().lower()
+            if rf == "quality_dashboard":
+                continue
+
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
+            rubric_days = [str(x).strip().upper() for x in (rubric.get("byweekday") or []) if str(x).strip()]
+            effective_day = rubric_days[0] if RUBRIC_ID and rubric_days else day
             if rubric_id not in attempted_rubrics:
                 attempted_rubrics.append(rubric_id)
             rubric_skips = 0
 
-            rubric_days = [str(x).strip().upper() for x in (rubric.get("byweekday") or []) if str(x).strip()]
-            effective_day = rubric_days[0] if selected_rubric_id and rubric_days else day
-
-            rubric_source_ids: List[str] = list(rubric.get("sources", []) or [])
-            selected_source_ids: List[str] = []
-            for sid in rubric_source_ids:
-                sid_norm = sid.strip().lower()
-                if selected_include_sources and sid_norm not in selected_include_sources:
-                    continue
-                if selected_exclude_sources and sid_norm in selected_exclude_sources:
-                    continue
-                selected_source_ids.append(sid)
-
-            print(f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources={selected_source_ids}", flush=True)
+            selected_sources = list(rubric.get("sources", []) or [])
+            if INCLUDE_SOURCES:
+                selected_sources = [sid for sid in selected_sources if sid in INCLUDE_SOURCES]
+            if EXCLUDE_SOURCES:
+                selected_sources = [sid for sid in selected_sources if sid not in EXCLUDE_SOURCES]
+            print(f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources={selected_sources}", flush=True)
 
             all_items: List[Dict[str, str]] = []
-            for sid in selected_source_ids:
+            for sid in selected_sources:
                 src = sources.get(sid)
                 if not src:
                     kind = note("unknown_source_id", sid)

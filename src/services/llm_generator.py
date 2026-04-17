@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.0 — targeted prompt hardening for Monday/Sunday rubrics
+Patch 5.4.1 — restore missing build_generation_prompt + keep Monday/Sunday hardening
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -106,6 +106,7 @@ def _first_narrative_line_after_title(lines: List[str]) -> str:
         "🌍 что помогает в двуязычной семье",
         "🏠 что можно попробовать дома",
         "🏠 что можно понаблюдать дома",
+        "👄 пример",
         "💡 что это дает",
         "🔴 миф:",
         "❓ вопрос недели:",
@@ -165,8 +166,9 @@ MONDAY_GENERIC_TITLE_FRAGMENTS = [
     "совет логопеда дня",
     "развитие речи",
     "речи у детей",
-    "помочь детям",
+    "как помочь ребенку",
     "помочь ребенку",
+    "помочь детям",
     "детей, изучающих два языка",
     "детей изучающих два языка",
     "двуязычных детей",
@@ -279,6 +281,9 @@ def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     if not _find_line(lines, "🧩 Что попробовать сегодня:"):
         return False, "monday_no_try_today_block"
 
+    if not _find_line(lines, "👄 Пример:"):
+        return False, "monday_no_example_block"
+
     if not _find_line(lines, "💡 Что это дает:"):
         return False, "monday_no_benefit_block"
 
@@ -286,11 +291,16 @@ def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     if not try_today_text or len(try_today_text) < 20:
         return False, "monday_try_today_too_short"
 
+    example_text = _line_after_prefix(lines, "👄 Пример:")
+    if not example_text or len(example_text) < 8:
+        return False, "monday_example_too_short"
+
     benefit_text = _line_after_prefix(lines, "💡 Что это дает:")
     if not benefit_text or len(benefit_text) < 12:
         return False, "monday_benefit_too_short"
 
     return True, "ok"
+
 
 def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
@@ -341,6 +351,206 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     rf = (rubric_format or "").strip().lower()
 
     if dk == "MO" or rf == "tip_of_day":
+        return _validate_tip_of_day_output(out)
+
+    if dk == "SU" or rf == "age_norms":
+        return _validate_age_norms_output(out)
+
+    return True, "ok"
+
+
+# -----------------------
+# Provider config / throttle / backoff
+# -----------------------
+
+LLM_CALL_DELAY_SEC = float(os.getenv("LLM_CALL_DELAY_SEC", "2.0"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
+LLM_BACKOFF_MIN = float(os.getenv("LLM_BACKOFF_MIN", "15"))
+LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))
+
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+
+_throttle_lock = asyncio.Lock()
+_next_allowed_ts = 0.0
+_gemini_region_blocked = False
+
+
+async def _throttle() -> None:
+    global _next_allowed_ts
+    async with _throttle_lock:
+        now = time.time()
+        if now < _next_allowed_ts:
+            await asyncio.sleep(_next_allowed_ts - now)
+        _next_allowed_ts = time.time() + LLM_CALL_DELAY_SEC
+
+
+def _is_quota_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status == 429 or any(
+        k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"]
+    )
+
+
+def _is_gemini_region_block(text: str) -> bool:
+    t = (text or "").lower()
+    return "user location is not supported" in t or "location is not supported" in t
+
+
+async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: int = 70) -> requests.Response:
+    def _do() -> requests.Response:
+        return requests.post(url, headers=headers, json=payload, timeout=timeout)
+
+    return await asyncio.to_thread(_do)
+
+
+async def groq_chat(prompt: str, api_key: str) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
+
+    last_err = ""
+    for attempt in range(1, LLM_MAX_RETRIES + 1):
+        await _throttle()
+        resp = await _post_json(url, headers, payload, timeout=80)
+
+        if resp.status_code == 200:
+            j = resp.json()
+            return (j["choices"][0]["message"]["content"] or "").strip()
+
+        txt = resp.text or ""
+        last_err = f"{resp.status_code}: {txt[:240]}"
+        if _is_quota_error(resp.status_code, txt):
+            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+            wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+            wait = wait * random.uniform(0.85, 1.15)
+            await asyncio.sleep(wait)
+            continue
+
+        resp.raise_for_status()
+
+    raise RuntimeError(f"groq_failed_after_retries:{last_err}")
+
+
+async def gemini_generate(prompt: str, api_key: str) -> str:
+    global _gemini_region_blocked
+    if _gemini_region_blocked:
+        raise RuntimeError("gemini_disabled_region")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    await _throttle()
+    resp = await _post_json(url, headers, payload, timeout=80)
+
+    if resp.status_code == 200:
+        j = resp.json()
+        return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+
+    txt = resp.text or ""
+    if _is_gemini_region_block(txt):
+        _gemini_region_blocked = True
+        raise RuntimeError("gemini_blocked_region")
+
+    if resp.status_code == 404:
+        raise RuntimeError(f"gemini_model_not_found:{GEMINI_MODEL}")
+
+    resp.raise_for_status()
+    raise RuntimeError(f"gemini_failed:{resp.status_code}")
+
+
+# -----------------------
+# Prompt templates
+# -----------------------
+
+def _common_rules(max_chars: int) -> str:
+    return (
+        "Ты — практикующий Логопед-дефектолог и сильный Telegram-редактор.\n"
+        "Пиши по-русски.\n"
+        f"Весь пост не должен превышать {max_chars} символов.\n"
+        "Опирайся только на EVIDENCE ниже.\n"
+        "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
+        "Опирайся преимущественно на перефразирование, не используй прямые цитаты из текста.\n"
+        "Нельзя копировать длинные фразы из статьи.\n"
+        "Нельзя печатать служебные слова EVIDENCE, ШАБЛОН и placeholders.\n"
+        "Категорически запрещено использовать канцелярские фразы вроде: "
+        "«развитие речи очень важно», «родители часто сталкиваются с проблемой», "
+        "«создайте благоприятную среду», «это важный аспект общего развития».\n"
+        "Никаких заголовков «Проблема», «Решение», «Результат», «Как сделать дома».\n"
+        "Твоя задача — вытащить практическую суть: игру, упражнение, прием, последовательность действий, примеры слов, формулировки для родителя.\n"
+        "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
+        "Не ставь диагнозы и не назначай лечение.\n"
+        "Не используй Markdown и кодовые блоки.\n"
+        "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
+        "Используй формат вроде: #билингвизм #запуск_речи\n"
+        "Никогда не пиши больше двух тематических хештегов.\n"
+    )
+
+
+def _ensure_source_and_link(
+    text: str,
+    source_domain: str,
+    source_url: str,
+) -> str:
+    lines = [x.rstrip() for x in (text or "").replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    has_source_line = any(re.match(r"^Источник:\s*\S.+$", x.strip(), re.IGNORECASE) for x in lines)
+    has_link_line = any(x.strip().startswith("🔗 ") for x in lines)
+
+    if not has_source_line:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"Источник: {source_domain}")
+
+    if not has_link_line:
+        lines.append(f"🔗 {source_url}")
+
+    return "\n".join(lines).strip()
+
+
+def build_generation_prompt(
+    day_key: str,
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    max_chars: int,
+) -> str:
+    aud = (audience or "parents").strip().lower()
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+    rules = _common_rules(max_chars)
+
+    if aud == "pros":
+        template = (
+            f"{rubric_title} {title_suffix}\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "Введение\n"
+            "2–3 предложения: кратко сформулируй клинический вопрос и цель материала.\n\n"
+            "Методы\n"
+            "2–4 предложения: опиши дизайн, приемы, наблюдения, критерии или методическую логику.\n\n"
+            "Главные выводы\n"
+            "3–5 предложений: передай самые важные результаты экспертным языком, без копирования исходных фраз.\n\n"
+            "Практическое применение\n"
+            "2–4 предложения: что специалист может взять в работу уже сейчас.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+
+    if dk == "MO" or rf == "tip_of_day":
         template = (
             "Первая строка — H1 с одним конкретным советом на сегодня.\n"
             "Не пиши название рубрики и не пиши общую тему.\n"
@@ -353,13 +563,16 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
             "<1 короткая вводная фраза>\n\n"
             "🧩 Что попробовать сегодня:\n"
             "<2–4 предложения с одним конкретным приемом>\n\n"
+            "👄 Пример:\n"
+            "<1–3 короткие реплики взрослого или пример мини-диалога>\n\n"
             "💡 Что это дает:\n"
             "<1 короткое предложение про один конкретный навык>\n\n"
             "Не пиши «💡 Это помогает...» вместо названия блока. Должна быть отдельная строка «💡 Что это дает:».\n"
-            "После строки возраста обязательно оставь пустую строку. Перед блоками 🧩 и 💡 тоже обязательно оставь пустую строку.\n"
+            "После строки возраста обязательно оставь пустую строку. Перед блоками 🧩, 👄 и 💡 тоже обязательно оставь пустую строку.\n"
             "В вводной фразе не делай обзор темы и не используй канцелярит. Это должна быть живая подводка к одному домашнему шагу.\n"
             "В блоке «🧩 Что попробовать сегодня:» опиши один конкретный прием в 2–4 предложениях.\n"
-            "Обязательно добавь, что говорит взрослый, что делает ребенок, и 1–2 короткие реплики или примера слов.\n"
+            "Обязательно добавь, что говорит взрослый, что делает ребенок.\n"
+            "В блоке «👄 Пример:» дай короткие реальные реплики.\n"
             "В блоке «💡 Что это дает:» назови один конкретный навык одним коротким предложением.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
@@ -731,7 +944,8 @@ async def generate_post_plain_from_evidence_async(
                 repair_prompt += (
                     "Для Monday обязательно: первая строка — один прикладной совет, "
                     "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
-                    "никаких обзоров темы и общих формулировок."
+                    "никаких обзоров темы и общих формулировок. "
+                    "Сохрани блоки 🧩, 👄 и 💡."
                 )
 
             if dk == "SU" or rf == "age_norms":

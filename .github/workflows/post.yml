@@ -1,4 +1,4 @@
-name: Logoped Channel Bot v2.6
+name: Logoped Channel Bot v2.8
 
 on:
   schedule:
@@ -21,15 +21,36 @@ on:
         description: "Куда публиковать при ручном запуске: test | prod"
         required: false
         default: "test"
-
-run-name: >-
-  Logoped Bot • ${{ github.event_name }} •
-  channel=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }} •
-  provider=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
-  cancel-in-progress: false
+      rubric_id:
+        description: "Какую рубрику тестировать"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - "auto"
+          - "tip_of_day | Понедельник — Совет логопеда дня"
+          - "play_and_speak | Вторник — Играем и говорим"
+          - "myth_fact | Среда — Миф / Факт"
+          - "bilingual_corner | Четверг — Русский за границей"
+          - "question_week | Пятница — Вопрос недели"
+          - "age_norms | Воскресенье — Возрастная норма"
+          - "method_piggybank | Суббота — Методическая копилка"
+      include_sources:
+        description: "Только эти source IDs (через запятую, пусто = все)"
+        required: false
+        default: ""
+      exclude_sources:
+        description: "Исключить source IDs (через запятую, пусто = ничего не исключать)"
+        required: false
+        default: ""
+      reset_test_db:
+        description: "Сбросить test history DB перед ручным прогоном"
+        required: false
+        type: choice
+        default: "no"
+        options:
+          - "no"
+          - "yes"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -43,35 +64,39 @@ jobs:
     env:
       TZ: "Asia/Nicosia"
 
-      # дефолты для schedule; значения из manual dispatch переопределяют их
+      # управлялки через manual dispatch (если это schedule — дефолты ниже)
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
       AUDIENCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.audience || 'both' }}
       REWRITE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.provider || 'auto' }}
       TARGET_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
+      RUBRIC_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rubric_id || '' }}
+      INCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.include_sources || '' }}
+      EXCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.exclude_sources || '' }}
+      RESET_TEST_DB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.reset_test_db || 'no' }}
+      STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
+      TEST_DB_VERSION: "v12"
+      STATE_CACHE_VERSION: "v12"
 
-      # legacy-совместимость с сайтом-источником
+      # важно для logorina.ru (плохой TLS)
       INSECURE_TLS_DOMAINS: "logorina.ru"
       SUPPRESS_INSECURE_TLS_WARNINGS: "1"
 
-      # анти-лимиты и таймауты LLM
+      # анти-лимиты LLM
       LLM_MAX_RETRIES: "3"
       LLM_CALL_DELAY_SEC: "1.5"
       LLM_BACKOFF_MIN: "8"
       LLM_BACKOFF_MAX: "45"
 
-      # лимиты одного publisher run
+      # лимиты publisher run
       MAX_RUN_SECONDS: "1500"
       MAX_CANDIDATES_PER_RUBRIC: "25"
       MAX_SKIPS_PER_RUBRIC: "12"
       MAX_LLM_SECONDS_PER_CANDIDATE: "180"
       IMAGE_PROMPT_TIMEOUT_SECONDS: "60"
 
-      # провайдеры и модели
-      # основной Groq-дефолт смещён в сторону скорости/стоимости для коротких TG-постов
-      GROQ_MODEL: "openai/gpt-oss-20b"
-      GROQ_MODELS: "openai/gpt-oss-20b,llama-3.1-8b-instant,llama-3.3-70b-versatile"
+      # Модели
+      GROQ_MODEL: "llama-3.3-70b-versatile"
       GEMINI_MODEL: "gemini-2.5-flash"
-      GEMINI_MODELS: "gemini-2.5-flash,gemini-2.5-flash-lite"
 
       # Pollinations
       POLLINATIONS_TIMEOUT_SECONDS: "10"
@@ -79,24 +104,31 @@ jobs:
       POLLINATIONS_WIDTH: "1280"
       POLLINATIONS_HEIGHT: "720"
 
-      # Telegram rendering
+      # Telegram рендеринг ссылок
       TELEGRAM_PARSE_MODE: "HTML"
 
-      # ограничения поста
+      # sentence-transformers dedup
+      SEMANTIC_THRESHOLD: "0.85"
+      SEMANTIC_THRESHOLD_SOURCE: "0.93"
+      SEMANTIC_THRESHOLD_POST: "0.86"
+      SEMANTIC_MODEL_NAME: "all-MiniLM-L6-v2"
+      MAX_LLM_REGEN_ATTEMPTS: "3"
+
+      # общий лимит поста
       POST_MAX_CHARS: "1000"
       TG_CAPTION_MAX_BYTES: "950"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v5
 
       - name: Restore .state cache
         uses: actions/cache/restore@v5
         with:
           path: .state
-          key: logoped-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: logoped-state-${{ env.STATE_CACHE_VERSION }}-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            logoped-state-${{ github.ref_name }}-
-            logoped-state-
+            logoped-state-${{ env.STATE_CACHE_VERSION }}-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-
+            logoped-state-${{ env.STATE_CACHE_VERSION }}-${{ env.STATE_SCOPE }}-
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -132,7 +164,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .state
-          key: logoped-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: logoped-state-${{ env.STATE_CACHE_VERSION }}-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload dry-run artifacts
         if: ${{ env.DRY_RUN == '1' }}

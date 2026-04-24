@@ -154,12 +154,49 @@ def _resolve_background_path(day_key: str) -> Path:
     )
 
 
+_STRUCTURAL_TITLE_PATTERNS = [
+    re.compile(r"^👶\s*Возраст\s*:", re.IGNORECASE),
+    re.compile(r"^👩‍⚕️\s*Аудитория\s*:", re.IGNORECASE),
+    re.compile(r"^🎲\s*Как играть", re.IGNORECASE),
+    re.compile(r"^🧩\s*Что попробовать сегодня", re.IGNORECASE),
+    re.compile(r"^🌍\s*Что помогает в двуязычной семье", re.IGNORECASE),
+    re.compile(r"^🏠\s*Что можно попробовать дома", re.IGNORECASE),
+    re.compile(r"^💡\s*Что это дает\s*:", re.IGNORECASE),
+    re.compile(r"^🔴\s*Миф\s*:", re.IGNORECASE),
+    re.compile(r"^❓\s*Вопрос недели\s*:", re.IGNORECASE),
+    re.compile(r"^Ориентиры\s*:", re.IGNORECASE),
+    re.compile(r"^Источник\s*:", re.IGNORECASE),
+    re.compile(r"^🔗\s+", re.IGNORECASE),
+]
+
+
+def _is_structural_cover_line(text: str) -> bool:
+    st = norm_space(text)
+    if not st:
+        return True
+    if st.startswith('#'):
+        return True
+    return any(pat.match(st) for pat in _STRUCTURAL_TITLE_PATTERNS)
+
+
+def sanitize_cover_title(title: str, fallback: str = "Логопедия и дефектология") -> str:
+    candidate = norm_space(title)
+    fb = norm_space(fallback) or "Логопедия и дефектология"
+    if not candidate or _is_structural_cover_line(candidate):
+        return fb
+    return candidate
+
+
 def extract_h1_from_plain_post(plain_text: str, fallback: str = "Логопедия и дефектология") -> str:
+    first = ""
     for line in (plain_text or "").splitlines():
-        st = line.strip()
+        st = norm_space(line)
         if st:
-            return st
-    return fallback
+            first = st
+            break
+    if not first:
+        return sanitize_cover_title("", fallback=fallback)
+    return sanitize_cover_title(first, fallback=fallback)
 
 
 def _measure(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> float:
@@ -212,31 +249,39 @@ def _ellipsize_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageF
     return (base + "…").strip() if base else "…"
 
 
+
 def _fit_title_lines(
     draw: ImageDraw.ImageDraw,
     title: str,
     max_width: int,
     max_height: int,
     max_lines: int = MAX_TITLE_LINES,
-) -> Tuple[ImageFont.ImageFont, List[str], int]:
+) -> Tuple[ImageFont.ImageFont, str, int]:
+    cleaned = norm_space(title)
+    if not cleaned:
+        font = _load_font(42)
+        return font, "", max(8, int(42 * 0.2))
+
     for font_size in range(88, 34, -2):
         font = _load_font(font_size)
-        lines = _wrap_to_width(draw, title, font, max_width)
+        lines = _wrap_to_width(draw, cleaned, font, max_width)
         if len(lines) > max_lines:
             lines = lines[:max_lines]
             lines[-1] = _ellipsize_line(draw, lines[-1], font, max_width)
 
-        line_height = int(font_size * 1.18)
-        total_height = line_height * len(lines)
-        if lines and total_height <= max_height:
-            return font, lines, line_height
+        multiline = "\n".join(lines)
+        spacing = max(8, int(font_size * 0.2))
+        bbox = draw.multiline_textbbox((0, 0), multiline, font=font, align="center", spacing=spacing)
+        width = int(bbox[2] - bbox[0])
+        height = int(bbox[3] - bbox[1])
+        if lines and width <= max_width and height <= max_height:
+            return font, multiline, spacing
 
     font = _load_font(34)
-    lines = _wrap_to_width(draw, title, font, max_width)[:max_lines]
+    lines = _wrap_to_width(draw, cleaned, font, max_width)[:max_lines]
     if lines:
         lines[-1] = _ellipsize_line(draw, lines[-1], font, max_width)
-    return font, lines, int(34 * 1.18)
-
+    return font, "\n".join(lines), max(8, int(34 * 0.2))
 
 def _open_background(day_key: str) -> Image.Image:
     bg_path = _resolve_background_path(day_key)
@@ -321,21 +366,22 @@ def validate_generated_image_bytes(image_bytes: bytes, content_type: str = "") -
 # Fallback builder
 # =========================
 
+
 def build_fallback_cover_buffer(
     title: str,
     day_key: str,
     max_lines: int = MAX_TITLE_LINES,
     text_color: str = TITLE_COLOR,
+    fallback_title: str = "Логопедия и дефектология",
 ) -> BytesIO:
     image = _open_background(day_key)
     draw = ImageDraw.Draw(image)
+    title = sanitize_cover_title(title, fallback=fallback_title)
 
     safe_width = int(TARGET_SIZE[0] * 0.72)
     safe_height = int(TARGET_SIZE[1] * 0.42)
-    left = int((TARGET_SIZE[0] - safe_width) / 2)
-    top = int((TARGET_SIZE[1] - safe_height) / 2)
 
-    font, lines, line_height = _fit_title_lines(
+    font, multiline_text, spacing = _fit_title_lines(
         draw=draw,
         title=title,
         max_width=safe_width,
@@ -343,14 +389,20 @@ def build_fallback_cover_buffer(
         max_lines=max_lines,
     )
 
-    total_height = line_height * len(lines)
-    y = top + int((safe_height - total_height) / 2)
-
-    for line in lines:
-        width = _measure(draw, line, font)
-        x = int((TARGET_SIZE[0] - width) / 2)
-        draw.text((x, y), line, font=font, fill=text_color, align="center")
-        y += line_height
+    if multiline_text:
+        bbox = draw.multiline_textbbox((0, 0), multiline_text, font=font, align="center", spacing=spacing)
+        text_width = int(bbox[2] - bbox[0])
+        text_height = int(bbox[3] - bbox[1])
+        x = int((TARGET_SIZE[0] - text_width) / 2 - bbox[0])
+        y = int((TARGET_SIZE[1] - text_height) / 2 - bbox[1])
+        draw.multiline_text(
+            (x, y),
+            multiline_text,
+            font=font,
+            fill=text_color,
+            align="center",
+            spacing=spacing,
+        )
 
     buffer = BytesIO()
     image.save(buffer, format="PNG", optimize=True)

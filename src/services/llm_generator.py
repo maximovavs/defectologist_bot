@@ -3,24 +3,26 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.3.0 — narrative generation + thematic hashtags + image prompts
+Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODELS / GEMINI_MODELS
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
 2) Gemini: fallback через x-goog-api-key; региональный блок выключает Gemini на весь прогон.
 3) Родительские рубрики: role-prompting + живой narrative format без заголовков
    «Проблема / Решение / Результат».
-4) В конце поста модель должна сгенерировать 1–2 тематических хештега.
-5) Источник и ссылка достраиваются кодом, если модель их пропустила.
-6) Валидатор мягкий:
-   - текст не пустой
-   - текст не слишком короткий
-   - нет banned phrases
-   - нет template leak
-7) Защита от утечек шаблона:
-   - запрещены #пример_тега / #пример_тега_2
-   - запрещено служебное «Действуй как Логопед-дефектолог» в итоговом тексте
-8) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
+4) Для Monday / tip_of_day:
+   - отдельный prompt вместо общего fallback
+   - H1 должен быть одним прикладным советом / одним действием
+   - первая фраза должна вести в один конкретный домашний прием на сегодня
+5) Для Sunday / age_norms:
+   - framing только через возрастные ориентиры / milestones
+   - запрет на патологические и коррекционные темы в итоговом тексте
+   - спокойный родительский тон без нагнетания
+6) В конце поста модель должна сгенерировать 1–2 тематических хештега.
+7) Источник и ссылка достраиваются кодом, если модель их пропустила.
+8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
+9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
+10) Минимальный fallback по спискам GROQ_MODELS и GEMINI_MODELS.
 """
 
 import asyncio
@@ -62,6 +64,65 @@ def _strip_placeholder_artifacts(text: str) -> str:
     return "\n".join(cleaned).strip()
 
 
+def _extract_nonempty_lines(text: str) -> List[str]:
+    return [x.strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
+
+
+def _find_line(lines: List[str], prefix: str) -> str:
+    probe = (prefix or "").strip().lower()
+    for line in lines:
+        st = line.strip()
+        if st.lower().startswith(probe):
+            return st
+    return ""
+
+
+def _line_after_prefix(lines: List[str], prefix: str) -> str:
+    probe = (prefix or "").strip().lower()
+    for idx, line in enumerate(lines):
+        st = line.strip()
+        if st.lower().startswith(probe):
+            if ":" in st and not st.endswith(":"):
+                return st.split(":", 1)[1].strip()
+            for j in range(idx + 1, len(lines)):
+                nxt = lines[j].strip()
+                if nxt:
+                    return nxt
+            return ""
+    return ""
+
+
+def _first_narrative_line_after_title(lines: List[str]) -> str:
+    skipped_prefixes = (
+        "👶 возраст:",
+        "👩‍⚕️ аудитория:",
+        "🎲 как играть",
+        "🧩 что попробовать сегодня",
+        "🌍 что помогает в двуязычной семье",
+        "🏠 что можно попробовать дома",
+        "🏠 что можно понаблюдать дома",
+        "👄 пример",
+        "💡 что это дает",
+        "🔴 миф:",
+        "❓ вопрос недели:",
+        "ориентиры:",
+        "источник:",
+        "🔗 ",
+        "ℹ️ ",
+    )
+    for idx, line in enumerate(lines):
+        if idx == 0:
+            continue
+        st = line.strip()
+        low = st.lower()
+        if any(low.startswith(prefix) for prefix in skipped_prefixes):
+            continue
+        if st.startswith("#"):
+            continue
+        return st
+    return ""
+
+
 # -----------------------
 # Output validators
 # -----------------------
@@ -96,6 +157,60 @@ TITLE_TEMPLATE_LEAKS = [
     "#пример_тега_2",
 ]
 
+MONDAY_GENERIC_TITLE_FRAGMENTS = [
+    "совет логопеда дня",
+    "развитие речи",
+    "речи у детей",
+    "как помочь ребенку",
+    "помочь ребенку",
+    "помочь детям",
+    "детей, изучающих два языка",
+    "детей изучающих два языка",
+    "двуязычных детей",
+    "билингв",
+    "что важно знать",
+    "сегодня работаем над",
+    "сегодня поговорим",
+]
+
+MONDAY_GENERIC_LEAD_FRAGMENTS = [
+    "сегодня работаем над",
+    "сегодня поговорим",
+    "сегодня разберем",
+    "сегодня обсудим",
+    "поможем ребенку",
+    "помочь ребенку",
+    "помочь детям",
+    "развитие речи",
+]
+
+SUNDAY_PATHOLOGY_FRAGMENTS = [
+    "задерж",
+    "нарушен",
+    "нарушение",
+    "патологи",
+    "диагноз",
+    "диагност",
+    "коррек",
+    "дефицит",
+    "аутиз",
+    "рас",
+    "алали",
+    "дизартр",
+    "дислал",
+    "дисфаз",
+    "овз",
+    "терап",
+    "лечени",
+]
+
+SUNDAY_GENERIC_TITLE_FRAGMENTS = [
+    "возрастная норма",
+    "нормы речи",
+    "развитие речи",
+    "речь ребенка",
+]
+
 
 def _normalize_scan_text(text: str) -> str:
     return norm_space(text).replace("ё", "е").lower()
@@ -119,7 +234,101 @@ def _has_template_leak(text: str) -> bool:
     return False
 
 
-def _validate_output(text: str) -> Tuple[bool, str]:
+def _contains_any_fragment(text: str, fragments: List[str]) -> Optional[str]:
+    blob = _normalize_scan_text(text)
+    for fr in fragments:
+        probe = _normalize_scan_text(fr)
+        if probe and probe in blob:
+            return fr
+    return None
+
+
+def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "monday_empty"
+
+    title = lines[0]
+    if len(title) > 80:
+        return False, "monday_title_too_long"
+
+    title_bad = _contains_any_fragment(title, MONDAY_GENERIC_TITLE_FRAGMENTS)
+    if title_bad:
+        return False, f"monday_generic_title:{title_bad}"
+
+    if title.endswith(":"):
+        return False, "monday_title_trailing_colon"
+
+    if not _find_line(lines, "👶 Возраст:"):
+        return False, "monday_no_age_line"
+
+    lead = _first_narrative_line_after_title(lines)
+    if not lead:
+        return False, "monday_no_lead"
+
+    lead_bad = _contains_any_fragment(lead, MONDAY_GENERIC_LEAD_FRAGMENTS)
+    if lead_bad:
+        return False, f"monday_generic_lead:{lead_bad}"
+
+    if len(lead) < 24:
+        return False, "monday_lead_too_short"
+
+    if not _find_line(lines, "🧩 Что попробовать сегодня:"):
+        return False, "monday_no_try_today_block"
+
+    if not _find_line(lines, "👄 Пример:"):
+        return False, "monday_no_example_block"
+
+    if not _find_line(lines, "💡 Что это дает:"):
+        return False, "monday_no_benefit_block"
+
+    try_today_text = _line_after_prefix(lines, "🧩 Что попробовать сегодня:")
+    if not try_today_text or len(try_today_text) < 20:
+        return False, "monday_try_today_too_short"
+
+    example_text = _line_after_prefix(lines, "👄 Пример:")
+    if not example_text or len(example_text) < 8:
+        return False, "monday_example_too_short"
+
+    benefit_text = _line_after_prefix(lines, "💡 Что это дает:")
+    if not benefit_text or len(benefit_text) < 12:
+        return False, "monday_benefit_too_short"
+
+    return True, "ok"
+
+
+def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "sunday_empty"
+
+    title = lines[0]
+    if len(title) > 90:
+        return False, "sunday_title_too_long"
+
+    title_bad = _contains_any_fragment(title, SUNDAY_GENERIC_TITLE_FRAGMENTS)
+    if title_bad:
+        return False, f"sunday_generic_title:{title_bad}"
+
+    if not _find_line(lines, "👶 Возраст:"):
+        return False, "sunday_no_age_line"
+
+    orientirs = _find_line(lines, "Ориентиры:")
+    if not orientirs:
+        return False, "sunday_no_orientirs"
+
+    blob = _normalize_scan_text(text)
+    if "индивидуаль" not in blob:
+        return False, "sunday_no_individual_phrase"
+
+    pathology_bad = _contains_any_fragment(text, SUNDAY_PATHOLOGY_FRAGMENTS)
+    if pathology_bad:
+        return False, f"sunday_pathology:{pathology_bad}"
+
+    return True, "ok"
+
+
+def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
         return False, "empty"
@@ -132,6 +341,15 @@ def _validate_output(text: str) -> Tuple[bool, str]:
 
     if _has_template_leak(out):
         return False, "template_leak"
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    if dk == "MO" or rf == "tip_of_day":
+        return _validate_tip_of_day_output(out)
+
+    if dk == "SU" or rf == "age_norms":
+        return _validate_age_norms_output(out)
 
     return True, "ok"
 
@@ -153,6 +371,21 @@ _next_allowed_ts = 0.0
 _gemini_region_blocked = False
 
 
+def _parse_model_list(raw: str, single_fallback: str) -> List[str]:
+    items: List[str] = []
+    for part in (raw or "").split(","):
+        model = part.strip()
+        if model and model not in items:
+            items.append(model)
+    if single_fallback and single_fallback not in items:
+        items.append(single_fallback)
+    return items
+
+
+GROQ_MODELS = _parse_model_list(os.getenv("GROQ_MODELS", ""), GROQ_MODEL)
+GEMINI_MODELS = _parse_model_list(os.getenv("GEMINI_MODELS", ""), GEMINI_MODEL)
+
+
 async def _throttle() -> None:
     global _next_allowed_ts
     async with _throttle_lock:
@@ -165,6 +398,25 @@ async def _throttle() -> None:
 def _is_quota_error(status: int, text: str) -> bool:
     t = (text or "").lower()
     return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
+
+
+def _is_temporary_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status in (500, 502, 503, 504) or "overloaded" in t or "temporarily unavailable" in t
+
+
+def _is_model_not_available(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        status in (400, 404)
+        and (
+            "model" in t
+            or "not found" in t
+            or "decommissioned" in t
+            or "unsupported" in t
+            or "does not exist" in t
+        )
+    )
 
 
 def _is_gemini_region_block(text: str) -> bool:
@@ -182,33 +434,43 @@ async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: 
 async def groq_chat(prompt: str, api_key: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
 
     last_err = ""
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
-        await _throttle()
-        resp = await _post_json(url, headers, payload, timeout=80)
+    for model in GROQ_MODELS:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
 
-        if resp.status_code == 200:
-            j = resp.json()
-            return (j["choices"][0]["message"]["content"] or "").strip()
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            await _throttle()
+            resp = await _post_json(url, headers, payload, timeout=80)
 
-        txt = resp.text or ""
-        last_err = f"{resp.status_code}: {txt[:240]}"
-        if _is_quota_error(resp.status_code, txt):
-            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
-            wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-            wait = wait * random.uniform(0.85, 1.15)
-            await asyncio.sleep(wait)
-            continue
+            if resp.status_code == 200:
+                j = resp.json()
+                return (j["choices"][0]["message"]["content"] or "").strip()
 
-        resp.raise_for_status()
+            txt = resp.text or ""
+            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
 
-    raise RuntimeError(f"groq_failed_after_retries:{last_err}")
+            if _is_model_not_available(resp.status_code, txt):
+                print(f"[LLM][groq] skip unavailable model={model} status={resp.status_code}", flush=True)
+                break
+
+            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                if attempt < LLM_MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[LLM][groq] exhausted retries model={model} status={resp.status_code}", flush=True)
+                break
+
+            resp.raise_for_status()
+
+    raise RuntimeError(f"groq_failed_after_fallbacks:{last_err}")
 
 
 async def gemini_generate(prompt: str, api_key: str) -> str:
@@ -216,27 +478,44 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
     if _gemini_region_blocked:
         raise RuntimeError("gemini_disabled_region")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    last_err = ""
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    await _throttle()
-    resp = await _post_json(url, headers, payload, timeout=80)
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            await _throttle()
+            resp = await _post_json(url, headers, payload, timeout=80)
 
-    if resp.status_code == 200:
-        j = resp.json()
-        return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+            if resp.status_code == 200:
+                j = resp.json()
+                return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
 
-    txt = resp.text or ""
-    if _is_gemini_region_block(txt):
-        _gemini_region_blocked = True
-        raise RuntimeError("gemini_blocked_region")
+            txt = resp.text or ""
+            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
 
-    if resp.status_code == 404:
-        raise RuntimeError(f"gemini_model_not_found:{GEMINI_MODEL}")
+            if _is_gemini_region_block(txt):
+                _gemini_region_blocked = True
+                raise RuntimeError("gemini_blocked_region")
 
-    resp.raise_for_status()
-    raise RuntimeError(f"gemini_failed:{resp.status_code}")
+            if _is_model_not_available(resp.status_code, txt):
+                print(f"[LLM][gemini] skip unavailable model={model} status={resp.status_code}", flush=True)
+                break
+
+            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                if attempt < LLM_MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[LLM][gemini] exhausted retries model={model} status={resp.status_code}", flush=True)
+                break
+
+            resp.raise_for_status()
+
+    raise RuntimeError(f"gemini_failed_after_fallbacks:{last_err}")
 
 
 # -----------------------
@@ -325,9 +604,47 @@ def build_generation_prompt(
         )
         return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
 
+    if dk == "MO" or rf == "tip_of_day":
+        template = (
+            "Первая строка — H1 с одним конкретным советом на сегодня.\n"
+            "Не пиши название рубрики и не пиши общую тему.\n"
+            "H1 должен звучать как одно простое действие родителя дома.\n"
+            "Хорошие паттерны: «Повторите последнее слово и сделайте паузу», «Дайте выбор из двух слов», «Положите игрушки в мешочек и просите называть».\n"
+            "Плохие паттерны: «Развитие речи у детей», «Как помочь ребенку говорить», «Билингвизм у детей».\n\n"
+            "Верни текст строго в таком скелете, без перестановки блоков и без замены названий блоков:\n\n"
+            "<H1 с одним действием>\n\n"
+            "👶 Возраст: ...\n\n"
+            "<1 короткая вводная фраза>\n\n"
+            "🧩 Что попробовать сегодня:\n"
+            "<2–4 предложения с одним конкретным приемом>\n\n"
+            "👄 Пример:\n"
+            "<1–3 короткие реплики взрослого или пример мини-диалога>\n\n"
+            "💡 Что это дает:\n"
+            "<1 короткое предложение про один конкретный навык>\n\n"
+            "Не пиши «💡 Это помогает...» вместо названия блока. Должна быть отдельная строка «💡 Что это дает:».\n"
+            "После строки возраста обязательно оставь пустую строку. Перед блоками 🧩, 👄 и 💡 тоже обязательно оставь пустую строку.\n"
+            "В вводной фразе не делай обзор темы и не используй канцелярит. Это должна быть живая подводка к одному домашнему шагу.\n"
+            "В блоке «🧩 Что попробовать сегодня:» опиши один конкретный прием в 2–4 предложениях.\n"
+            "Обязательно добавь, что говорит взрослый, что делает ребенок.\n"
+            "В блоке «👄 Пример:» дай короткие реальные реплики.\n"
+            "В блоке «💡 Что это дает:» назови один конкретный навык одним коротким предложением.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который умеет превращать статью в один прикладной совет на сегодня.\n"
+            + "В Monday-рубрике нельзя делать обзор темы: только один совет, один прием, один следующий шаг для родителя.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
     if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
         template = (
-            f"{rubric_title} {title_suffix}\n"
+            "Первая строка — короткий живой заголовок по сути игры, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n\n"
             "Сразу начни с одного живого предложения о том, над чем сегодня играем.\n"
             "Без общих слов и без вступительной лекции.\n\n"
@@ -351,7 +668,7 @@ def build_generation_prompt(
 
     if dk == "WE" or rf == "myth_fact":
         template = (
-            f"{rubric_title} {title_suffix}\n"
+            "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
             "🔴 Миф: коротко сформулируй заблуждение из темы статьи.\n\n"
             "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
@@ -394,7 +711,7 @@ def build_generation_prompt(
 
     if dk == "FR" or rf == "question_week":
         template = (
-            f"{rubric_title} {title_suffix}\n"
+            "Первая строка — короткий заголовок-ответ по сути вопроса, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
             "❓ Вопрос недели: задай живой вопрос родителя по теме статьи.\n\n"
             "Ответь на него 3–5 предложениями, но не общими словами, а через факты и приемы из текста.\n\n"
@@ -416,20 +733,24 @@ def build_generation_prompt(
 
     if dk == "SU" or rf == "age_norms":
         template = (
-            f"{rubric_title} {title_suffix}\n"
+            "Первая строка — спокойный parent-friendly H1 про возрастной ориентир.\n"
+            "Не пиши название рубрики, не пиши «норма речи», не пиши про нарушения, задержки, диагностику и коррекцию.\n"
+            "Хорошие паттерны: «Что обычно понимает ребенок к 2 годам», «Какие фразы часто появляются ближе к 3 годам».\n\n"
             "👶 Возраст: укажи диапазон\n"
-            "Ориентиры: коротко перечисли 2–4 возрастных ориентира в одной строке.\n\n"
-            "Дальше в 2–4 предложениях объясни смысл без запугивания.\n"
-            "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n\n"
-            "🏠 Что можно попробовать дома:\n"
-            "Дай один домашний прием или наблюдение из текста.\n\n"
-            "💡 Что это дает: одним предложением назови практический смысл.\n\n"
+            "Ориентиры: коротко перечисли 2–4 age / milestone ориентира в одной строке.\n\n"
+            "Дальше в 2–4 спокойных предложениях объясни смысл без запугивания и без патологической лексики.\n"
+            "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n"
+            "Говори только про типичное развитие и наблюдаемые milestones.\n\n"
+            "🏠 Что можно понаблюдать дома:\n"
+            "Дай один мягкий родительский способ заметить навык в повседневной жизни или игре. Не упражнение на коррекцию, а наблюдение или естественный бытовой прием.\n\n"
+            "💡 Что это дает: одним предложением объясни, что именно родитель сможет заметить.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
         return (
             rules
             + "\nРОЛЬ:\nТы — Логопед-дефектолог, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.\n"
+            + "В Sunday-рубрике запрещены патологические, коррекционные и диагностические акценты.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -438,7 +759,7 @@ def build_generation_prompt(
         )
 
     template = (
-        f"{rubric_title} {title_suffix}\n"
+        "Первая строка — короткий живой заголовок по сути поста, а не название рубрики.\n"
         "👶 Возраст: укажи диапазон\n\n"
         "Сразу начни с сути: над чем сегодня работаем или что можно заметить у ребенка по теме статьи.\n\n"
         "🧩 Что попробовать сегодня:\n"
@@ -562,7 +883,7 @@ async def generate_image_prompt_async(
         cleaned = _clean_image_prompt(raw)
         ok, reason = _validate_image_prompt(cleaned)
         if ok:
-            return cleaned, True, f"ok:gemini:{GEMINI_MODEL}"
+            return cleaned, True, f"ok:gemini:{GEMINI_MODELS[0]}"
         return "", False, f"invalid_gemini_image_prompt:{reason}"
 
     if prov == "none":
@@ -608,15 +929,17 @@ async def generate_post_plain_from_evidence_async(
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
 
     ev = (evidence_text or "").strip()
     if len(ev) < 260:
         return "", False, "no_evidence_short"
 
     prompt = build_generation_prompt(
-        day_key=day_key or "",
+        day_key=dk,
         rubric_title=rubric_title,
-        rubric_format=rubric_format,
+        rubric_format=rf,
         audience=aud,
         title_suffix=title_suffix,
         source_domain=source_domain,
@@ -643,7 +966,7 @@ async def generate_post_plain_from_evidence_async(
     def validate(out: str) -> Tuple[bool, str]:
         if out.strip() == "НЕТ_ДАННЫХ":
             return False, "no_data_in_source"
-        return _validate_output(out)
+        return _validate_output(out, day_key=dk, rubric_format=rf)
 
     if prov == "none":
         return "", False, "provider:none"
@@ -661,12 +984,30 @@ async def generate_post_plain_from_evidence_async(
 
             repair_prompt = (
                 prompt
-                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным. "
+                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+                + reason
+                + ". "
                 + "Сделай текст живее, плотнее и конкретнее. "
                 + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
                 + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
-                + "Сразу иди к сути и не делай текст слишком коротким."
+                + "Сразу иди к сути и не делай текст слишком коротким. "
             )
+
+            if dk == "MO" or rf == "tip_of_day":
+                repair_prompt += (
+                    "Для Monday обязательно: первая строка — один прикладной совет, "
+                    "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
+                    "никаких обзоров темы и общих формулировок. "
+                    "Сохрани блоки 🧩, 👄 и 💡."
+                )
+
+            if dk == "SU" or rf == "age_norms":
+                repair_prompt += (
+                    "Для Sunday обязательно: только возрастные ориентиры и milestones, "
+                    "без патологической, диагностической и коррекционной лексики, "
+                    "с фразой «Каждый ребенок развивается индивидуально»."
+                )
+
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))
             ok2, reason2 = validate(out2)
             if ok2:
@@ -684,7 +1025,7 @@ async def generate_post_plain_from_evidence_async(
             out = postprocess(await gemini_generate(prompt, gemini_key))
             ok, reason = validate(out)
             if ok:
-                return out, True, f"ok:gemini:{GEMINI_MODEL}"
+                return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
             return "", False, f"invalid_gemini:{reason}"
         except Exception as e:
             return "", False, f"gemini_failed:{e} | groq={groq_err}"

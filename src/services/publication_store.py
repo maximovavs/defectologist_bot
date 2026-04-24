@@ -1,112 +1,55 @@
+
 from __future__ import annotations
 
-import hashlib
 import json
-import math
-import re
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from sentence_transformers import SentenceTransformer, util
 
 
-SEMANTIC_DIM = 384
+SEMANTIC_MODEL_NAME = os.getenv("SEMANTIC_MODEL_NAME", "all-MiniLM-L6-v2").strip() or "all-MiniLM-L6-v2"
 
-_TOKEN_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
+_MODEL: Optional[SentenceTransformer] = None
 
-_STOPWORDS = {
-    "и", "в", "во", "на", "с", "со", "по", "к", "ко", "о", "об", "обо", "от", "до", "за", "из", "у",
-    "а", "но", "или", "либо", "же", "то", "это", "этот", "эта", "эти", "того", "такой", "такая",
-    "как", "так", "если", "когда", "чтобы", "что", "чем", "при", "для", "не", "ни", "над", "под",
-    "their", "with", "from", "into", "that", "this", "then", "than", "have", "has", "had", "are",
-    "was", "were", "for", "and", "the", "you", "your", "they", "them", "his", "her", "our", "not",
-}
 
-_RU_SUFFIXES = (
-    "иями", "ями", "ами", "иях", "иях", "иях", "ого", "ему", "ому", "ыми", "ими", "ее", "ие", "ые",
-    "ое", "ей", "ий", "ый", "ой", "ам", "ям", "ом", "ем", "ах", "ях", "ию", "ью", "ия", "ья", "а",
-    "я", "ы", "и", "е", "о", "у",
-)
-
-_EN_SUFFIXES = ("ing", "edly", "edly", "edly", "ed", "ly", "es", "s")
+def get_semantic_model() -> SentenceTransformer:
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = SentenceTransformer(SEMANTIC_MODEL_NAME)
+    return _MODEL
 
 
 def normalize_publication_text(text: str) -> str:
-    s = (text or "").lower().replace("ё", "е")
-    s = re.sub(r"https?://\S+", " ", s)
-    s = re.sub(r"[^\w\s]+", " ", s, flags=re.UNICODE)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return " ".join((text or "").replace("\r\n", "\n").split()).strip()
 
 
-def _stem_token(token: str) -> str:
-    t = token.lower().replace("ё", "е")
-    if len(t) <= 4:
-        return t
-
-    for suf in _RU_SUFFIXES:
-        if len(t) > len(suf) + 3 and t.endswith(suf):
-            return t[: -len(suf)]
-
-    for suf in _EN_SUFFIXES:
-        if len(t) > len(suf) + 3 and t.endswith(suf):
-            return t[: -len(suf)]
-
-    return t
+def text_to_embedding(text: str) -> List[float]:
+    cleaned = normalize_publication_text(text)
+    if not cleaned:
+        return []
+    model = get_semantic_model()
+    vec = model.encode(cleaned, normalize_embeddings=True)
+    return [float(x) for x in vec.tolist()]
 
 
-def _semantic_tokens(text: str) -> List[str]:
-    raw = _TOKEN_RE.findall(normalize_publication_text(text))
-    out: List[str] = []
-    for token in raw:
-        if len(token) <= 1:
-            continue
-        if token in _STOPWORDS:
-            continue
-        stemmed = _stem_token(token)
-        if stemmed in _STOPWORDS or len(stemmed) <= 1:
-            continue
-        out.append(stemmed)
-    return out
-
-
-def text_to_embedding(text: str, dim: int = SEMANTIC_DIM) -> List[float]:
-    tokens = _semantic_tokens(text)
-    if not tokens:
-        return [0.0] * dim
-
-    vector = [0.0] * dim
-
-    def add_feature(feature: str, weight: float) -> None:
-        digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=8).digest()
-        idx = int.from_bytes(digest[:4], "big") % dim
-        sign = 1.0 if (digest[4] & 1) == 0 else -1.0
-        vector[idx] += sign * weight
-
-    for tok in tokens:
-        add_feature(f"u:{tok}", 1.0)
-
-    for i in range(len(tokens) - 1):
-        add_feature(f"b:{tokens[i]}_{tokens[i+1]}", 1.45)
-
-    for i in range(len(tokens) - 2):
-        add_feature(f"t:{tokens[i]}_{tokens[i+1]}_{tokens[i+2]}", 1.20)
-
-    for tok in set(tokens):
-        if len(tok) >= 6:
-            for j in range(len(tok) - 3):
-                add_feature(f"c4:{tok[j:j+4]}", 0.25)
-
-    norm = math.sqrt(sum(v * v for v in vector))
-    if norm <= 1e-12:
-        return [0.0] * dim
-    return [v / norm for v in vector]
+def text_batch_to_embeddings(texts: Sequence[str]) -> List[List[float]]:
+    prepared = [normalize_publication_text(t) for t in texts]
+    if not prepared:
+        return []
+    model = get_semantic_model()
+    matrix = model.encode(list(prepared), normalize_embeddings=True)
+    return [[float(x) for x in row.tolist()] for row in matrix]
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
-    if not a or not b or len(a) != len(b):
+    if not a or not b:
         return 0.0
-    return float(sum(x * y for x, y in zip(a, b)))
+    score = util.pytorch_cos_sim([a], [b])
+    return float(score[0][0].item())
 
 
 def _vec_to_json(vec: List[float]) -> str:
@@ -164,6 +107,8 @@ class PublicationStore:
                     evidence_norm TEXT NOT NULL DEFAULT '',
                     body_vec_json TEXT NOT NULL DEFAULT '',
                     evidence_vec_json TEXT NOT NULL DEFAULT '',
+                    body_embedding_model TEXT NOT NULL DEFAULT '',
+                    evidence_embedding_model TEXT NOT NULL DEFAULT '',
                     posted_at TEXT NOT NULL DEFAULT '',
                     audience TEXT NOT NULL DEFAULT '',
                     rubric_id TEXT NOT NULL DEFAULT '',
@@ -182,6 +127,8 @@ class PublicationStore:
             "evidence_norm": "TEXT NOT NULL DEFAULT ''",
             "body_vec_json": "TEXT NOT NULL DEFAULT ''",
             "evidence_vec_json": "TEXT NOT NULL DEFAULT ''",
+            "body_embedding_model": "TEXT NOT NULL DEFAULT ''",
+            "evidence_embedding_model": "TEXT NOT NULL DEFAULT ''",
             "posted_at": "TEXT NOT NULL DEFAULT ''",
             "audience": "TEXT NOT NULL DEFAULT ''",
             "rubric_id": "TEXT NOT NULL DEFAULT ''",
@@ -222,28 +169,61 @@ class PublicationStore:
             ).fetchone()
         return row is not None
 
+    def _collect_vectors_for_rows(
+        self,
+        rows: Sequence[sqlite3.Row],
+        targets: Sequence[Tuple[str, str, str]],
+    ) -> Dict[Tuple[int, str], List[float]]:
+        by_key: Dict[Tuple[int, str], List[float]] = {}
+        to_encode_texts: List[str] = []
+        to_encode_keys: List[Tuple[int, str]] = []
+
+        for idx, row in enumerate(rows):
+            for match_field, vec_col, model_col in targets:
+                vec = _vec_from_json(row[vec_col] or "")
+                stored_model = (row[model_col] or "").strip()
+                if vec and stored_model == SEMANTIC_MODEL_NAME:
+                    by_key[(idx, match_field)] = vec
+                    continue
+
+                norm_col = "body_norm" if match_field == "body" else "evidence_norm"
+                norm_text = normalize_publication_text(row[norm_col] or "")
+                if norm_text:
+                    to_encode_texts.append(norm_text)
+                    to_encode_keys.append((idx, match_field))
+
+        if to_encode_texts:
+            for key, vec in zip(to_encode_keys, text_batch_to_embeddings(to_encode_texts)):
+                by_key[key] = vec
+
+        return by_key
+
     def find_semantic_duplicate(
         self,
         text: str,
-        threshold: float = 0.95,
+        threshold: float = 0.85,
         since_iso: Optional[str] = None,
         limit: int = 500,
         compare: str = "body",
     ) -> Optional[SimilarPublication]:
         candidate_vec = text_to_embedding(text)
-        if not any(candidate_vec):
+        if not candidate_vec:
             return None
 
         compare = (compare or "body").lower()
         field_map = {
-            "body": [("body", "body_vec_json")],
-            "evidence": [("evidence", "evidence_vec_json")],
-            "both": [("body", "body_vec_json"), ("evidence", "evidence_vec_json")],
+            "body": [("body", "body_vec_json", "body_embedding_model")],
+            "evidence": [("evidence", "evidence_vec_json", "evidence_embedding_model")],
+            "both": [
+                ("body", "body_vec_json", "body_embedding_model"),
+                ("evidence", "evidence_vec_json", "evidence_embedding_model"),
+            ],
         }
         targets = field_map.get(compare, field_map["body"])
 
         sql = """
-            SELECT canonical_url, body_vec_json, evidence_vec_json, posted_at, audience, rubric_id
+            SELECT canonical_url, body_norm, evidence_norm, body_vec_json, evidence_vec_json,
+                   body_embedding_model, evidence_embedding_model, posted_at, audience, rubric_id
             FROM publications
         """
         params: List[object] = []
@@ -253,14 +233,15 @@ class PublicationStore:
         sql += " ORDER BY posted_at DESC LIMIT ?"
         params.append(limit)
 
-        best: Optional[SimilarPublication] = None
-
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
 
-        for row in rows:
-            for match_field, col_name in targets:
-                vec = _vec_from_json(row[col_name] or "")
+        cached_vectors = self._collect_vectors_for_rows(rows, targets)
+        best: Optional[SimilarPublication] = None
+
+        for idx, row in enumerate(rows):
+            for match_field, _, _ in targets:
+                vec = cached_vectors.get((idx, match_field), [])
                 if not vec:
                     continue
                 score = cosine_similarity(candidate_vec, vec)
@@ -293,8 +274,7 @@ class PublicationStore:
     ) -> None:
         body_norm = normalize_publication_text(body_text)
         evidence_norm = normalize_publication_text(evidence_text)
-        body_vec = _vec_to_json(text_to_embedding(body_text))
-        evidence_vec = _vec_to_json(text_to_embedding(evidence_text))
+        body_vec, evidence_vec = text_batch_to_embeddings([body_norm, evidence_norm])
 
         with self._connect() as conn:
             conn.execute(
@@ -307,12 +287,14 @@ class PublicationStore:
                     evidence_norm,
                     body_vec_json,
                     evidence_vec_json,
+                    body_embedding_model,
+                    evidence_embedding_model,
                     posted_at,
                     audience,
                     rubric_id,
                     rubric_title,
                     source_domain
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_url,
@@ -320,8 +302,10 @@ class PublicationStore:
                     evidence_hash,
                     body_norm,
                     evidence_norm,
-                    body_vec,
-                    evidence_vec,
+                    _vec_to_json(body_vec),
+                    _vec_to_json(evidence_vec),
+                    SEMANTIC_MODEL_NAME,
+                    SEMANTIC_MODEL_NAME,
                     posted_at,
                     audience,
                     rubric_id,

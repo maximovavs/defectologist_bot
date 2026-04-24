@@ -1,4 +1,4 @@
-version: 1.6
+version: 1.7
 
 quality:
   allow_domains:
@@ -9,10 +9,28 @@ quality:
     - "logopedy.ru"
     - "asha.org"
     - "pmc.ncbi.nlm.nih.gov"
-    # ✅ новые домены (билингвизм/родители-экспаты)
     - "colorincolorado.org"
-    # ✅ если захотите PubMed RSS (через Create RSS)
     - "pubmed.ncbi.nlm.nih.gov"
+    - "hanen.org"
+    - "cdc.gov"
+    - "healthychildren.org"
+    - "zerotothree.org"
+    - "raisingchildren.net.au"
+    - "habilnet.org"
+    - "handyhandouts.com"
+    - "nationwidechildrens.org"
+    - "naeyc.org"
+    - "mayoclinic.org"
+    - "blog.cincinnatichildrens.org"
+    - "fraser.org"
+    - "cal.org"
+    - "carla.umn.edu"
+    - "tewhariki.tahurangi.education.govt.nz"
+    - "kidskey.org"
+    - "docdeti.ru"
+    - "russkiymir.ru"
+    - "parents.actionforchildren.org.uk"
+    - "gosh.nhs.uk"
 
   deny_keywords:
     - "форум"
@@ -26,7 +44,6 @@ quality:
     - "доставка"
     - "вылечить"
     - "экстрасенс"
-    # (опционально, чтобы меньше продаваторства)
     - "курс"
     - "вебинар"
     - "семинар"
@@ -50,6 +67,10 @@ quality:
     - "заик"
     - "дисграф"
     - "дислекс"
+    - "milestone"
+    - "communication"
+    - "language development"
+    - "dual language"
 
   methodical_keywords:
     - "метод"
@@ -73,12 +94,18 @@ quality:
     - "заикан"
     - "дисграф"
     - "дислекс"
+    - "strategy"
+    - "framework"
+    - "checklist"
+    - "parent tips"
 
   scientific_domains:
     - "asha.org"
     - "pmc.ncbi.nlm.nih.gov"
-    # PubMed RSS feeds are also scientific (optional)
     - "pubmed.ncbi.nlm.nih.gov"
+    - "cdc.gov"
+    - "healthychildren.org"
+    - "mayoclinic.org"
 
 sources:
   - id: logopediya_documents_rss
@@ -91,7 +118,6 @@ sources:
     type: rss
     url: "https://logopediya.com/ppt/rss.xml"
 
-  # NOTE: требует parser: logopediya_publ
   - id: logopediya_publications_latest
     name: "Logopediya.com — Публикации (последние)"
     type: html_site
@@ -122,7 +148,7 @@ sources:
     url: "https://logopedy.ru/portal/logoped-literature/logoped-article.html"
     parser: "logopedy_articles"
 
-  # ---------- ASHA / English sources (bilingual + evidence) ----------
+  # ---------- ASHA / English sources ----------
 
   - id: asha_multilingual_public
     name: "ASHA — Public (multilingual & late language emergence)"
@@ -157,7 +183,7 @@ sources:
       - "https://www.asha.org/public/developmental-milestones/"
       - "https://www.asha.org/public/developmental-milestones/communication-milestones/"
 
-  # ---------- Colorín Colorado (bilingual = superpower) ----------
+  # ---------- Colorín Colorado ----------
 
   - id: colorin_bilingual_parents
     name: "Colorín Colorado — bilingual acquisition (parents-friendly)"
@@ -167,7 +193,7 @@ sources:
       - "https://www.colorincolorado.org/article/learning-two-languages"
       - "https://www.colorincolorado.org/being-bilingual-superpower-workshop-activities"
 
-  # ---------- PMC / science (bilingual, code-switching) ----------
+  # ---------- PMC / science ----------
 
   - id: pmc_bilingual_science
     name: "PubMed Central — bilingual development reviews"
@@ -188,10 +214,146 @@ sources:
     urls:
       - "https://pmc.ncbi.nlm.nih.gov/articles/PMC12168312/"
 
-  # ---------- OPTIONAL (advanced): PubMed RSS feeds (no login required) ----------
-  # Если не используете — просто закомментируйте этот блок целиком.
-
   - id: pubmed_rss_bilingual_updates
     name: "PubMed RSS — bilingual child language (updates)"
     type: rss
     url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/1jsI3JGQCWWHHeHb2fTBDdltf03aFntL4-PoLzxCwuw1i6EYCo/?limit=15&utm_campaign=pubmed-2&fc=20260301172251"
+
+  # ---------- New evidence-based parent-friendly sources ----------
+
+  - id: hanen_parent_tips
+    name: "The Hanen Centre — Parent tips"
+    type: static
+    urls:
+      - "https://www.hanen.org/information-tips/tips"
+
+  - id: hanen_bilingual_myths
+    name: "The Hanen Centre — Bilingualism myths & facts"
+    type: static
+    urls:
+      - "https://www.hanen.org/information-tips/bilingualism-in-young-children-separating-fact-fr"
+
+  - id: cdc_developmental_milestones
+    name: "CDC — Developmental milestones"
+    type: static
+    urls:
+      - "https://www.cdc.gov/act-early/milestones/2-years.html"
+      - "https://www.cdc.gov/act-early/digital-online-checklist/2-years.html"
+
+  - id: healthychildren_bilingual_myths
+    name: "HealthyChildren — Bilingual myths & facts"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/ages-stages/gradeschool/school/Pages/7-Myths-Facts-Bilingual-Children-Learning-Language.aspx"
+
+  - id: healthychildren_language_development
+    name: "HealthyChildren — Language development"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/language-delay.aspx"
+      - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/Language-Development-2-Year-Olds.aspx"
+
+  - id: zerotothree_dual_language
+    name: "ZERO TO THREE — Dual language development"
+    type: static
+    urls:
+      - "https://www.zerotothree.org/resource/dual-language-development-double-the-benefit/"
+      - "https://www.zerotothree.org/resource/5-ways-to-support-dual-language-learning-in-early-childhood-education-programs/"
+
+  - id: raisingchildren_bilingual
+    name: "Raising Children Network — Bilingual children tips"
+    type: static
+    urls:
+      - "https://raisingchildren.net.au/babies/connecting-communicating/bilingualism-multilingualism/raising-bilingual-children-tips"
+      - "https://raisingchildren.net.au/babies/connecting-communicating/bilingualism-multilingualism/bilingualism"
+
+  - id: habilnet_bilingual_parents
+    name: "HaBilNet — Bilingual parenting Q&A"
+    type: static
+    urls:
+      - "https://www.habilnet.org/answers-to-the-three-most-common-parental-questions/"
+      - "https://www.habilnet.org/bilingual-children-do-not-start-speaking-later-than-monolingual-ones/"
+
+  - id: handyhandouts_parent_tips
+    name: "Handy Handouts — Parent-friendly communication handouts"
+    type: static
+    urls:
+      - "https://www.handyhandouts.com/Handout/58/communication-and-the-bilingual-child"
+
+  - id: nationwidechildrens_speech_language
+    name: "Nationwide Children's — Speech and communication development"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/05/speech-and-communication-development-birth-to-3-years"
+
+  - id: naeyc_family_communication
+    name: "NAEYC — Communicating with Baby"
+    type: static
+    urls:
+      - "https://www.naeyc.org/our-work/families/communicating-with-baby"
+
+  - id: mayoclinic_language_milestones
+    name: "Mayo Clinic — Language development milestones"
+    type: static
+    urls:
+      - "https://www.mayoclinic.org/healthy-lifestyle/infant-and-toddler-health/in-depth/language-development/art-20045163"
+
+  - id: cincinnatichildrens_language_development
+    name: "Cincinnati Children's — Early language development"
+    type: static
+    urls:
+      - "https://blog.cincinnatichildrens.org/healthy-living/child-development-and-behavior/normal-early-childhood-language-development/"
+
+  - id: fraser_parent_speech_tips
+    name: "Fraser — Parent speech delay tips"
+    type: static
+    urls:
+      - "https://www.fraser.org/resources/blog/simple-tips-to-help-a-child-with-a-speech-delay-communicate-"
+
+  - id: cal_dual_language_home_support
+    name: "CAL — Support dual language learners at home"
+    type: static
+    urls:
+      - "https://www.cal.org/news/for-families-supporting-your-young-dual-language-learners-at-home/"
+
+  - id: carla_family_resources
+    name: "CARLA — Family resources for immersion/DLI"
+    type: static
+    urls:
+      - "https://carla.umn.edu/immersionDLI/family-resources-english"
+
+  - id: tewhariki_multilingual_pathways
+    name: "Te Whāriki — Multilingual learning pathways"
+    type: static
+    urls:
+      - "https://tewhariki.tahurangi.education.govt.nz/supporting-bilingual-and-multilingual-learning-pathways/5637165610.p"
+
+  - id: kidskey_speech_games
+    name: "Kidskey — Speech development games"
+    type: static
+    urls:
+      - "https://kidskey.org/blog/speech-development-games"
+
+  - id: docdeti_bilingualism
+    name: "DocDeti — Детский билингвизм"
+    type: static
+    urls:
+      - "https://docdeti.ru/baza-znaniy/detskii_bilingvizm/"
+
+  - id: russkiymir_bilingual_family
+    name: "Русский мир — Билингвы"
+    type: static
+    urls:
+      - "https://russkiymir.ru/education2/russian-world-to-children/bilingvy/119137/"
+
+  - id: actionforchildren_communication_milestones
+    name: "Action for Children — Communication milestones"
+    type: static
+    urls:
+      - "https://parents.actionforchildren.org.uk/early-parenting/speech-communication/communication-milestones-for-young-children-speech-and-language/"
+
+  - id: gosh_speech_language_12_24_months
+    name: "GOSH — Speech and language development 12–24 months"
+    type: static
+    urls:
+      - "https://www.gosh.nhs.uk/conditions-and-treatments/procedures-and-treatments/speech-and-language-development-12-24-months/"

@@ -1,34 +1,17 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.3.0
+Publisher (cron/GitHub Actions) v4.3.2-safe
 
-Что изменено:
-1) LLM генерирует deep narrative summary вместо сухих тезисов.
-2) Добавлена семантическая дедупликация:
-   - exact URL
-   - exact hash по evidence/post
-   - cosine similarity по векторным представлениям evidence/post
-3) Если новый материал семантически слишком похож на уже опубликованный,
-   он пропускается. Если совпадение с недавним материалом >= порога — идёт alert в техчат.
-4) Добавлены защитные лимиты:
-   - глобальный лимит времени на весь run
-   - лимит кандидатов на рубрику
-   - лимит skip-ов на рубрику
-   - таймаут на генерацию одного кандидата
-5) Добавлено подробное логирование в stdout для GitHub Actions.
-6) Tech alerts теперь отправляются безопасно для Telegram:
-   - без <br>
-   - с fallback на plain text, если HTML parse mode ломается
-7) Telegram HTML renderer синхронизирован с новым narrative-форматом постов.
-8) В каждый публикуемый пост внедрена система хештегов:
-   - рубричный тег по дню недели
-   - тег возраста из строки "👶 Возраст:"
-   - 1–2 тематических тега, извлечённых из LLM-ответа
-   Все хештеги ставятся строго в самом низу сообщения, под ссылкой.
-9) Визуальный пайплайн теперь гибридный:
-   - основной режим: Pollinations AI
-   - fallback: шаблон дня недели + H1 поста через Pillow
-10) При TARGET_CHANNEL=test публикация идёт в TELEGRAM_DRAFTS_CHAT_ID.
+Основа: production v4.3.1-safe
+Минимальные безопасные улучшения:
+1) Разделение test/prod history DB.
+2) Soft skip / hard skip: лимит рубрики тратится только на hard skips.
+3) Relevance guard для тематических хештегов.
+4) Мягкий topic guard для age_norms.
+5) Более умный выбор H1 для обложки.
+6) Диагностический alert при Posted: 0.
+7) Новый мягкий post-fit guard для Monday / tip_of_day.
+8) Диагностика HTML fallback для Telegram send/caption.
 """
 
 import asyncio
@@ -38,7 +21,6 @@ import html as _html
 import os
 import random
 import re
-import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -61,22 +43,18 @@ from src.services.publication_store import PublicationStore
 from src.services.visual_pipeline import build_post_visual
 
 
-# =========================
-# Paths / env
-# =========================
-
 ROOT = Path(__file__).resolve().parents[2]
 CFG_DIR = ROOT / "config"
 STATE_DIR = ROOT / ".state"
 STATE_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "logoped-channel-bot/4.3.0 (+https://github.com/)"
+USER_AGENT = "logoped-channel-bot/4.3.2-safe (+https://github.com/)"
 HEADERS = {"User-Agent": USER_AGENT}
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_DRAFTS_CHAT_ID = os.getenv("TELEGRAM_DRAFTS_CHAT_ID", "").strip()
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "prod").strip().lower()
+TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip().lower()
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
@@ -86,7 +64,33 @@ PROVIDER = os.getenv("REWRITE_PROVIDER", "auto").strip().lower()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
+
+def _normalize_selected_rubric(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value or value.lower() == "auto":
+        return ""
+    if "|" in value:
+        value = value.split("|", 1)[0].strip()
+    return value.lower()
+
+
+def _parse_csv_env(raw: str) -> List[str]:
+    out: List[str] = []
+    for part in (raw or "").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if item not in out:
+            out.append(item)
+    return out
+
+
 AUDIENCE = os.getenv("AUDIENCE", "parents").strip().lower()
+RUBRIC_ID = _normalize_selected_rubric(os.getenv("RUBRIC_ID", ""))
+INCLUDE_SOURCES = _parse_csv_env(os.getenv("INCLUDE_SOURCES", ""))
+EXCLUDE_SOURCES = _parse_csv_env(os.getenv("EXCLUDE_SOURCES", ""))
+RESET_TEST_DB = os.getenv("RESET_TEST_DB", "").strip().lower() in ("1", "true", "yes")
+
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
 TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
@@ -108,11 +112,6 @@ INSECURE_TLS_DOMAINS = [
 if os.getenv("SUPPRESS_INSECURE_TLS_WARNINGS", "1").strip().lower() in ("1", "true", "yes"):
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-
-# =========================
-# Helpers
-# =========================
-
 SECTION_HEADERS = {
     "Введение",
     "Методы",
@@ -125,6 +124,8 @@ GAME_HEADING_RE = re.compile(r"^🎲\s*Как играть\s*:?\s*$", re.IGNOREC
 TRY_TODAY_HEADING_RE = re.compile(r"^🧩\s*Что попробовать сегодня\s*:?\s*$", re.IGNORECASE)
 BILINGUAL_HEADING_RE = re.compile(r"^🌍\s*Что помогает в двуязычной семье\s*:?\s*$", re.IGNORECASE)
 HOME_HEADING_RE = re.compile(r"^🏠\s*Что можно попробовать дома\s*:?\s*$", re.IGNORECASE)
+EXAMPLE_HEADING_RE = re.compile(r"^👄\s*Пример\s*:?\s*$", re.IGNORECASE)
+BENEFIT_HEADING_RE = re.compile(r"^💡\s*Что это дает\s*:?\s*$", re.IGNORECASE)
 
 AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
 AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
@@ -145,6 +146,87 @@ RUBRIC_TAGS_BY_DAY = {
     "SA": "#методическая_копилка",
     "SU": "#возрастная_норма",
 }
+
+SOFT_SKIP_REASONS = {
+    "bad_candidate_url",
+    "skip_non_html_asset",
+    "dup_url_same_run",
+    "dup_url_db",
+    "no_evidence_short",
+    "dup_evidence_same_run",
+    "dup_evidence_hash_db",
+    "dup_semantic_source",
+    "dup_body_same_run",
+    "dup_body_hash_db",
+    "dup_semantic_post",
+    "rubric_topic_mismatch_source",
+    "rubric_topic_mismatch_post",
+    "tip_of_day_post_too_generic",
+    "unknown_source_id",
+    "llm_invalid_output",
+    "no_candidates",
+    "max_skips_per_rubric",
+}
+HARD_SKIP_REASONS = {
+    "source_fetch_failed",
+    "evidence_fetch_failed",
+    "llm_timeout",
+    "llm_failed",
+    "visual_build_failed",
+    "telegram_send_failed",
+    "max_run_seconds",
+}
+
+AGE_NORMS_BAD_MARKERS = [
+    "дисграф",
+    "дислекс",
+    "заикан",
+    "алал",
+    "афаз",
+    "дизартр",
+    "ринолал",
+    "коррекц",
+    "нарушени",
+    "дефект",
+    "диагноз",
+    "патолог",
+]
+AGE_NORMS_GOOD_MARKERS = [
+    "возраст",
+    "норма",
+    "ориентир",
+    "milestone",
+    "development",
+    "communication",
+    "речевое развитие",
+    "что умеет",
+    "что обычно",
+]
+TIP_OF_DAY_BAD_MARKERS = [
+    "совет логопеда дня",
+    "сегодня работаем над",
+    "сегодня поговорим",
+    "развитие речи",
+    "общее недоразвитие речи",
+    "онр",
+    "дизартр",
+    "алали",
+    "дисграф",
+    "дислекс",
+    "диагноз",
+    "коррекц",
+]
+TIP_OF_DAY_GOOD_MARKERS = [
+    "👶 возраст:",
+    "🧩 что попробовать сегодня",
+    "👄 пример",
+    "💡 что это дает",
+]
+
+_SKIP_EXT_RE = re.compile(
+    r"\.(ppt|pptx|pdf|doc|docx|xls|xlsx|zip|rar|mp3|mp4)$",
+    re.IGNORECASE,
+)
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
@@ -206,38 +288,63 @@ def _start_recent_window(now: datetime) -> datetime:
 
 
 def _resolve_publish_chat_id() -> str:
-    if TARGET_CHANNEL == "test":
-        return TELEGRAM_DRAFTS_CHAT_ID
-    return TELEGRAM_CHAT_ID
+    return TELEGRAM_DRAFTS_CHAT_ID if TARGET_CHANNEL == "test" else TELEGRAM_CHAT_ID
 
 
-def _build_posted_zero_alert_html(
+def _resolve_state_scope() -> str:
+    return "test" if TARGET_CHANNEL == "test" else "prod"
+
+
+def _resolve_publication_db_path() -> Path:
+    return STATE_DIR / (
+        "publication_history_test.sqlite3"
+        if _resolve_state_scope() == "test"
+        else "publication_history.sqlite3"
+    )
+
+
+def _skip_kind(reason: str) -> str:
+    return "hard" if reason in HARD_SKIP_REASONS else "soft"
+
+
+def _build_posted_zero_alert_plain(
     now: datetime,
     day: str,
     week_key: str,
     audience: str,
     provider: str,
-    skip_reasons: Dict[str, int],
+    soft_skip_reasons: Dict[str, int],
+    hard_skip_reasons: Dict[str, int],
     samples: List[str],
+    state_scope: str,
+    db_name: str,
+    attempted_rubrics: List[str],
 ) -> str:
-    top = sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True)[:12]
+    soft_total = sum(soft_skip_reasons.values())
+    hard_total = sum(hard_skip_reasons.values())
+    soft_top = sorted(soft_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
+    hard_top = sorted(hard_skip_reasons.items(), key=lambda x: x[1], reverse=True)[:10]
 
     parts: List[str] = [
-        "⚠️ <b>Publisher: не удалось опубликовать пост (Posted: 0)</b>",
-        f"Дата: {_escape(str(now.date()))} | День: {_escape(day)} | Неделя: {_escape(week_key)}",
-        f"AUDIENCE={_escape(audience)} | PROVIDER={_escape(provider)} | TARGET_CHANNEL={_escape(TARGET_CHANNEL)}",
-        "",
-        "<b>Причины пропуска (топ):</b>",
+        "⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)",
+        f"Дата: {now.date()} | День: {day} | Неделя: {week_key}",
+        f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
+        f"STATE_SCOPE={state_scope} | History DB={db_name}",
+        f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
+        f"Soft skips: {soft_total} | Hard skips: {hard_total}",
     ]
 
-    for reason, count in top:
-        parts.append(f"• {_escape(reason)}: {_escape(str(count))}")
+    if hard_top:
+        parts.extend(["", "Hard skip reasons:"])
+        parts.extend([f"• {reason}: {count}" for reason, count in hard_top])
+
+    if soft_top:
+        parts.extend(["", "Soft skip reasons:"])
+        parts.extend([f"• {reason}: {count}" for reason, count in soft_top])
 
     if samples:
-        parts.append("")
-        parts.append("<b>Примеры:</b>")
-        for sample in samples[:8]:
-            parts.append(_escape(sample))
+        parts.extend(["", "Examples:"])
+        parts.extend(samples[:10])
 
     return "\n".join(parts)
 
@@ -246,20 +353,40 @@ def _strip_html_tags_for_telegram(text: str) -> str:
     s = text or ""
     s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
     s = re.sub(
-        r'<a\s+href=\"([^\"]+)\">(.+?)</a>',
+        r'<a\s+href="([^"]+)">(.+?)</a>',
         lambda m: f"{_html.unescape(m.group(2))} ({_html.unescape(m.group(1))})",
         s,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    s = re.sub(r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre)>", "", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre)>",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(r"<[^>]+>", "", s)
-    s = _html.unescape(s)
-    return s.strip()
+    return _html.unescape(s).strip()
 
 
 def _is_probably_parse_mode_error(exc: Exception) -> bool:
     text = str(exc).lower()
-    return "can't parse entities" in text or "unsupported start tag" in text or "bad request" in text
+    return (
+        "can't parse entities" in text
+        or "unsupported start tag" in text
+        or "bad request" in text
+    )
+
+
+def _safe_html_preview(text: str, limit: int = 400) -> str:
+    preview = (text or "").replace("\n", "\\n")
+    return (preview[:limit].rstrip() + "…") if len(preview) > limit else preview
+
+
+def _log_telegram_html_fallback(context: str, html_text: str, exc: Exception) -> None:
+    print(
+        f"[WARN] telegram_html_fallback context={context} err={exc} html_preview={_safe_html_preview(html_text)}",
+        flush=True,
+    )
 
 
 def _line_matches_structural(st: str) -> bool:
@@ -276,19 +403,15 @@ def _line_matches_structural(st: str) -> bool:
             TRY_TODAY_HEADING_RE.match(st),
             BILINGUAL_HEADING_RE.match(st),
             HOME_HEADING_RE.match(st),
+            EXAMPLE_HEADING_RE.match(st),
+            BENEFIT_HEADING_RE.match(st),
         )
     )
 
 
 def _is_structural_heading(line: str) -> bool:
     st = (line or "").strip()
-    if not st:
-        return False
-    if _line_matches_structural(st):
-        return True
-    if st in SECTION_HEADERS:
-        return True
-    return False
+    return bool(st and (_line_matches_structural(st) or st in SECTION_HEADERS))
 
 
 def _slugify_tag_body(text: str) -> str:
@@ -296,8 +419,7 @@ def _slugify_tag_body(text: str) -> str:
     s = re.sub(r"[-–—−]+", "_", s)
     s = re.sub(r"\s+", "_", s)
     s = re.sub(r"[^0-9a-zа-я_]+", "_", s, flags=re.IGNORECASE)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s
+    return re.sub(r"_+", "_", s).strip("_")
 
 
 def _extract_age_value(lines: List[str]) -> str:
@@ -312,9 +434,7 @@ def _build_age_tag(age_value: str) -> str:
     value = _slugify_tag_body(age_value)
     if not value:
         return ""
-    if value.startswith("для_детей_"):
-        return f"#{value}"
-    return f"#для_детей_{value}"
+    return f"#{value}" if value.startswith("для_детей_") else f"#для_детей_{value}"
 
 
 def _extract_thematic_tags_and_clean_lines(lines: List[str]) -> tuple[List[str], List[str]]:
@@ -339,6 +459,24 @@ def _extract_thematic_tags_and_clean_lines(lines: List[str]) -> tuple[List[str],
     return tags[:2], clean_lines
 
 
+def _normalize_tag_token(token: str) -> str:
+    t = (token or "").strip().lower().replace("ё", "е")
+    return re.sub(r"[^a-zа-я0-9]+", "", t, flags=re.IGNORECASE)
+
+
+def _body_supports_tag(tag: str, body_text: str) -> bool:
+    if not tag or not body_text:
+        return False
+    tag_body = tag.lstrip("#").replace("_", " ").replace("-", " ")
+    tokens = [_normalize_tag_token(x) for x in tag_body.split() if _normalize_tag_token(x)]
+    body_norm = _normalize_tag_token(body_text)
+    return sum(1 for tok in tokens if len(tok) >= 4 and tok in body_norm) >= 1
+
+
+def _filter_relevant_thematic_tags(tags: List[str], body_text: str) -> List[str]:
+    return [tag for tag in tags if _body_supports_tag(tag, body_text)][:2]
+
+
 def _extract_source_line(lines: List[str], fallback_domain: str) -> str:
     for line in lines:
         st = line.strip()
@@ -356,18 +494,13 @@ def _extract_link_line(lines: List[str], fallback_url: str) -> str:
 
 
 def _remove_footer_lines(lines: List[str]) -> List[str]:
-    cleaned: List[str] = []
-    for line in lines:
-        st = line.strip()
-        if SOURCE_LINE_RE.match(st):
-            continue
-        if st.startswith("🔗 "):
-            continue
-        cleaned.append(line)
-
+    cleaned = [
+        line
+        for line in lines
+        if not SOURCE_LINE_RE.match(line.strip()) and not line.strip().startswith("🔗 ")
+    ]
     while cleaned and not cleaned[-1].strip():
         cleaned.pop()
-
     return cleaned
 
 
@@ -412,6 +545,9 @@ def finalize_plain_post_for_publication(
     rubric_tag = RUBRIC_TAGS_BY_DAY.get((day_key or "").upper(), "")
     age_tag = _build_age_tag(age_value)
 
+    body_text = "\n".join(body_lines).strip()
+    thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text)
+
     final_tags: List[str] = []
     for tag in [rubric_tag, age_tag, *thematic_tags]:
         tag = (tag or "").strip()
@@ -422,30 +558,112 @@ def finalize_plain_post_for_publication(
         if tag not in final_tags:
             final_tags.append(tag)
 
-    body_text = "\n".join(body_lines).strip()
     footer_parts = [source_line, link_line]
     if final_tags:
-        footer_parts.append("")
-        footer_parts.append(" ".join(final_tags))
+        footer_parts += ["", " ".join(final_tags)]
     footer_text = "\n".join(footer_parts).strip()
 
     trimmed_body = _trim_body_preserving_footer(body_text, footer_text, max_chars)
-    if trimmed_body:
-        return f"{trimmed_body}\n\n{footer_text}".strip()
-    return footer_text
+    return f"{trimmed_body}\n\n{footer_text}".strip() if trimmed_body else footer_text
 
 
-def _extract_h1_from_plain_post(plain_text: str, fallback: str) -> str:
-    for line in (plain_text or "").splitlines():
+def _normalize_title_probe(text: str) -> str:
+    return norm_space(text).replace("ё", "е").lower()
+
+
+def _strip_question_prefix(line: str) -> str:
+    st = (line or "").strip()
+    st = re.sub(r"^❓\s*", "", st)
+    st = re.sub(r"^вопрос недели\s*:\s*", "", st, flags=re.IGNORECASE)
+    st = re.sub(r"^вопрос\s*:\s*", "", st, flags=re.IGNORECASE)
+    return st.strip()
+
+
+def _first_sentence(text: str, max_len: int = 90) -> str:
+    s = norm_space(text)
+    if not s:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", s)
+    first = parts[0].strip() if parts else s
+    if len(first) <= max_len:
+        return first
+    cut = first[:max_len].rstrip(" ,;:-")
+    if " " in cut:
+        cut = cut[:cut.rfind(" ")].rstrip(" ,;:-")
+    return cut + "…"
+
+
+def _extract_cover_title_from_plain_post(
+    plain_text: str,
+    fallback: str,
+    rubric_title: str = "",
+) -> str:
+    lines = [x.strip() for x in (plain_text or "").splitlines() if x.strip()]
+    rubric_probe = _normalize_title_probe(rubric_title)
+    fallback_probe = _normalize_title_probe(fallback)
+    narrative_candidates: List[str] = []
+
+    for line in lines:
         st = line.strip()
-        if st:
+        low = _normalize_title_probe(st)
+        if (
+            not st
+            or st.startswith("#")
+            or SOURCE_LINE_RE.match(st)
+            or st.startswith("🔗 ")
+            or AGE_LINE_RE.match(st)
+            or AUDIENCE_LINE_RE.match(st)
+            or _is_structural_heading(st)
+        ):
+            continue
+        if rubric_probe and low.startswith(rubric_probe):
+            continue
+        if fallback_probe and low == fallback_probe:
+            continue
+        if QUESTION_LINE_RE.match(st) or low.startswith("вопрос недели"):
+            q = _strip_question_prefix(st)
+            if q:
+                return q
+        if len(st) <= 90 and not st.endswith(":"):
             return st
+        narrative_candidates.append(st)
+
+    for candidate in narrative_candidates:
+        sentence = _first_sentence(candidate, max_len=90)
+        if sentence:
+            return sentence
+
     return fallback
 
 
-# =========================
-# Sources
-# =========================
+def _contains_any_marker(text: str, markers: List[str]) -> bool:
+    blob = (text or "").lower().replace("ё", "е")
+    return any(m in blob for m in markers)
+
+
+def _is_age_norms_content_fit(text: str) -> bool:
+    blob = (text or "").lower().replace("ё", "е")
+    return not _contains_any_marker(blob, AGE_NORMS_BAD_MARKERS) and _contains_any_marker(
+        blob, AGE_NORMS_GOOD_MARKERS
+    )
+
+
+def _is_tip_of_day_content_fit(text: str) -> bool:
+    lines = [
+        (x or "").strip()
+        for x in (text or "").replace("\r\n", "\n").split("\n")
+        if x.strip()
+    ]
+    if not lines:
+        return False
+    title = lines[0].lower().replace("ё", "е")
+    if "совет логопеда дня" in title:
+        return False
+    blob = (text or "").lower().replace("ё", "е")
+    return (not _contains_any_marker(blob, TIP_OF_DAY_BAD_MARKERS)) and _contains_any_marker(
+        blob, TIP_OF_DAY_GOOD_MARKERS
+    )
+
 
 @dataclass
 class Source:
@@ -460,22 +678,19 @@ class Source:
 
 def load_sources() -> Dict[str, Source]:
     cfg = load_yaml(CFG_DIR / "sources.yml")
-    out: Dict[str, Source] = {}
-    for s in cfg.get("sources", []) or []:
-        out[s["id"]] = Source(**s)
-    return out
+    return {s["id"]: Source(**s) for s in (cfg.get("sources", []) or [])}
 
 
 def fetch_rss(url: str) -> List[Dict[str, str]]:
     d = feedparser.parse(url)
-    out: List[Dict[str, str]] = []
-    for e in d.entries[:50]:
-        out.append({
+    return [
+        {
             "title": norm_space(getattr(e, "title", "")),
             "link": getattr(e, "link", ""),
             "summary": norm_space(re.sub("<.*?>", "", getattr(e, "summary", ""))),
-        })
-    return out
+        }
+        for e in d.entries[:50]
+    ]
 
 
 def fetch_static(urls: List[str]) -> List[Dict[str, str]]:
@@ -495,7 +710,12 @@ def _abs(base_url: str, href: str) -> str:
     return urljoin(base_url, href)
 
 
-def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: Optional[str] = None) -> List[Dict[str, str]]:
+def _collect_links(
+    base_url: str,
+    soup: BeautifulSoup,
+    selector: str,
+    href_re: Optional[str] = None,
+) -> List[Dict[str, str]]:
     pat = re.compile(href_re) if href_re else None
     out: List[Dict[str, str]] = []
     for a in soup.select(selector):
@@ -522,13 +742,9 @@ def _collect_links(base_url: str, soup: BeautifulSoup, selector: str, href_re: O
 def parse_logorina_news(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
     items = _collect_links(url, soup, "article a, div.news a, a", r"/news/[\w\-]+/?$")
-    out = []
-    for it in items:
-        link = it.get("link", "")
-        if re.search(r"/news/\d{4}-\d{2}/?$", link):
-            continue
-        out.append(it)
-    return out[:80]
+    return [it for it in items if not re.search(r"/news/\d{4}-\d{2}/?$", it.get("link", ""))][
+        :80
+    ]
 
 
 def parse_logomag_lib(url: str, html_text: str) -> List[Dict[str, str]]:
@@ -538,12 +754,19 @@ def parse_logomag_lib(url: str, html_text: str) -> List[Dict[str, str]]:
 
 def parse_logoportal_articles(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
-    return _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")[:80]
+    return _collect_links(url, soup, "main a, div#content a, article a, a", r"(statya-|/statya-)")[
+        :80
+    ]
 
 
 def parse_logopedy_articles(url: str, html_text: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
-    items = _collect_links(url, soup, "div.content a, main a, a", r"logoped-article|logoped-literature|portal/[^#]+")
+    items = _collect_links(
+        url,
+        soup,
+        "div.content a, main a, a",
+        r"logoped-article|logoped-literature|portal/[^#]+",
+    )
     items.sort(key=lambda x: len(x["title"]), reverse=True)
     return items[:80]
 
@@ -556,8 +779,7 @@ def parse_logopediya_publ(url: str, html_text: str) -> List[Dict[str, str]]:
         "div#dle-content a, div#dle-content h2 a, div#dle-content h3 a",
         r"/documents/[^\"']+|/publ/[^\"']+",
     )
-    items = [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
-    return items[:120]
+    return [it for it in items if not re.search(r"/page/\d+/?$", it["link"])]
 
 
 SITE_PARSERS = {
@@ -592,13 +814,6 @@ def fetch_source(src: Source) -> List[Dict[str, str]]:
     raise ValueError(f"Unsupported source type: {src.type}")
 
 
-# =========================
-# Evidence extraction
-# =========================
-
-_SKIP_EXT_RE = re.compile(r"\.(ppt|pptx|pdf|doc|docx|xls|xlsx|zip|rar|mp3|mp4)$", re.IGNORECASE)
-
-
 def get_canonical(url: str) -> str:
     try:
         r = requests.get(url, headers=HEADERS, timeout=25, verify=_verify_for_url(url))
@@ -618,7 +833,6 @@ def get_canonical(url: str) -> str:
 def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     r = requests.get(url, headers=HEADERS, timeout=35, verify=_verify_for_url(url))
     r.raise_for_status()
-
     ctype = (r.headers.get("Content-Type") or "").lower()
     if "text/html" not in ctype and "application/xhtml" not in ctype:
         return ""
@@ -627,13 +841,7 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
-    root = (
-        soup.select_one("div#dle-content")
-        or soup.find("article")
-        or soup.find("main")
-        or soup.body
-        or soup
-    )
+    root = soup.select_one("div#dle-content") or soup.find("article") or soup.find("main") or soup.body or soup
 
     chunks: List[str] = []
     h1 = soup.find("h1")
@@ -645,7 +853,10 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
         if len(txt) < 20:
             continue
         low = txt.lower()
-        if any(bad in low for bad in ["cookie", "privacy", "политик", "подпис", "реклама", "скачать", "регистрация"]):
+        if any(
+            bad in low
+            for bad in ["cookie", "privacy", "политик", "подпис", "реклама", "скачать", "регистрация"]
+        ):
             continue
         chunks.append(txt)
         if sum(len(x) for x in chunks) > max_chars * 1.35:
@@ -665,10 +876,6 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
         out = out[:max_chars].rsplit("\n", 1)[0].strip()
     return out
 
-
-# =========================
-# Plain -> Telegram HTML rendering
-# =========================
 
 def render_plain_to_telegram_html(plain_text: str) -> str:
     lines = (plain_text or "").splitlines()
@@ -695,10 +902,7 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
 
         if st.startswith("🔗 "):
             url = st[2:].strip()
-            if url.startswith(("http://", "https://")):
-                out.append(_link_anchor(url, prefix="🔗 "))
-            else:
-                out.append(_escape(st))
+            out.append(_link_anchor(url, prefix="🔗 ") if url.startswith(("http://", "https://")) else _escape(st))
             continue
 
         if st.startswith("ℹ️ "):
@@ -709,10 +913,6 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
 
     return "\n".join(out).strip()
 
-
-# =========================
-# Telegram send
-# =========================
 
 def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not TELEGRAM_BOT_TOKEN:
@@ -726,9 +926,7 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
         payload = None
 
     if not r.ok:
-        description = ""
-        if isinstance(payload, dict):
-            description = payload.get("description", "") or ""
+        description = payload.get("description", "") if isinstance(payload, dict) else ""
         if not description:
             description = r.text or ""
         raise RuntimeError(f"telegram_api_error:{r.status_code}:{description}")
@@ -758,14 +956,30 @@ def send_message(chat_id: str, html_text: str) -> None:
         except Exception as e:
             if not _is_probably_parse_mode_error(e):
                 raise
+            _log_telegram_html_fallback("send_message", html_text, e)
 
     fallback_text = _strip_html_tags_for_telegram(html_text)
-    fallback_data: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": fallback_text,
-        "disable_web_page_preview": "true",
-    }
-    tg_request("sendMessage", data=fallback_data)
+    tg_request(
+        "sendMessage",
+        data={
+            "chat_id": chat_id,
+            "text": fallback_text,
+            "disable_web_page_preview": "true",
+        },
+    )
+
+
+def send_plain_message(chat_id: str, text: str) -> None:
+    if not chat_id:
+        raise RuntimeError("chat_id is missing")
+    tg_request(
+        "sendMessage",
+        data={
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": "true",
+        },
+    )
 
 
 def _photo_file_tuple(photo_buffer: BytesIO) -> tuple[str, bytes, str]:
@@ -780,13 +994,19 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
 
     if plain_bytes <= TG_CAPTION_MAX_BYTES:
         try:
-            data: Dict[str, Any] = {"chat_id": chat_id, "caption": html_full_post}
+            data: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "caption": html_full_post,
+            }
             if TELEGRAM_PARSE_MODE:
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
             tg_request("sendPhoto", data=data, files={"photo": file_tuple})
             return
-        except Exception:
-            pass
+        except Exception as e:
+            if _is_probably_parse_mode_error(e):
+                _log_telegram_html_fallback("send_photo_caption", html_full_post, e)
+            else:
+                print(f"[WARN] send_photo_with_caption_failed err={e}", flush=True)
 
     tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
     send_message(chat_id, html_full_post)
@@ -801,63 +1021,78 @@ def send_semantic_alert(
     rubric_id: str,
     match_field: str,
 ) -> None:
-    cand = _html.escape(candidate_url, quote=True)
-    hit = _html.escape(matched_url, quote=True)
-    html_text = (
-        "⚠️ <b>Semantic dedup alert</b>\n"
+    plain_text = (
+        "⚠️ Semantic dedup alert\n"
         f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
-        f"AUDIENCE={_escape(audience)} | RUBRIC={_escape(rubric_id)} | FIELD={_escape(match_field)}\n\n"
-        f"Новый кандидат: <a href=\"{cand}\">{_escape(candidate_url)}</a>\n"
-        f"Похож на: <a href=\"{hit}\">{_escape(matched_url)}</a>\n"
-        f"Cosine: <b>{score:.3f}</b>"
+        f"AUDIENCE={audience} | RUBRIC={rubric_id} | FIELD={match_field}\n\n"
+        f"Новый кандидат: {candidate_url}\n"
+        f"Похож на: {matched_url}\n"
+        f"Cosine: {score:.3f}"
     )
-    send_message(chat_id, html_text)
+    send_plain_message(chat_id, plain_text)
 
-
-# =========================
-# Main run
-# =========================
 
 async def amain() -> None:
     rub_cfg = load_yaml(CFG_DIR / "rubrics.yml")
     channel_cfg = rub_cfg.get("channel", {}) or {}
     pub_cfg = rub_cfg.get("publishing", {}) or {}
-
     tzname = channel_cfg.get("timezone", "Asia/Nicosia")
     now = get_local_now(tzname)
     run_started_monotonic = time.monotonic()
-    print(f"[START] Publisher started at {now.isoformat()} target_channel={TARGET_CHANNEL}", flush=True)
+
+    state_scope = _resolve_state_scope()
+    db_path = _resolve_publication_db_path()
+    selected_rubric_id = RUBRIC_ID
+
+    if RESET_TEST_DB and state_scope == "test":
+        try:
+            if db_path.exists():
+                db_path.unlink()
+                print(f"[RESET_TEST_DB] removed {db_path}", flush=True)
+            else:
+                print(f"[RESET_TEST_DB] file not found: {db_path}", flush=True)
+        except Exception as e:
+            print(f"[RESET_TEST_DB][WARN] failed to remove {db_path}: {e}", flush=True)
+
+    print(
+        f"[START] Publisher started at {now.isoformat()} "
+        f"target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} "
+        f"rubric_id={selected_rubric_id or '(auto)'} reset_test_db={RESET_TEST_DB}",
+        flush=True,
+    )
 
     week_key = iso_week_key(now)
     day = weekday_key(now)
-
     max_posts = int(pub_cfg.get("max_posts_per_run", 1))
     disclaimer = channel_cfg.get("disclaimer", "") or ""
     hashtags = channel_cfg.get("hashtags", []) or []
-
     sources = load_sources()
-    store = PublicationStore(STATE_DIR / "publication_history.sqlite3")
+    store = PublicationStore(db_path)
     recent_since_iso = _start_recent_window(now).isoformat()
 
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
-    if AUDIENCE == "both":
-        aud_list = ["parents", "pros"]
-    elif AUDIENCE in ("parents", "pros"):
-        aud_list = [AUDIENCE]
-    else:
-        aud_list = ["parents"]
+    aud_list = (
+        ["parents", "pros"]
+        if AUDIENCE == "both"
+        else ([AUDIENCE] if AUDIENCE in ("parents", "pros") else ["parents"])
+    )
 
     posted = 0
-    skip_reasons: Dict[str, int] = {}
+    soft_skip_reasons: Dict[str, int] = {}
+    hard_skip_reasons: Dict[str, int] = {}
     samples: List[str] = []
+    attempted_rubrics: List[str] = []
     seen_urls_this_run: set[str] = set()
     seen_body_hashes_this_run: set[str] = set()
     seen_evidence_hashes_this_run: set[str] = set()
 
-    def note(reason: str, url: str) -> None:
-        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-        if len(samples) < 8:
-            samples.append(f"• {reason}: {url}")
+    def note(reason: str, url: str) -> str:
+        kind = _skip_kind(reason)
+        target = hard_skip_reasons if kind == "hard" else soft_skip_reasons
+        target[reason] = target.get(reason, 0) + 1
+        if len(samples) < 10:
+            samples.append(f"[{kind}] {reason}: {url}")
+        return kind
 
     for aud in aud_list:
         if posted >= max_posts:
@@ -870,8 +1105,6 @@ async def amain() -> None:
         for rubric in rubrics:
             if posted >= max_posts:
                 break
-            if not is_due(rubric, now):
-                continue
 
             rf = (rubric.get("format") or "").strip().lower()
             if rf == "quality_dashboard":
@@ -879,18 +1112,50 @@ async def amain() -> None:
 
             rubric_id = (rubric.get("id") or "").strip() or "unknown"
             rubric_title = rubric.get("title", "Рубрика") or "Рубрика"
+            rubric_days = [str(x).strip().upper() for x in (rubric.get("byweekday") or []) if str(x).strip()]
+            effective_day = rubric_days[0] if rubric_days else day
+
+            if selected_rubric_id:
+                if rubric_id.lower() != selected_rubric_id:
+                    continue
+            else:
+                if not is_due(rubric, now):
+                    continue
+
+            if rubric_id not in attempted_rubrics:
+                attempted_rubrics.append(rubric_id)
+
             rubric_skips = 0
 
+            selected_sources = list(rubric.get("sources", []) or [])
+            if INCLUDE_SOURCES:
+                include_set = set(INCLUDE_SOURCES)
+                selected_sources = [sid for sid in selected_sources if sid in include_set]
+            if EXCLUDE_SOURCES:
+                exclude_set = set(EXCLUDE_SOURCES)
+                selected_sources = [sid for sid in selected_sources if sid not in exclude_set]
+
+            print(
+                f"[RUBRIC_SOURCES] rubric={rubric_id} selected_sources={selected_sources}",
+                flush=True,
+            )
+
             all_items: List[Dict[str, str]] = []
-            for sid in rubric.get("sources", []) or []:
+            for sid in selected_sources:
                 src = sources.get(sid)
                 if not src:
-                    note("unknown_source_id", sid)
+                    kind = note("unknown_source_id", sid)
+                    print(f"[SKIP][{kind}] unknown_source_id id={sid}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     continue
                 try:
                     all_items.extend(fetch_source(src))
                 except Exception as e:
-                    note("source_fetch_failed", f"{sid}: {e}")
+                    kind = note("source_fetch_failed", f"{sid}: {e}")
+                    print(f"[SKIP][{kind}] source_fetch_failed source={sid} err={e}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
 
             if not all_items:
                 note("no_candidates", rubric_id)
@@ -910,16 +1175,17 @@ async def amain() -> None:
 
                 elapsed = time.monotonic() - run_started_monotonic
                 if elapsed > MAX_RUN_SECONDS:
-                    note("max_run_seconds", rubric_id)
-                    print(f"[STOP] max_run_seconds reached: {elapsed:.1f}s", flush=True)
+                    kind = note("max_run_seconds", rubric_id)
+                    print(f"[STOP][{kind}] max_run_seconds reached: {elapsed:.1f}s", flush=True)
                     break
 
                 print(f"[CANDIDATE] rubric={rubric_id} audience={aud} url={url}", flush=True)
 
                 if not url.startswith(("http://", "https://")):
-                    note("bad_candidate_url", url or "(empty)")
-                    rubric_skips += 1
-                    print(f"[SKIP] bad_candidate_url url={url}", flush=True)
+                    kind = note("bad_candidate_url", url or "(empty)")
+                    print(f"[SKIP][{kind}] bad_candidate_url url={url}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -927,9 +1193,10 @@ async def amain() -> None:
                     continue
 
                 if _SKIP_EXT_RE.search(url):
-                    note("skip_non_html_asset", url)
-                    rubric_skips += 1
-                    print(f"[SKIP] skip_non_html_asset url={url}", flush=True)
+                    kind = note("skip_non_html_asset", url)
+                    print(f"[SKIP][{kind}] skip_non_html_asset url={url}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -938,9 +1205,10 @@ async def amain() -> None:
 
                 canon = get_canonical(url)
                 if _SKIP_EXT_RE.search(canon):
-                    note("skip_non_html_asset", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] skip_non_html_asset canon={canon}", flush=True)
+                    kind = note("skip_non_html_asset", canon)
+                    print(f"[SKIP][{kind}] skip_non_html_asset canon={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -948,9 +1216,10 @@ async def amain() -> None:
                     continue
 
                 if canon in seen_urls_this_run:
-                    note("dup_url_same_run", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_url_same_run url={canon}", flush=True)
+                    kind = note("dup_url_same_run", canon)
+                    print(f"[SKIP][{kind}] dup_url_same_run url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -958,9 +1227,10 @@ async def amain() -> None:
                     continue
 
                 if store.has_url(canon):
-                    note("dup_url_db", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_url_db url={canon}", flush=True)
+                    kind = note("dup_url_db", canon)
+                    print(f"[SKIP][{kind}] dup_url_db url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -970,9 +1240,10 @@ async def amain() -> None:
                 try:
                     evidence = extract_evidence_text(canon, max_chars=3600)
                 except Exception as e:
-                    note("evidence_fetch_failed", f"{canon} ({e})")
-                    rubric_skips += 1
-                    print(f"[SKIP] evidence_fetch_failed url={canon} err={e}", flush=True)
+                    kind = note("evidence_fetch_failed", f"{canon} ({e})")
+                    print(f"[SKIP][{kind}] evidence_fetch_failed url={canon} err={e}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -980,9 +1251,21 @@ async def amain() -> None:
                     continue
 
                 if len((evidence or "").strip()) < 260:
-                    note("no_evidence_short", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] no_evidence_short url={canon}", flush=True)
+                    kind = note("no_evidence_short", canon)
+                    print(f"[SKIP][{kind}] no_evidence_short url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+
+                if rubric_id == "age_norms" and not _is_age_norms_content_fit(evidence):
+                    kind = note("rubric_topic_mismatch_source", canon)
+                    print(f"[SKIP][{kind}] rubric_topic_mismatch_source url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -991,9 +1274,10 @@ async def amain() -> None:
 
                 evidence_hash = sha1(norm_space(evidence))
                 if evidence_hash in seen_evidence_hashes_this_run:
-                    note("dup_evidence_same_run", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_evidence_same_run url={canon}", flush=True)
+                    kind = note("dup_evidence_same_run", canon)
+                    print(f"[SKIP][{kind}] dup_evidence_same_run url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1001,9 +1285,10 @@ async def amain() -> None:
                     continue
 
                 if store.has_evidence_hash(evidence_hash):
-                    note("dup_evidence_hash_db", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_evidence_hash_db url={canon}", flush=True)
+                    kind = note("dup_evidence_hash_db", canon)
+                    print(f"[SKIP][{kind}] dup_evidence_hash_db url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1018,10 +1303,9 @@ async def amain() -> None:
                     compare="evidence",
                 )
                 if sem_source_hit:
-                    note("dup_semantic_source", canon)
-                    rubric_skips += 1
+                    kind = note("dup_semantic_source", canon)
                     print(
-                        f"[SKIP] dup_semantic_source url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
+                        f"[SKIP][{kind}] dup_semantic_source url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
                         flush=True,
                     )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
@@ -1045,6 +1329,8 @@ async def amain() -> None:
                                 )
                             except Exception as e:
                                 print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1069,14 +1355,25 @@ async def amain() -> None:
                             groq_key=GROQ_API_KEY,
                             gemini_key=GEMINI_API_KEY,
                             max_chars=POST_MAX_CHARS,
-                            day_key=day,
+                            day_key=effective_day,
                         ),
                         timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
                     )
                 except asyncio.TimeoutError:
-                    note("llm_timeout", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] llm_timeout url={canon}", flush=True)
+                    kind = note("llm_timeout", canon)
+                    print(f"[SKIP][{kind}] llm_timeout url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+                except Exception as e:
+                    kind = note("llm_failed", f"{canon} ({e})")
+                    print(f"[SKIP][{kind}] llm_failed url={canon} err={e}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1084,9 +1381,10 @@ async def amain() -> None:
                     continue
 
                 if not ok or not plain_raw:
-                    note(llm_note, canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] {llm_note} url={canon}", flush=True)
+                    kind = note("llm_invalid_output", canon)
+                    print(f"[SKIP][{kind}] {llm_note} url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1095,17 +1393,40 @@ async def amain() -> None:
 
                 plain = finalize_plain_post_for_publication(
                     plain_text=plain_raw,
-                    day_key=day,
+                    day_key=effective_day,
                     source_domain=sd,
                     source_url=canon,
                     max_chars=POST_MAX_CHARS,
                 )
 
+                if rubric_id == "age_norms" and not _is_age_norms_content_fit(plain):
+                    kind = note("rubric_topic_mismatch_post", canon)
+                    print(f"[SKIP][{kind}] rubric_topic_mismatch_post url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+
+                if rubric_id == "tip_of_day" and not _is_tip_of_day_content_fit(plain):
+                    kind = note("tip_of_day_post_too_generic", canon)
+                    print(f"[SKIP][{kind}] tip_of_day_post_too_generic url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+
                 body_hash = sha1(norm_space(plain))
                 if body_hash in seen_body_hashes_this_run:
-                    note("dup_body_same_run", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_body_same_run url={canon}", flush=True)
+                    kind = note("dup_body_same_run", canon)
+                    print(f"[SKIP][{kind}] dup_body_same_run url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1113,9 +1434,10 @@ async def amain() -> None:
                     continue
 
                 if store.has_body_hash(body_hash):
-                    note("dup_body_hash_db", canon)
-                    rubric_skips += 1
-                    print(f"[SKIP] dup_body_hash_db url={canon}", flush=True)
+                    kind = note("dup_body_hash_db", canon)
+                    print(f"[SKIP][{kind}] dup_body_hash_db url={canon}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
@@ -1130,10 +1452,9 @@ async def amain() -> None:
                     compare="body",
                 )
                 if sem_body_hit:
-                    note("dup_semantic_post", canon)
-                    rubric_skips += 1
+                    kind = note("dup_semantic_post", canon)
                     print(
-                        f"[SKIP] dup_semantic_post url={canon} matched={sem_body_hit.canonical_url} score={sem_body_hit.similarity:.3f}",
+                        f"[SKIP][{kind}] dup_semantic_post url={canon} matched={sem_body_hit.canonical_url} score={sem_body_hit.similarity:.3f}",
                         flush=True,
                     )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
@@ -1157,16 +1478,22 @@ async def amain() -> None:
                                 )
                             except Exception as e:
                                 print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
                         note("max_skips_per_rubric", rubric_id)
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                         break
                     continue
 
-                h1_title = _extract_h1_from_plain_post(plain, fallback=rubric_title)
+                h1_title = _extract_cover_title_from_plain_post(
+                    plain,
+                    fallback=rubric_title,
+                    rubric_title=rubric_title,
+                )
+
                 image_prompt = ""
                 image_prompt_note = "skipped"
-
                 try:
                     image_prompt, image_prompt_ok, image_prompt_note = await asyncio.wait_for(
                         generate_image_prompt_async(
@@ -1188,12 +1515,24 @@ async def amain() -> None:
                     image_prompt = ""
                     image_prompt_note = f"image_prompt_failed:{e}"
 
-                visual_buffer, visual_meta = build_post_visual(
-                    title=h1_title,
-                    day_key=day,
-                    image_prompt=image_prompt,
-                    pollinations_token=POLLINATIONS_TOKEN,
-                )
+                try:
+                    visual_buffer, visual_meta = build_post_visual(
+                        title=h1_title,
+                        day_key=effective_day,
+                        image_prompt=image_prompt,
+                        pollinations_token=POLLINATIONS_TOKEN,
+                    )
+                except Exception as e:
+                    kind = note("visual_build_failed", f"{canon} ({e})")
+                    print(f"[SKIP][{kind}] visual_build_failed url={canon} err={e}", flush=True)
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+
                 print(
                     f"[VISUAL] rubric={rubric_id} mode={visual_meta.get('mode')} reason={visual_meta.get('reason')} image_prompt_note={image_prompt_note}",
                     flush=True,
@@ -1213,7 +1552,18 @@ async def amain() -> None:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:
                         raise RuntimeError("Resolved target chat id is empty")
-                    send_post_with_visual(target_chat_id, visual_buffer, plain, html_full)
+                    try:
+                        send_post_with_visual(target_chat_id, visual_buffer, plain, html_full)
+                    except Exception as e:
+                        kind = note("telegram_send_failed", f"{canon} ({e})")
+                        print(f"[SKIP][{kind}] telegram_send_failed url={canon} err={e}", flush=True)
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                     store.record_publication(
                         canonical_url=canon,
@@ -1237,29 +1587,29 @@ async def amain() -> None:
                 await asyncio.sleep(1.0)
                 break
 
-            if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS:
-                break
-            if posted >= max_posts:
+            if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS or posted >= max_posts:
                 break
 
-        if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS:
-            break
-        if posted >= max_posts:
+        if (time.monotonic() - run_started_monotonic) > MAX_RUN_SECONDS or posted >= max_posts:
             break
 
     if posted == 0 and not DRY_RUN:
         if TELEGRAM_DRAFTS_CHAT_ID:
             try:
-                send_message(
+                send_plain_message(
                     TELEGRAM_DRAFTS_CHAT_ID,
-                    _build_posted_zero_alert_html(
+                    _build_posted_zero_alert_plain(
                         now=now,
                         day=day,
                         week_key=week_key,
                         audience=AUDIENCE,
                         provider=PROVIDER,
-                        skip_reasons=skip_reasons,
+                        soft_skip_reasons=soft_skip_reasons,
+                        hard_skip_reasons=hard_skip_reasons,
                         samples=samples,
+                        state_scope=state_scope,
+                        db_name=db_path.name,
+                        attempted_rubrics=attempted_rubrics,
                     ),
                 )
             except Exception as e:

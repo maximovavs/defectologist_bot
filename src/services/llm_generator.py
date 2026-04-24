@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.1 — restore missing build_generation_prompt + keep Monday/Sunday hardening
+Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODELS / GEMINI_MODELS
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -22,6 +22,7 @@ Patch 5.4.1 — restore missing build_generation_prompt + keep Monday/Sunday har
 7) Источник и ссылка достраиваются кодом, если модель их пропустила.
 8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
 9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
+10) Минимальный fallback по спискам GROQ_MODELS и GEMINI_MODELS.
 """
 
 import asyncio
@@ -65,12 +66,6 @@ def _strip_placeholder_artifacts(text: str) -> str:
 
 def _extract_nonempty_lines(text: str) -> List[str]:
     return [x.strip() for x in (text or "").replace("\r\n", "\n").split("\n") if x.strip()]
-
-
-def _first_nonempty_line(text: str) -> str:
-    for line in _extract_nonempty_lines(text):
-        return line
-    return ""
 
 
 def _find_line(lines: List[str], prefix: str) -> str:
@@ -376,6 +371,21 @@ _next_allowed_ts = 0.0
 _gemini_region_blocked = False
 
 
+def _parse_model_list(raw: str, single_fallback: str) -> List[str]:
+    items: List[str] = []
+    for part in (raw or "").split(","):
+        model = part.strip()
+        if model and model not in items:
+            items.append(model)
+    if single_fallback and single_fallback not in items:
+        items.append(single_fallback)
+    return items
+
+
+GROQ_MODELS = _parse_model_list(os.getenv("GROQ_MODELS", ""), GROQ_MODEL)
+GEMINI_MODELS = _parse_model_list(os.getenv("GEMINI_MODELS", ""), GEMINI_MODEL)
+
+
 async def _throttle() -> None:
     global _next_allowed_ts
     async with _throttle_lock:
@@ -387,8 +397,25 @@ async def _throttle() -> None:
 
 def _is_quota_error(status: int, text: str) -> bool:
     t = (text or "").lower()
-    return status == 429 or any(
-        k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"]
+    return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
+
+
+def _is_temporary_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status in (500, 502, 503, 504) or "overloaded" in t or "temporarily unavailable" in t
+
+
+def _is_model_not_available(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        status in (400, 404)
+        and (
+            "model" in t
+            or "not found" in t
+            or "decommissioned" in t
+            or "unsupported" in t
+            or "does not exist" in t
+        )
     )
 
 
@@ -407,33 +434,43 @@ async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: 
 async def groq_chat(prompt: str, api_key: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
 
     last_err = ""
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
-        await _throttle()
-        resp = await _post_json(url, headers, payload, timeout=80)
+    for model in GROQ_MODELS:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
 
-        if resp.status_code == 200:
-            j = resp.json()
-            return (j["choices"][0]["message"]["content"] or "").strip()
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            await _throttle()
+            resp = await _post_json(url, headers, payload, timeout=80)
 
-        txt = resp.text or ""
-        last_err = f"{resp.status_code}: {txt[:240]}"
-        if _is_quota_error(resp.status_code, txt):
-            base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
-            wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-            wait = wait * random.uniform(0.85, 1.15)
-            await asyncio.sleep(wait)
-            continue
+            if resp.status_code == 200:
+                j = resp.json()
+                return (j["choices"][0]["message"]["content"] or "").strip()
 
-        resp.raise_for_status()
+            txt = resp.text or ""
+            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
 
-    raise RuntimeError(f"groq_failed_after_retries:{last_err}")
+            if _is_model_not_available(resp.status_code, txt):
+                print(f"[LLM][groq] skip unavailable model={model} status={resp.status_code}", flush=True)
+                break
+
+            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                if attempt < LLM_MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[LLM][groq] exhausted retries model={model} status={resp.status_code}", flush=True)
+                break
+
+            resp.raise_for_status()
+
+    raise RuntimeError(f"groq_failed_after_fallbacks:{last_err}")
 
 
 async def gemini_generate(prompt: str, api_key: str) -> str:
@@ -441,27 +478,44 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
     if _gemini_region_blocked:
         raise RuntimeError("gemini_disabled_region")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    last_err = ""
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    await _throttle()
-    resp = await _post_json(url, headers, payload, timeout=80)
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            await _throttle()
+            resp = await _post_json(url, headers, payload, timeout=80)
 
-    if resp.status_code == 200:
-        j = resp.json()
-        return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+            if resp.status_code == 200:
+                j = resp.json()
+                return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
 
-    txt = resp.text or ""
-    if _is_gemini_region_block(txt):
-        _gemini_region_blocked = True
-        raise RuntimeError("gemini_blocked_region")
+            txt = resp.text or ""
+            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
 
-    if resp.status_code == 404:
-        raise RuntimeError(f"gemini_model_not_found:{GEMINI_MODEL}")
+            if _is_gemini_region_block(txt):
+                _gemini_region_blocked = True
+                raise RuntimeError("gemini_blocked_region")
 
-    resp.raise_for_status()
-    raise RuntimeError(f"gemini_failed:{resp.status_code}")
+            if _is_model_not_available(resp.status_code, txt):
+                print(f"[LLM][gemini] skip unavailable model={model} status={resp.status_code}", flush=True)
+                break
+
+            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                if attempt < LLM_MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[LLM][gemini] exhausted retries model={model} status={resp.status_code}", flush=True)
+                break
+
+            resp.raise_for_status()
+
+    raise RuntimeError(f"gemini_failed_after_fallbacks:{last_err}")
 
 
 # -----------------------
@@ -688,8 +742,7 @@ def build_generation_prompt(
             "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n"
             "Говори только про типичное развитие и наблюдаемые milestones.\n\n"
             "🏠 Что можно понаблюдать дома:\n"
-            "Дай один мягкий родительский способ заметить навык в повседневной жизни или игре. "
-            "Не упражнение на коррекцию, а наблюдение или естественный бытовой прием.\n\n"
+            "Дай один мягкий родительский способ заметить навык в повседневной жизни или игре. Не упражнение на коррекцию, а наблюдение или естественный бытовой прием.\n\n"
             "💡 Что это дает: одним предложением объясни, что именно родитель сможет заметить.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
@@ -830,7 +883,7 @@ async def generate_image_prompt_async(
         cleaned = _clean_image_prompt(raw)
         ok, reason = _validate_image_prompt(cleaned)
         if ok:
-            return cleaned, True, f"ok:gemini:{GEMINI_MODEL}"
+            return cleaned, True, f"ok:gemini:{GEMINI_MODELS[0]}"
         return "", False, f"invalid_gemini_image_prompt:{reason}"
 
     if prov == "none":
@@ -972,7 +1025,7 @@ async def generate_post_plain_from_evidence_async(
             out = postprocess(await gemini_generate(prompt, gemini_key))
             ok, reason = validate(out)
             if ok:
-                return out, True, f"ok:gemini:{GEMINI_MODEL}"
+                return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
             return "", False, f"invalid_gemini:{reason}"
         except Exception as e:
             return "", False, f"gemini_failed:{e} | groq={groq_err}"

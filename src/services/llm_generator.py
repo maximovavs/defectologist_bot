@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODELS / GEMINI_MODELS
+Patch 5.4.3 — model fallback + Markdown artifact cleanup for Telegram HTML
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -23,6 +23,7 @@ Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODE
 8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
 9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
 10) Минимальный fallback по спискам GROQ_MODELS и GEMINI_MODELS.
+11) Очистка Markdown-артефактов перед Telegram HTML render.
 """
 
 import asyncio
@@ -62,6 +63,37 @@ def _strip_placeholder_artifacts(text: str) -> str:
             continue
         cleaned.append(line)
     return "\n".join(cleaned).strip()
+
+
+
+def _strip_markdown_artifacts(text: str) -> str:
+    """Remove common Markdown artifacts from LLM output before Telegram HTML rendering.
+
+    The publisher renders plain text into Telegram HTML later. If the LLM returns
+    Markdown like **bold**, Telegram HTML mode will show the asterisks literally.
+    This sanitizer keeps the human text and removes Markdown-only syntax.
+    """
+    s = text or ""
+
+    # Markdown fenced code blocks markers, just in case.
+    s = re.sub(r"^```[a-zA-Z0-9_-]*\s*$", "", s, flags=re.MULTILINE)
+
+    # Markdown bold / italic.
+    s = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", s)
+    s = re.sub(r"__([^_\n]+)__", r"\1", s)
+    s = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", s)
+    s = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", s)
+
+    # Markdown headings.
+    s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s, flags=re.MULTILINE)
+
+    # Markdown links: [text](url) -> text (url)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", s)
+
+    # Markdown list bullets -> normal text bullets are okay, but remove excessive indentation.
+    s = re.sub(r"^\s*[-*+]\s+", "• ", s, flags=re.MULTILINE)
+
+    return s.strip()
 
 
 def _extract_nonempty_lines(text: str) -> List[str]:
@@ -540,6 +572,9 @@ def _common_rules(max_chars: int) -> str:
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
         "Не используй Markdown и кодовые блоки.\n"
+        "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
+        "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
+        "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
         "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
         "Используй формат вроде: #билингвизм #запуск_речи\n"
         "Никогда не пиши больше двух тематических хештегов.\n"
@@ -955,6 +990,7 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
+        s = _strip_markdown_artifacts(s)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
@@ -989,6 +1025,7 @@ async def generate_post_plain_from_evidence_async(
                 + ". "
                 + "Сделай текст живее, плотнее и конкретнее. "
                 + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
+                + "Не используй Markdown, звёздочки для жирного текста и markdown-заголовки. "
                 + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
                 + "Сразу иди к сути и не делай текст слишком коротким. "
             )

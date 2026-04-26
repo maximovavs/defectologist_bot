@@ -194,7 +194,8 @@ SUNDAY_PATHOLOGY_FRAGMENTS = [
     "коррек",
     "дефицит",
     "аутиз",
-    "рас",
+    "аутистическ",
+    "расстройств",
     "алали",
     "дизартр",
     "дислал",
@@ -332,7 +333,12 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     out = (text or "").strip()
     if not out:
         return False, "empty"
-    if len(out) < 260:
+
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    min_len = 220 if (dk == "SU" or rf == "age_norms") else 260
+    if len(out) < min_len:
         return False, "too_short"
 
     banned = _contains_banned(out)
@@ -341,9 +347,6 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if _has_template_leak(out):
         return False, "template_leak"
-
-    dk = (day_key or "").strip().upper()
-    rf = (rubric_format or "").strip().lower()
 
     if dk == "MO" or rf == "tip_of_day":
         return _validate_tip_of_day_output(out)
@@ -1012,7 +1015,12 @@ async def generate_post_plain_from_evidence_async(
             ok2, reason2 = validate(out2)
             if ok2:
                 return out2, True, "ok:groq_retry"
-            return "", False, f"invalid_groq:{reason2}"
+
+            groq_err = f"invalid_groq:{reason2}"
+            if prov == "groq":
+                return "", False, groq_err
+
+            print(f"[LLM][groq] invalid output, falling back to gemini: {reason2}", flush=True)
         except Exception as e:
             groq_err = str(e)
             if prov == "groq":

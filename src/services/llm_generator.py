@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.6 — softer pro_friendly validator
+Patch 5.4.7 — soft pro validator + auto pro structure normalization
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -27,6 +27,7 @@ Patch 5.4.6 — softer pro_friendly validator
 12) Sunday validator: no false-positive 'рас', softer min length, invalid Groq can fall back to Gemini.
 13) pro_friendly validator and safer specialist prompt for method_piggybank structure.
 14) Softer pro_friendly validator: flexible headings and lower min length.
+15) pro_friendly auto-structure normalization before validation.
 """
 
 import asyncio
@@ -375,56 +376,28 @@ def _has_any_header(lines: List[str], variants: List[str]) -> bool:
     return False
 
 
+def _has_pro_structure(lines: List[str]) -> bool:
+    return (
+        _has_any_header(lines, ["Введение", "Коротко", "Суть"])
+        and _has_any_header(lines, ["Главные выводы", "Главный вывод", "Выводы", "Что важно"])
+        and _has_any_header(lines, ["Практическое применение", "Практика", "Как применить", "Что взять в работу"])
+    )
+
+
 def _validate_pro_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
         return False, "pro_empty"
 
     title = lines[0]
-    if len(title) > 110:
+    if len(title) > 140:
         return False, "pro_title_too_long"
 
     if _contains_any_fragment(text, ["**", "###", "##", "#пример_тега"]):
         return False, "pro_markdown_or_template_leak"
 
-    has_audience = _has_any_header(lines, [
-        "👩‍⚕️ Аудитория:",
-        "Аудитория:",
-    ])
-
-    has_intro = _has_any_header(lines, [
-        "Введение",
-        "Коротко",
-        "Суть",
-    ])
-
-    has_findings = _has_any_header(lines, [
-        "Главные выводы",
-        "Главный вывод",
-        "Выводы",
-        "Что важно",
-    ])
-
-    has_practice = _has_any_header(lines, [
-        "Практическое применение",
-        "Практика",
-        "Как применить",
-        "Что взять в работу",
-    ])
-
-    missing: List[str] = []
-    if not has_audience:
-        missing.append("audience")
-    if not has_intro:
-        missing.append("intro")
-    if not has_findings:
-        missing.append("findings")
-    if not has_practice:
-        missing.append("practice")
-
-    if missing:
-        return False, "pro_missing_structure:" + ",".join(missing)
-
+    # For pro_friendly we do not hard-fail on missing headings anymore.
+    # postprocess() normalizes unstructured pro text into Telegram blocks before validation.
     return True, "ok"
 
 
@@ -457,6 +430,83 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
         return _validate_pro_output(out)
 
     return True, "ok"
+
+
+def _split_sentences_for_structure(text: str) -> List[str]:
+    s = norm_space(text)
+    if not s:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", s)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _normalize_pro_structure(text: str) -> str:
+    """Make pro_friendly output structured even if the LLM returned one paragraph.
+
+    The validator is intentionally soft, but the Telegram post still needs visual
+    blocks. If a pro post already has headings, keep it as-is. Otherwise, wrap
+    the text into stable headings that run_publisher.py can render in HTML.
+    """
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return text
+
+    if _has_pro_structure(lines):
+        return text.strip()
+
+    footer_lines: List[str] = []
+    content_lines: List[str] = []
+    for line in lines:
+        st = line.strip()
+        low = st.lower()
+        if low.startswith("источник:") or st.startswith("🔗 ") or st.startswith("#") or st.startswith("ℹ️ "):
+            footer_lines.append(st)
+        else:
+            content_lines.append(st)
+
+    if not content_lines:
+        return text.strip()
+
+    raw_title = content_lines[0]
+    if len(raw_title) <= 110 and not raw_title.endswith((".", "!", "?")):
+        title = raw_title
+        body_seed = " ".join(content_lines[1:]).strip()
+    else:
+        sentences_from_title = _split_sentences_for_structure(raw_title)
+        title = sentences_from_title[0][:110].rstrip(" ,;:-") if sentences_from_title else "Методический прием без лишней сложности"
+        body_seed = " ".join((sentences_from_title[1:] if len(sentences_from_title) > 1 else []) + content_lines[1:]).strip()
+
+    if not body_seed:
+        body_seed = raw_title if raw_title != title else "Этот материал можно превратить в короткий рабочий прием для занятия или домашней практики."
+
+    sentences = _split_sentences_for_structure(body_seed)
+    intro = sentences[0] if sentences else body_seed
+    findings = " ".join(sentences[1:3]).strip() if len(sentences) > 1 else "Главный смысл — выделить одну понятную задачу и не перегружать ребенка несколькими требованиями сразу."
+    practice = " ".join(sentences[3:6]).strip() if len(sentences) > 3 else "Возьмите один элемент из материала и превратите его в короткую повторяемую инструкцию: сначала покажите действие, затем дайте ребенку время повторить, после этого мягко расширьте ответ одним словом или движением."
+    benefit = "Помогает сохранить фокус занятия и сделать профессиональный прием понятным для семьи."
+
+    normalized = [
+        title,
+        "",
+        "👩‍⚕️ Аудитория: специалисты",
+        "",
+        "Введение",
+        intro,
+        "",
+        "Главные выводы",
+        findings,
+        "",
+        "Практическое применение",
+        practice,
+        "",
+        "💡 Что это дает:",
+        benefit,
+    ]
+
+    if footer_lines:
+        normalized.extend(["", *footer_lines])
+
+    return "\n".join(normalized).strip()
 
 
 # -----------------------
@@ -1077,6 +1127,8 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
         s = _strip_markdown_artifacts(s)
+        if aud == "pros" or rf == "pro_friendly":
+            s = _normalize_pro_structure(s)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
@@ -1128,6 +1180,13 @@ async def generate_post_plain_from_evidence_async(
                     "Для Sunday обязательно: только возрастные ориентиры и milestones, "
                     "без патологической, диагностической и коррекционной лексики, "
                     "с фразой «Каждый ребенок развивается индивидуально»."
+                )
+
+            if aud == "pros" or rf == "pro_friendly":
+                repair_prompt += (
+                    "Для pro_friendly обязательно верни структурированный Telegram-пост: "
+                    "H1, затем строка 👩‍⚕️ Аудитория: специалисты, затем блоки Введение, "
+                    "Главные выводы, Практическое применение. Без Markdown и без звездочек."
                 )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))

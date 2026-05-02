@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.5 — pro_friendly structure validator + safer specialist prompt
+Patch 5.4.6 — softer pro_friendly validator
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -26,6 +26,7 @@ Patch 5.4.5 — pro_friendly structure validator + safer specialist prompt
 11) Очистка Markdown-артефактов перед Telegram HTML render.
 12) Sunday validator: no false-positive 'рас', softer min length, invalid Groq can fall back to Gemini.
 13) pro_friendly validator and safer specialist prompt for method_piggybank structure.
+14) Softer pro_friendly validator: flexible headings and lower min length.
 """
 
 import asyncio
@@ -363,41 +364,69 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
 
 
 
+def _has_any_header(lines: List[str], variants: List[str]) -> bool:
+    normalized_lines = [line.strip().lower().replace("ё", "е") for line in lines]
+    normalized_variants = [v.strip().lower().replace("ё", "е") for v in variants]
+
+    for line in normalized_lines:
+        for variant in normalized_variants:
+            if line == variant or line.startswith(variant):
+                return True
+    return False
+
+
 def _validate_pro_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
         return False, "pro_empty"
 
     title = lines[0]
-    if len(title) > 100:
+    if len(title) > 110:
         return False, "pro_title_too_long"
-
-    required_headers = [
-        "👩‍⚕️ Аудитория:",
-        "Введение",
-        "Главные выводы",
-        "Практическое применение",
-        "💡 Что это дает:",
-    ]
-
-    missing: List[str] = []
-    normalized_lines = [line.strip().lower() for line in lines]
-    for header in required_headers:
-        h = header.strip().lower()
-        if header.endswith(":"):
-            ok = any(line.startswith(h) for line in normalized_lines)
-        else:
-            ok = h in normalized_lines
-        if not ok:
-            missing.append(header)
-
-    if missing:
-        return False, "pro_missing_headers:" + ",".join(missing)
 
     if _contains_any_fragment(text, ["**", "###", "##", "#пример_тега"]):
         return False, "pro_markdown_or_template_leak"
 
+    has_audience = _has_any_header(lines, [
+        "👩‍⚕️ Аудитория:",
+        "Аудитория:",
+    ])
+
+    has_intro = _has_any_header(lines, [
+        "Введение",
+        "Коротко",
+        "Суть",
+    ])
+
+    has_findings = _has_any_header(lines, [
+        "Главные выводы",
+        "Главный вывод",
+        "Выводы",
+        "Что важно",
+    ])
+
+    has_practice = _has_any_header(lines, [
+        "Практическое применение",
+        "Практика",
+        "Как применить",
+        "Что взять в работу",
+    ])
+
+    missing: List[str] = []
+    if not has_audience:
+        missing.append("audience")
+    if not has_intro:
+        missing.append("intro")
+    if not has_findings:
+        missing.append("findings")
+    if not has_practice:
+        missing.append("practice")
+
+    if missing:
+        return False, "pro_missing_structure:" + ",".join(missing)
+
     return True, "ok"
+
 
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
@@ -407,7 +436,7 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
 
-    min_len = 220 if (dk == "SU" or rf == "age_norms") else 260
+    min_len = 220 if (dk == "SU" or rf in ("age_norms", "pro_friendly")) else 260
     if len(out) < min_len:
         return False, "too_short"
 
@@ -428,6 +457,7 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
         return _validate_pro_output(out)
 
     return True, "ok"
+
 
 # -----------------------
 # Provider config / throttle / backoff

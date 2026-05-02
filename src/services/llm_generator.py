@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.7 — soft pro validator + auto pro structure normalization
+Patch 5.4.8 — compact pro_friendly structure to prevent truncation
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -432,6 +432,35 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     return True, "ok"
 
 
+def _clip_text_for_structure(text: str, max_chars: int) -> str:
+    s = norm_space(text)
+    if len(s) <= max_chars:
+        return s
+
+    cut = s[:max_chars].rstrip(" ,;:-")
+    boundary = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    if boundary >= max_chars * 0.55:
+        return cut[: boundary + 1].strip()
+
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")].rstrip(" ,;:-")
+
+    return (cut + "…").strip()
+
+
+def _is_pro_heading_line(line: str) -> bool:
+    low = line.strip().lower().replace("ё", "е")
+    return (
+        low.startswith("👩‍⚕️ аудитория:")
+        or low.startswith("аудитория:")
+        or low in {"введение", "коротко", "суть"}
+        or low in {"главные выводы", "главный вывод", "выводы", "что важно"}
+        or low in {"практическое применение", "практика", "как применить", "что взять в работу"}
+        or low.startswith("💡 что это дает")
+        or low.startswith("💡 что это даёт")
+    )
+
+
 def _split_sentences_for_structure(text: str) -> List[str]:
     s = norm_space(text)
     if not s:
@@ -441,49 +470,61 @@ def _split_sentences_for_structure(text: str) -> List[str]:
 
 
 def _normalize_pro_structure(text: str) -> str:
-    """Make pro_friendly output structured even if the LLM returned one paragraph.
+    """Normalize and compact pro_friendly output for Telegram.
 
-    The validator is intentionally soft, but the Telegram post still needs visual
-    blocks. If a pro post already has headings, keep it as-is. Otherwise, wrap
-    the text into stable headings that run_publisher.py can render in HTML.
+    The post must be structured, but also fit POST_MAX_CHARS after source and tags
+    are added by the publisher. Therefore every block is intentionally short.
     """
     lines = _extract_nonempty_lines(text)
     if not lines:
         return text
 
-    if _has_pro_structure(lines):
-        return text.strip()
-
     footer_lines: List[str] = []
     content_lines: List[str] = []
+
     for line in lines:
         st = line.strip()
         low = st.lower()
         if low.startswith("источник:") or st.startswith("🔗 ") or st.startswith("#") or st.startswith("ℹ️ "):
             footer_lines.append(st)
-        else:
-            content_lines.append(st)
+            continue
+        if _is_pro_heading_line(st):
+            continue
+        content_lines.append(st)
 
     if not content_lines:
         return text.strip()
 
     raw_title = content_lines[0]
-    if len(raw_title) <= 110 and not raw_title.endswith((".", "!", "?")):
+    rest_lines = content_lines[1:]
+
+    if len(raw_title) <= 90 and not raw_title.endswith((".", "!", "?")):
         title = raw_title
-        body_seed = " ".join(content_lines[1:]).strip()
+        body_seed = " ".join(rest_lines).strip()
     else:
-        sentences_from_title = _split_sentences_for_structure(raw_title)
-        title = sentences_from_title[0][:110].rstrip(" ,;:-") if sentences_from_title else "Методический прием без лишней сложности"
-        body_seed = " ".join((sentences_from_title[1:] if len(sentences_from_title) > 1 else []) + content_lines[1:]).strip()
+        title_sentences = _split_sentences_for_structure(raw_title)
+        title = title_sentences[0] if title_sentences else "Методический прием без лишней сложности"
+        title = _clip_text_for_structure(title, 90).rstrip(".")
+        body_seed = " ".join((title_sentences[1:] if len(title_sentences) > 1 else []) + rest_lines).strip()
 
     if not body_seed:
-        body_seed = raw_title if raw_title != title else "Этот материал можно превратить в короткий рабочий прием для занятия или домашней практики."
+        body_seed = "Этот материал можно превратить в короткий рабочий прием для занятия или домашней практики."
 
     sentences = _split_sentences_for_structure(body_seed)
-    intro = sentences[0] if sentences else body_seed
-    findings = " ".join(sentences[1:3]).strip() if len(sentences) > 1 else "Главный смысл — выделить одну понятную задачу и не перегружать ребенка несколькими требованиями сразу."
-    practice = " ".join(sentences[3:6]).strip() if len(sentences) > 3 else "Возьмите один элемент из материала и превратите его в короткую повторяемую инструкцию: сначала покажите действие, затем дайте ребенку время повторить, после этого мягко расширьте ответ одним словом или движением."
-    benefit = "Помогает сохранить фокус занятия и сделать профессиональный прием понятным для семьи."
+
+    intro_raw = sentences[0] if sentences else body_seed
+    findings_raw = " ".join(sentences[1:3]).strip()
+    practice_raw = " ".join(sentences[3:6]).strip()
+
+    if not findings_raw:
+        findings_raw = "Главный смысл — выбрать одну понятную задачу и не перегружать ребенка несколькими требованиями сразу."
+    if not practice_raw:
+        practice_raw = "Возьмите один элемент из материала и превратите его в короткую повторяемую инструкцию: покажите действие, дайте ребенку время повторить, затем мягко расширьте ответ."
+
+    intro = _clip_text_for_structure(intro_raw, 150)
+    findings = _clip_text_for_structure(findings_raw, 210)
+    practice = _clip_text_for_structure(practice_raw, 260)
+    benefit = "Помогает сохранить фокус занятия и сделать прием понятным для ребенка и семьи."
 
     normalized = [
         title,
@@ -755,9 +796,9 @@ def build_generation_prompt(
             "Введение\n"
             "1–2 предложения: какая профессиональная ситуация или навык обсуждается.\n\n"
             "Главные выводы\n"
-            "2–3 коротких предложения: что важно понять специалисту из материала. Без длинных списков.\n\n"
+            "1–2 коротких предложения: что важно понять специалисту из материала. Без длинных списков.\n\n"
             "Практическое применение\n"
-            "2–4 предложения: один конкретный прием, упражнение или наблюдение, которое можно взять в работу. "
+            "2–3 коротких предложения: один конкретный прием, упражнение или наблюдение, которое можно взять в работу. "
             "Добавь пример инструкции специалиста или реплики взрослого.\n\n"
             "💡 Что это дает:\n"
             "1 короткое предложение о практическом эффекте.\n\n"

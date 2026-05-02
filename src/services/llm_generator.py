@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODELS / GEMINI_MODELS
+Patch 5.4.5 — pro_friendly structure validator + safer specialist prompt
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -23,6 +23,9 @@ Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODE
 8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
 9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
 10) Минимальный fallback по спискам GROQ_MODELS и GEMINI_MODELS.
+11) Очистка Markdown-артефактов перед Telegram HTML render.
+12) Sunday validator: no false-positive 'рас', softer min length, invalid Groq can fall back to Gemini.
+13) pro_friendly validator and safer specialist prompt for method_piggybank structure.
 """
 
 import asyncio
@@ -62,6 +65,36 @@ def _strip_placeholder_artifacts(text: str) -> str:
             continue
         cleaned.append(line)
     return "\n".join(cleaned).strip()
+
+
+def _strip_markdown_artifacts(text: str) -> str:
+    """Remove common Markdown artifacts from LLM output before Telegram HTML rendering.
+
+    The publisher renders plain text into Telegram HTML later. If the LLM returns
+    Markdown like **bold**, Telegram HTML mode will show the asterisks literally.
+    This sanitizer keeps the human text and removes Markdown-only syntax.
+    """
+    s = text or ""
+
+    # Markdown fenced code block markers, just in case.
+    s = re.sub(r"^```[a-zA-Z0-9_-]*\s*$", "", s, flags=re.MULTILINE)
+
+    # Markdown bold / italic.
+    s = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", s)
+    s = re.sub(r"__([^_\n]+)__", r"\1", s)
+    s = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", s)
+    s = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", s)
+
+    # Markdown headings.
+    s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s, flags=re.MULTILINE)
+
+    # Markdown links: [text](url) -> text (url)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", s)
+
+    # Markdown list bullets -> normal bullets.
+    s = re.sub(r"^\s*[-*+]\s+", "• ", s, flags=re.MULTILINE)
+
+    return s.strip()
 
 
 def _extract_nonempty_lines(text: str) -> List[str]:
@@ -329,6 +362,43 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+
+def _validate_pro_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "pro_empty"
+
+    title = lines[0]
+    if len(title) > 100:
+        return False, "pro_title_too_long"
+
+    required_headers = [
+        "👩‍⚕️ Аудитория:",
+        "Введение",
+        "Главные выводы",
+        "Практическое применение",
+        "💡 Что это дает:",
+    ]
+
+    missing: List[str] = []
+    normalized_lines = [line.strip().lower() for line in lines]
+    for header in required_headers:
+        h = header.strip().lower()
+        if header.endswith(":"):
+            ok = any(line.startswith(h) for line in normalized_lines)
+        else:
+            ok = h in normalized_lines
+        if not ok:
+            missing.append(header)
+
+    if missing:
+        return False, "pro_missing_headers:" + ",".join(missing)
+
+    if _contains_any_fragment(text, ["**", "###", "##", "#пример_тега"]):
+        return False, "pro_markdown_or_template_leak"
+
+    return True, "ok"
+
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -354,8 +424,10 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     if dk == "SU" or rf == "age_norms":
         return _validate_age_norms_output(out)
 
-    return True, "ok"
+    if rf == "pro_friendly":
+        return _validate_pro_output(out)
 
+    return True, "ok"
 
 # -----------------------
 # Provider config / throttle / backoff
@@ -543,6 +615,9 @@ def _common_rules(max_chars: int) -> str:
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
         "Не используй Markdown и кодовые блоки.\n"
+        "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
+        "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
+        "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
         "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
         "Используй формат вроде: #билингвизм #запуск_речи\n"
         "Никогда не пиши больше двух тематических хештегов.\n"
@@ -592,20 +667,33 @@ def build_generation_prompt(
 
     if aud == "pros":
         template = (
-            f"{rubric_title} {title_suffix}\n"
+            "Первая строка — короткий живой H1 по сути метода, без названия рубрики.\n"
+            "Не используй Markdown и не выделяй слова звёздочками.\n"
+            "Не начинай с диагноза или пугающей клинической формулировки.\n"
+            "Пиши так, чтобы специалисту было полезно, а родителю — не страшно.\n\n"
             "👩‍⚕️ Аудитория: специалисты\n\n"
             "Введение\n"
-            "2–3 предложения: кратко сформулируй клинический вопрос и цель материала.\n\n"
-            "Методы\n"
-            "2–4 предложения: опиши дизайн, приемы, наблюдения, критерии или методическую логику.\n\n"
+            "1–2 предложения: какая профессиональная ситуация или навык обсуждается.\n\n"
             "Главные выводы\n"
-            "3–5 предложений: передай самые важные результаты экспертным языком, без копирования исходных фраз.\n\n"
+            "2–3 коротких предложения: что важно понять специалисту из материала. Без длинных списков.\n\n"
             "Практическое применение\n"
-            "2–4 предложения: что специалист может взять в работу уже сейчас.\n\n"
+            "2–4 предложения: один конкретный прием, упражнение или наблюдение, которое можно взять в работу. "
+            "Добавь пример инструкции специалиста или реплики взрослого.\n\n"
+            "💡 Что это дает:\n"
+            "1 короткое предложение о практическом эффекте.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и редактор профессиональной, но понятной Telegram-рубрики.\n"
+            + "Твоя задача — не академический конспект и не список из методички, а короткий структурированный пост с одним применимым выводом.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
     if dk == "MO" or rf == "tip_of_day":
         template = (
@@ -958,6 +1046,7 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
+        s = _strip_markdown_artifacts(s)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,

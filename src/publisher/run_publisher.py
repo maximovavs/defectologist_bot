@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Publisher (cron/GitHub Actions) v4.3.2-safe
+Publisher (cron/GitHub Actions) v4.3.3-safe
 
 Основа: production v4.3.1-safe
 Минимальные безопасные улучшения:
@@ -12,6 +12,8 @@ Publisher (cron/GitHub Actions) v4.3.2-safe
 6) Диагностический alert при Posted: 0.
 7) Новый мягкий post-fit guard для Monday / tip_of_day.
 8) Диагностика HTML fallback для Telegram send/caption.
+9) Для method_piggybank source-level semantic dedup не блокирует кандидата:
+  финальный body-level dedup остаётся активным.
 """
 
 import asyncio
@@ -1303,39 +1305,62 @@ async def amain() -> None:
                     compare="evidence",
                 )
                 if sem_source_hit:
-                    kind = note("dup_semantic_source", canon)
-                    print(
-                        f"[SKIP][{kind}] dup_semantic_source url={canon} matched={sem_source_hit.canonical_url} score={sem_source_hit.similarity:.3f}",
-                        flush=True,
-                    )
-                    if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
-                        recent_hit = store.find_semantic_duplicate(
-                            evidence,
-                            threshold=SEMANTIC_THRESHOLD,
-                            since_iso=recent_since_iso,
-                            limit=120,
-                            compare="evidence",
+                    # method_piggybank is a methodological/professional rubric.
+                    # Source-level semantic dedup is too aggressive here:
+                    # many different method articles use the same professional vocabulary
+                    # and can score very high while still producing different practical posts.
+                    #
+                    # We still keep the safer checks:
+                    # - dup_url_db
+                    # - dup_evidence_hash_db
+                    # - dup_body_hash_db
+                    # - dup_semantic_post
+                    #
+                    # So for this rubric we only warn and continue to LLM.
+                    if rubric_id == "method_piggybank":
+                        print(
+                            f"[WARN] semantic_source_match_ignored rubric={rubric_id} "
+                            f"url={canon} matched={sem_source_hit.canonical_url} "
+                            f"score={sem_source_hit.similarity:.3f}",
+                            flush=True,
                         )
-                        if recent_hit:
-                            try:
-                                send_semantic_alert(
-                                    TELEGRAM_DRAFTS_CHAT_ID,
-                                    canon,
-                                    recent_hit.canonical_url,
-                                    recent_hit.similarity,
-                                    aud,
-                                    rubric_id,
-                                    recent_hit.match_field,
-                                )
-                            except Exception as e:
-                                print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
-                    if kind == "hard":
-                        rubric_skips += 1
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
+                    else:
+                        kind = note("dup_semantic_source", canon)
+                        print(
+                            f"[SKIP][{kind}] dup_semantic_source url={canon} "
+                            f"matched={sem_source_hit.canonical_url} "
+                            f"score={sem_source_hit.similarity:.3f}",
+                            flush=True,
+                        )
+                        if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
+                            recent_hit = store.find_semantic_duplicate(
+                                evidence,
+                                threshold=SEMANTIC_THRESHOLD,
+                                since_iso=recent_since_iso,
+                                limit=120,
+                                compare="evidence",
+                            )
+                            if recent_hit:
+                                try:
+                                    send_semantic_alert(
+                                        TELEGRAM_DRAFTS_CHAT_ID,
+                                        canon,
+                                        recent_hit.canonical_url,
+                                        recent_hit.similarity,
+                                        aud,
+                                        rubric_id,
+                                        recent_hit.match_field,
+                                    )
+                                except Exception as e:
+                                    print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 

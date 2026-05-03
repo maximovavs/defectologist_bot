@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 src/services/llm_generator.py
 
-Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODELS / GEMINI_MODELS
+Patch 5.4.8 — compact pro_friendly structure to prevent truncation
 
 Что делает модуль:
 1) Groq: устойчивость к 429 через exponential backoff + jitter.
@@ -23,6 +23,11 @@ Patch 5.4.2 — restore build_generation_prompt + minimal fallback for GROQ_MODE
 8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
 9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
 10) Минимальный fallback по спискам GROQ_MODELS и GEMINI_MODELS.
+11) Очистка Markdown-артефактов перед Telegram HTML render.
+12) Sunday validator: no false-positive 'рас', softer min length, invalid Groq can fall back to Gemini.
+13) pro_friendly validator and safer specialist prompt for method_piggybank structure.
+14) Softer pro_friendly validator: flexible headings and lower min length.
+15) pro_friendly auto-structure normalization before validation.
 """
 
 import asyncio
@@ -62,6 +67,36 @@ def _strip_placeholder_artifacts(text: str) -> str:
             continue
         cleaned.append(line)
     return "\n".join(cleaned).strip()
+
+
+def _strip_markdown_artifacts(text: str) -> str:
+    """Remove common Markdown artifacts from LLM output before Telegram HTML rendering.
+
+    The publisher renders plain text into Telegram HTML later. If the LLM returns
+    Markdown like **bold**, Telegram HTML mode will show the asterisks literally.
+    This sanitizer keeps the human text and removes Markdown-only syntax.
+    """
+    s = text or ""
+
+    # Markdown fenced code block markers, just in case.
+    s = re.sub(r"^```[a-zA-Z0-9_-]*\s*$", "", s, flags=re.MULTILINE)
+
+    # Markdown bold / italic.
+    s = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", s)
+    s = re.sub(r"__([^_\n]+)__", r"\1", s)
+    s = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", s)
+    s = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", s)
+
+    # Markdown headings.
+    s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s, flags=re.MULTILINE)
+
+    # Markdown links: [text](url) -> text (url)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", s)
+
+    # Markdown list bullets -> normal bullets.
+    s = re.sub(r"^\s*[-*+]\s+", "• ", s, flags=re.MULTILINE)
+
+    return s.strip()
 
 
 def _extract_nonempty_lines(text: str) -> List[str]:
@@ -329,6 +364,43 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+
+def _has_any_header(lines: List[str], variants: List[str]) -> bool:
+    normalized_lines = [line.strip().lower().replace("ё", "е") for line in lines]
+    normalized_variants = [v.strip().lower().replace("ё", "е") for v in variants]
+
+    for line in normalized_lines:
+        for variant in normalized_variants:
+            if line == variant or line.startswith(variant):
+                return True
+    return False
+
+
+def _has_pro_structure(lines: List[str]) -> bool:
+    return (
+        _has_any_header(lines, ["Введение", "Коротко", "Суть"])
+        and _has_any_header(lines, ["Главные выводы", "Главный вывод", "Выводы", "Что важно"])
+        and _has_any_header(lines, ["Практическое применение", "Практика", "Как применить", "Что взять в работу"])
+    )
+
+
+def _validate_pro_output(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return False, "pro_empty"
+
+    title = lines[0]
+    if len(title) > 140:
+        return False, "pro_title_too_long"
+
+    if _contains_any_fragment(text, ["**", "###", "##", "#пример_тега"]):
+        return False, "pro_markdown_or_template_leak"
+
+    # For pro_friendly we do not hard-fail on missing headings anymore.
+    # postprocess() normalizes unstructured pro text into Telegram blocks before validation.
+    return True, "ok"
+
+
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -337,7 +409,7 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
 
-    min_len = 220 if (dk == "SU" or rf == "age_norms") else 260
+    min_len = 220 if (dk == "SU" or rf in ("age_norms", "pro_friendly")) else 260
     if len(out) < min_len:
         return False, "too_short"
 
@@ -354,7 +426,128 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     if dk == "SU" or rf == "age_norms":
         return _validate_age_norms_output(out)
 
+    if rf == "pro_friendly":
+        return _validate_pro_output(out)
+
     return True, "ok"
+
+
+def _clip_text_for_structure(text: str, max_chars: int) -> str:
+    s = norm_space(text)
+    if len(s) <= max_chars:
+        return s
+
+    cut = s[:max_chars].rstrip(" ,;:-")
+    boundary = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    if boundary >= max_chars * 0.55:
+        return cut[: boundary + 1].strip()
+
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")].rstrip(" ,;:-")
+
+    return (cut + "…").strip()
+
+
+def _is_pro_heading_line(line: str) -> bool:
+    low = line.strip().lower().replace("ё", "е")
+    return (
+        low.startswith("👩‍⚕️ аудитория:")
+        or low.startswith("аудитория:")
+        or low in {"введение", "коротко", "суть"}
+        or low in {"главные выводы", "главный вывод", "выводы", "что важно"}
+        or low in {"практическое применение", "практика", "как применить", "что взять в работу"}
+        or low.startswith("💡 что это дает")
+        or low.startswith("💡 что это даёт")
+    )
+
+
+def _split_sentences_for_structure(text: str) -> List[str]:
+    s = norm_space(text)
+    if not s:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", s)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _normalize_pro_structure(text: str) -> str:
+    """Normalize and compact pro_friendly output for Telegram.
+
+    The post must be structured, but also fit POST_MAX_CHARS after source and tags
+    are added by the publisher. Therefore every block is intentionally short.
+    """
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return text
+
+    footer_lines: List[str] = []
+    content_lines: List[str] = []
+
+    for line in lines:
+        st = line.strip()
+        low = st.lower()
+        if low.startswith("источник:") or st.startswith("🔗 ") or st.startswith("#") or st.startswith("ℹ️ "):
+            footer_lines.append(st)
+            continue
+        if _is_pro_heading_line(st):
+            continue
+        content_lines.append(st)
+
+    if not content_lines:
+        return text.strip()
+
+    raw_title = content_lines[0]
+    rest_lines = content_lines[1:]
+
+    if len(raw_title) <= 90 and not raw_title.endswith((".", "!", "?")):
+        title = raw_title
+        body_seed = " ".join(rest_lines).strip()
+    else:
+        title_sentences = _split_sentences_for_structure(raw_title)
+        title = title_sentences[0] if title_sentences else "Методический прием без лишней сложности"
+        title = _clip_text_for_structure(title, 90).rstrip(".")
+        body_seed = " ".join((title_sentences[1:] if len(title_sentences) > 1 else []) + rest_lines).strip()
+
+    if not body_seed:
+        body_seed = "Этот материал можно превратить в короткий рабочий прием для занятия или домашней практики."
+
+    sentences = _split_sentences_for_structure(body_seed)
+
+    intro_raw = sentences[0] if sentences else body_seed
+    findings_raw = " ".join(sentences[1:3]).strip()
+    practice_raw = " ".join(sentences[3:6]).strip()
+
+    if not findings_raw:
+        findings_raw = "Главный смысл — выбрать одну понятную задачу и не перегружать ребенка несколькими требованиями сразу."
+    if not practice_raw:
+        practice_raw = "Возьмите один элемент из материала и превратите его в короткую повторяемую инструкцию: покажите действие, дайте ребенку время повторить, затем мягко расширьте ответ."
+
+    intro = _clip_text_for_structure(intro_raw, 150)
+    findings = _clip_text_for_structure(findings_raw, 210)
+    practice = _clip_text_for_structure(practice_raw, 260)
+    benefit = "Помогает сохранить фокус занятия и сделать прием понятным для ребенка и семьи."
+
+    normalized = [
+        title,
+        "",
+        "👩‍⚕️ Аудитория: специалисты",
+        "",
+        "Введение",
+        intro,
+        "",
+        "Главные выводы",
+        findings,
+        "",
+        "Практическое применение",
+        practice,
+        "",
+        "💡 Что это дает:",
+        benefit,
+    ]
+
+    if footer_lines:
+        normalized.extend(["", *footer_lines])
+
+    return "\n".join(normalized).strip()
 
 
 # -----------------------
@@ -543,6 +736,9 @@ def _common_rules(max_chars: int) -> str:
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
         "Не используй Markdown и кодовые блоки.\n"
+        "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
+        "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
+        "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
         "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
         "Используй формат вроде: #билингвизм #запуск_речи\n"
         "Никогда не пиши больше двух тематических хештегов.\n"
@@ -592,20 +788,33 @@ def build_generation_prompt(
 
     if aud == "pros":
         template = (
-            f"{rubric_title} {title_suffix}\n"
+            "Первая строка — короткий живой H1 по сути метода, без названия рубрики.\n"
+            "Не используй Markdown и не выделяй слова звёздочками.\n"
+            "Не начинай с диагноза или пугающей клинической формулировки.\n"
+            "Пиши так, чтобы специалисту было полезно, а родителю — не страшно.\n\n"
             "👩‍⚕️ Аудитория: специалисты\n\n"
             "Введение\n"
-            "2–3 предложения: кратко сформулируй клинический вопрос и цель материала.\n\n"
-            "Методы\n"
-            "2–4 предложения: опиши дизайн, приемы, наблюдения, критерии или методическую логику.\n\n"
+            "1–2 предложения: какая профессиональная ситуация или навык обсуждается.\n\n"
             "Главные выводы\n"
-            "3–5 предложений: передай самые важные результаты экспертным языком, без копирования исходных фраз.\n\n"
+            "1–2 коротких предложения: что важно понять специалисту из материала. Без длинных списков.\n\n"
             "Практическое применение\n"
-            "2–4 предложения: что специалист может взять в работу уже сейчас.\n\n"
+            "2–3 коротких предложения: один конкретный прием, упражнение или наблюдение, которое можно взять в работу. "
+            "Добавь пример инструкции специалиста или реплики взрослого.\n\n"
+            "💡 Что это дает:\n"
+            "1 короткое предложение о практическом эффекте.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
-        return rules + "\nШАБЛОН:\n" + template + "\nEVIDENCE:\n" + evidence_text.strip() + "\n"
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и редактор профессиональной, но понятной Telegram-рубрики.\n"
+            + "Твоя задача — не академический конспект и не список из методички, а короткий структурированный пост с одним применимым выводом.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
 
     if dk == "MO" or rf == "tip_of_day":
         template = (
@@ -958,6 +1167,9 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
+        s = _strip_markdown_artifacts(s)
+        if aud == "pros" or rf == "pro_friendly":
+            s = _normalize_pro_structure(s)
         s = _ensure_source_and_link(
             text=s,
             source_domain=source_domain,
@@ -1009,6 +1221,13 @@ async def generate_post_plain_from_evidence_async(
                     "Для Sunday обязательно: только возрастные ориентиры и milestones, "
                     "без патологической, диагностической и коррекционной лексики, "
                     "с фразой «Каждый ребенок развивается индивидуально»."
+                )
+
+            if aud == "pros" or rf == "pro_friendly":
+                repair_prompt += (
+                    "Для pro_friendly обязательно верни структурированный Telegram-пост: "
+                    "H1, затем строка 👩‍⚕️ Аудитория: специалисты, затем блоки Введение, "
+                    "Главные выводы, Практическое применение. Без Markdown и без звездочек."
                 )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))

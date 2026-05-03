@@ -1324,7 +1324,7 @@ async def amain() -> None:
                             f"score={sem_source_hit.similarity:.3f}",
                             flush=True,
                         )
-                        else:
+                    else:
                         kind = note("dup_semantic_source", canon)
                         print(
                             f"[SKIP][{kind}] dup_semantic_source url={canon} "
@@ -1353,6 +1353,7 @@ async def amain() -> None:
                                     )
                                 except Exception as e:
                                     print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+
                         if kind == "hard":
                             rubric_skips += 1
                         if rubric_skips >= MAX_SKIPS_PER_RUBRIC:

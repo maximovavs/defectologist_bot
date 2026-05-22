@@ -1472,6 +1472,7 @@ async def amain() -> None:
 
                 sem_body_threshold = semantic_post_threshold_for_rubric(rubric_id)
                 sem_body_hit = store.find_semantic_duplicate(
+                    plain,
                     threshold=sem_body_threshold,
                     since_iso=None,
                     limit=500,
@@ -1485,7 +1486,7 @@ async def amain() -> None:
                         f"score={sem_body_hit.similarity:.3f} "
                         f"threshold={sem_body_threshold:.3f}",
                         flush=True,
-                        )
+                    )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                         recent_post_hit = store.find_semantic_duplicate(
                             plain,
@@ -1507,6 +1508,7 @@ async def amain() -> None:
                                 )
                             except Exception as e:
                                 print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:

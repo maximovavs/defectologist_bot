@@ -409,7 +409,12 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
 
-    min_len = 220 if (dk == "SU" or rf in ("age_norms", "pro_friendly")) else 260
+        if dk == "FR" or rf == "question_week":
+        min_len = 200
+    elif dk == "SU" or rf in ("age_norms", "pro_friendly"):
+        min_len = 220
+    else:
+        min_len = 260
     if len(out) < min_len:
         return False, "too_short"
 
@@ -1216,7 +1221,15 @@ async def generate_post_plain_from_evidence_async(
                     "Сохрани блоки 🧩, 👄 и 💡."
                 )
 
-            if dk == "SU" or rf == "age_norms":
+            if dk == "FR" or rf == "question_week":
+                repair_prompt += (
+                    "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
+                    "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 3 предложений, "
+                    "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
+                    "Итоговый текст должен быть не слишком коротким: примерно 320–700 символов."
+                )
+               
+           if dk == "SU" or rf == "age_norms":
                 repair_prompt += (
                     "Для Sunday обязательно: только возрастные ориентиры и milestones, "
                     "без патологической, диагностической и коррекционной лексики, "

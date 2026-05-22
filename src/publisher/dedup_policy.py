@@ -34,6 +34,11 @@ SEMANTIC_THRESHOLD_POST_AGE_NORMS = _env_float(
     "0.985",
 )
 
+SEMANTIC_THRESHOLD_POST_QUESTION_WEEK = _env_float(
+    "SEMANTIC_THRESHOLD_POST_QUESTION_WEEK",
+    "0.90",
+)
+
 
 def normalize_rubric_id(rubric_id: str | None) -> str:
     """Normalize rubric id for stable policy comparisons."""
@@ -48,10 +53,20 @@ def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
     For this rubric we keep exact/hash dedup active, but make semantic post
     dedup stricter so only near-identical final posts are blocked.
 
+    question_week also naturally repeats broad parent-question topics
+    (bilingualism, language delay, communication milestones). Its final Q&A
+    posts can be useful even when semantically close to previous evidence-based
+    posts, so it uses a slightly stricter-than-global post threshold.
+
     Other rubrics keep the global SEMANTIC_THRESHOLD.
     """
-    if normalize_rubric_id(rubric_id) == "age_norms":
+    normalized = normalize_rubric_id(rubric_id)
+
+    if normalized == "age_norms":
         return SEMANTIC_THRESHOLD_POST_AGE_NORMS
+
+    if normalized == "question_week":
+        return SEMANTIC_THRESHOLD_POST_QUESTION_WEEK
 
     return SEMANTIC_THRESHOLD
 

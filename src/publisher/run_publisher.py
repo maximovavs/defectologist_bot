@@ -29,7 +29,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
-from src.publisher.dedup_policy import semantic_post_threshold_for_rubric
+from src.publisher.dedup_policy import (
+    semantic_post_threshold_for_rubric,
+    should_bypass_source_semantic_dedup,
+)
 
 import feedparser
 import requests
@@ -1318,7 +1321,7 @@ async def amain() -> None:
                     # - dup_semantic_post
                     #
                     # So for this rubric we only warn and continue to LLM.
-                    if rubric_id == "method_piggybank":
+                    if should_bypass_source_semantic_dedup(rubric_id):
                         print(
                             f"[WARN] semantic_source_match_ignored rubric={rubric_id} "
                             f"url={canon} matched={sem_source_hit.canonical_url} "

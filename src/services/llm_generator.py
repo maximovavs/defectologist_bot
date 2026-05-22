@@ -409,7 +409,12 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
 
-    min_len = 220 if (dk == "SU" or rf in ("age_norms", "pro_friendly")) else 260
+    if dk == "FR" or rf == "question_week":
+        min_len = 200
+    elif dk == "SU" or rf in ("age_norms", "pro_friendly"):
+        min_len = 220
+    else:
+        min_len = 260
     if len(out) < min_len:
         return False, "too_short"
 
@@ -926,9 +931,12 @@ def build_generation_prompt(
             "Первая строка — короткий заголовок-ответ по сути вопроса, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
             "❓ Вопрос недели: задай живой вопрос родителя по теме статьи.\n\n"
-            "Ответь на него 3–5 предложениями, но не общими словами, а через факты и приемы из текста.\n\n"
+            "Ответь на него 4–6 предложениями: сначала короткий прямой ответ, затем поясни 2–3 факта из EVIDENCE простым языком.\n"
+            "Если в EVIDENCE есть не упражнение, а факты, мифы, рекомендации или возрастные ориентиры — это достаточно для поста question_week.\n"
+            "Не возвращай НЕТ_ДАННЫХ только потому, что в источнике нет готового упражнения.\n"
+            "НЕТ_ДАННЫХ можно вернуть только если текст вообще не про детскую речь, коммуникацию, билингвизм или развитие языка.\n\n"
             "🧩 Что попробовать сегодня:\n"
-            "Дай один конкретный следующий шаг.\n\n"
+            "Дай один мягкий следующий шаг для родителя: что спросить, что понаблюдать, какую ситуацию создать или какую фразу попробовать.\n\n"
             "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
@@ -936,6 +944,8 @@ def build_generation_prompt(
         return (
             rules
             + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор Telegram-рубрики «вопрос недели», который отвечает по-человечески, но по делу.\n"
+            + "Для question_week разрешено строить полезный ответ не только из упражнений, но и из фактов, мифов, рекомендаций и возрастных ориентиров из EVIDENCE.\n"
+            + "Цель: не короткая справка, а полноценный Telegram Q&A-пост примерно 350–800 символов.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -1102,6 +1112,7 @@ async def generate_image_prompt_async(
         return "", False, "provider:none"
 
     groq_err = ""
+    repair_prompt = ""
     if prov in ("auto", "groq"):
         try:
             return await _try_groq()
@@ -1179,7 +1190,10 @@ async def generate_post_plain_from_evidence_async(
         return s.strip()
 
     def validate(out: str) -> Tuple[bool, str]:
-        if out.strip() == "НЕТ_ДАННЫХ":
+        out_lines = _extract_nonempty_lines(out)
+        if out.strip() == "НЕТ_ДАННЫХ" or (
+            out_lines and out_lines[0].strip().upper().startswith("НЕТ_ДАННЫХ")
+        ):
             return False, "no_data_in_source"
         return _validate_output(out, day_key=dk, rubric_format=rf)
 
@@ -1214,6 +1228,16 @@ async def generate_post_plain_from_evidence_async(
                     "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
                     "никаких обзоров темы и общих формулировок. "
                     "Сохрани блоки 🧩, 👄 и 💡."
+                )
+
+            if dk == "FR" or rf == "question_week":
+                repair_prompt += (
+                    "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
+                    "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
+                    "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
+                    "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                    "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                    "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
                 )
 
             if dk == "SU" or rf == "age_norms":
@@ -1253,6 +1277,27 @@ async def generate_post_plain_from_evidence_async(
             ok, reason = validate(out)
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
+
+            if (dk == "FR" or rf == "question_week") and reason in {"too_short", "no_data_in_source"}:
+                gemini_repair_prompt = repair_prompt or (
+                    prompt
+                    + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+                    + reason
+                    + ". "
+                    + "Для Friday/question_week обязательно сделай полноценный Telegram Q&A-пост: "
+                    + "короткий H1, строка 👶 Возраст:, строка ❓ Вопрос недели:, "
+                    + "ответ не короче 4 предложений, блок 🧩 Что попробовать сегодня:, "
+                    + "блок 💡 Что это дает:. "
+                    + "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                    + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                    + "Итоговый текст: примерно 350–800 символов."
+                )
+                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                return "", False, f"invalid_gemini_retry:{reason2}"
+
             return "", False, f"invalid_gemini:{reason}"
         except Exception as e:
             return "", False, f"gemini_failed:{e} | groq={groq_err}"

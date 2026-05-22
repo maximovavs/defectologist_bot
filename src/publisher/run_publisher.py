@@ -29,6 +29,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+from src.publisher.dedup_policy import (
+    semantic_post_threshold_for_rubric,
+    should_bypass_source_semantic_dedup,
+)
 
 import feedparser
 import requests
@@ -1317,7 +1321,7 @@ async def amain() -> None:
                     # - dup_semantic_post
                     #
                     # So for this rubric we only warn and continue to LLM.
-                    if rubric_id == "method_piggybank":
+                    if should_bypass_source_semantic_dedup(rubric_id):
                         print(
                             f"[WARN] semantic_source_match_ignored rubric={rubric_id} "
                             f"url={canon} matched={sem_source_hit.canonical_url} "
@@ -1469,9 +1473,10 @@ async def amain() -> None:
                         break
                     continue
 
+                sem_body_threshold = semantic_post_threshold_for_rubric(rubric_id)
                 sem_body_hit = store.find_semantic_duplicate(
                     plain,
-                    threshold=SEMANTIC_THRESHOLD,
+                    threshold=sem_body_threshold,
                     since_iso=None,
                     limit=500,
                     compare="body",
@@ -1479,13 +1484,16 @@ async def amain() -> None:
                 if sem_body_hit:
                     kind = note("dup_semantic_post", canon)
                     print(
-                        f"[SKIP][{kind}] dup_semantic_post url={canon} matched={sem_body_hit.canonical_url} score={sem_body_hit.similarity:.3f}",
+                        f"[SKIP][{kind}] dup_semantic_post url={canon} "
+                        f"matched={sem_body_hit.canonical_url} "
+                        f"score={sem_body_hit.similarity:.3f} "
+                        f"threshold={sem_body_threshold:.3f}",
                         flush=True,
                     )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                         recent_post_hit = store.find_semantic_duplicate(
                             plain,
-                            threshold=SEMANTIC_THRESHOLD,
+                            threshold=sem_body_threshold,
                             since_iso=recent_since_iso,
                             limit=120,
                             compare="body",
@@ -1503,6 +1511,7 @@ async def amain() -> None:
                                 )
                             except Exception as e:
                                 print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
+
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:

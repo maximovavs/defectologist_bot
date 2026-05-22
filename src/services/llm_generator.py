@@ -1221,7 +1221,7 @@ async def generate_post_plain_from_evidence_async(
                     "Сохрани блоки 🧩, 👄 и 💡."
                 )
 
-                        if dk == "FR" or rf == "question_week":
+            if dk == "FR" or rf == "question_week":
                 repair_prompt += (
                     "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
                     "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 3 предложений, "

@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+from src.publisher.dedup_policy import semantic_post_threshold_for_rubric
 
 import feedparser
 import requests
@@ -1469,9 +1470,9 @@ async def amain() -> None:
                         break
                     continue
 
+                sem_body_threshold = semantic_post_threshold_for_rubric(rubric_id)
                 sem_body_hit = store.find_semantic_duplicate(
-                    plain,
-                    threshold=SEMANTIC_THRESHOLD,
+                    threshold=sem_body_threshold,
                     since_iso=None,
                     limit=500,
                     compare="body",
@@ -1479,13 +1480,16 @@ async def amain() -> None:
                 if sem_body_hit:
                     kind = note("dup_semantic_post", canon)
                     print(
-                        f"[SKIP][{kind}] dup_semantic_post url={canon} matched={sem_body_hit.canonical_url} score={sem_body_hit.similarity:.3f}",
+                        f"[SKIP][{kind}] dup_semantic_post url={canon} "
+                        f"matched={sem_body_hit.canonical_url} "
+                        f"score={sem_body_hit.similarity:.3f} "
+                        f"threshold={sem_body_threshold:.3f}",
                         flush=True,
-                    )
+                        )
                     if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:
                         recent_post_hit = store.find_semantic_duplicate(
                             plain,
-                            threshold=SEMANTIC_THRESHOLD,
+                            threshold=sem_body_threshold,
                             since_iso=recent_since_iso,
                             limit=120,
                             compare="body",

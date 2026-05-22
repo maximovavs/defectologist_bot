@@ -1112,6 +1112,7 @@ async def generate_image_prompt_async(
         return "", False, "provider:none"
 
     groq_err = ""
+    repair_prompt = ""
     if prov in ("auto", "groq"):
         try:
             return await _try_groq()
@@ -1276,6 +1277,27 @@ async def generate_post_plain_from_evidence_async(
             ok, reason = validate(out)
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
+
+            if (dk == "FR" or rf == "question_week") and reason in {"too_short", "no_data_in_source"}:
+                gemini_repair_prompt = repair_prompt or (
+                    prompt
+                    + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+                    + reason
+                    + ". "
+                    + "Для Friday/question_week обязательно сделай полноценный Telegram Q&A-пост: "
+                    + "короткий H1, строка 👶 Возраст:, строка ❓ Вопрос недели:, "
+                    + "ответ не короче 4 предложений, блок 🧩 Что попробовать сегодня:, "
+                    + "блок 💡 Что это дает:. "
+                    + "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                    + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                    + "Итоговый текст: примерно 350–800 символов."
+                )
+                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                return "", False, f"invalid_gemini_retry:{reason2}"
+
             return "", False, f"invalid_gemini:{reason}"
         except Exception as e:
             return "", False, f"gemini_failed:{e} | groq={groq_err}"

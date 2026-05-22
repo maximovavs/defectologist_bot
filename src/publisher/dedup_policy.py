@@ -8,8 +8,9 @@ This module intentionally stays small and dependency-light:
 - no publisher orchestration
 
 Goal:
-Keep rubric-specific dedup thresholds out of the large run_publisher.py file,
-so future dedup changes can be made safely in a small full-file replacement.
+Keep rubric-specific dedup thresholds and bypass rules out of the large
+run_publisher.py file, so future dedup changes can be made safely in a small
+full-file replacement.
 """
 
 from __future__ import annotations
@@ -59,12 +60,23 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
     """
     Return True when source-level semantic dedup should not block candidates.
 
-    method_piggybank can legitimately reuse the same broad source/article theme
-    while still producing a different practical method. It should pass through
-    to LLM and remain protected by final dedup checks:
+    Some rubrics naturally reuse the same broad evidence topics while still
+    producing different final posts.
+
+    We only bypass source-level semantic dedup. Safer final checks remain active:
     - dup_url_db
     - dup_evidence_hash_db
     - dup_body_hash_db
     - dup_semantic_post
+
+    Rationale by rubric:
+    - method_piggybank: professional method articles often share the same
+      terminology while still producing different practical techniques.
+    - question_week: parent-question posts often reuse the same recurring
+      bilingualism / language-delay evidence topics, but the final Q&A framing
+      can still be meaningfully different.
     """
-    return normalize_rubric_id(rubric_id) == "method_piggybank"
+    return normalize_rubric_id(rubric_id) in {
+        "method_piggybank",
+        "question_week",
+    }

@@ -36,6 +36,12 @@ audiences:
           - "handyhandouts_parent_tips"
           - "fraser_parent_speech_tips"
           - "nationwidechildrens_speech_language"
+          - "naeyc_family_communication"
+          - "raisingchildren_bilingual"
+          - "kidskey_speech_games"
+          - "actionforchildren_communication_milestones"
+          - "gosh_speech_language_12_24_months"
+          - "healthychildren_language_development"
         format: "tip_of_day"
         media: ["image_card"]
 

@@ -58,6 +58,12 @@ audiences:
           - "kidskey_speech_games"
           - "logorina_latest"
           - "gosh_speech_language_12_24_months"
+          - "naeyc_family_communication"
+          - "actionforchildren_communication_milestones"
+          - "raisingchildren_bilingual"
+          - "healthychildren_language_development"
+          - "cincinnatichildrens_language_development"
+          - "mayoclinic_language_milestones"
         format: "exercise_steps"
         media: ["image_card"]
 

@@ -34,6 +34,11 @@ SEMANTIC_THRESHOLD_POST_AGE_NORMS = _env_float(
     "0.985",
 )
 
+SEMANTIC_THRESHOLD_POST_PLAY_AND_SPEAK = _env_float(
+    "SEMANTIC_THRESHOLD_POST_PLAY_AND_SPEAK",
+    "0.90",
+)
+
 SEMANTIC_THRESHOLD_POST_QUESTION_WEEK = _env_float(
     "SEMANTIC_THRESHOLD_POST_QUESTION_WEEK",
     "0.90",
@@ -65,6 +70,9 @@ def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
     if normalized == "age_norms":
         return SEMANTIC_THRESHOLD_POST_AGE_NORMS
 
+    if normalized == "play_and_speak":
+        return SEMANTIC_THRESHOLD_POST_PLAY_AND_SPEAK
+
     if normalized == "question_week":
         return SEMANTIC_THRESHOLD_POST_QUESTION_WEEK
 
@@ -94,4 +102,5 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
     return normalize_rubric_id(rubric_id) in {
         "method_piggybank",
         "question_week",
+        "play_and_speak",
     }

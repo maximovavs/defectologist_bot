@@ -44,6 +44,11 @@ SEMANTIC_THRESHOLD_POST_QUESTION_WEEK = _env_float(
     "0.90",
 )
 
+SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER = _env_float(
+    "SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER",
+    "0.92",
+)
+
 
 def normalize_rubric_id(rubric_id: str | None) -> str:
     """Normalize rubric id for stable policy comparisons."""
@@ -76,6 +81,9 @@ def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
     if normalized == "question_week":
         return SEMANTIC_THRESHOLD_POST_QUESTION_WEEK
 
+    if normalized == "bilingual_corner":
+        return SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER
+
     return SEMANTIC_THRESHOLD
 
 
@@ -103,4 +111,5 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
         "method_piggybank",
         "question_week",
         "play_and_speak",
+        "bilingual_corner",
     }

@@ -82,7 +82,6 @@ audiences:
         format: "myth_fact"
         media: ["image_card"]
 
-      # ЧЕТВЕРГ: Русский за границей
       - id: bilingual_corner
         title: "Русский за границей"
         kind: bilingual
@@ -92,7 +91,13 @@ audiences:
           - "asha_multilingual_public"
           - "asha_practice_portal_multilingual_service_delivery"
           - "colorin_bilingual_parents"
-          - "pmc_bilingual_science"
+          - "hanen_bilingual_myths"
+          - "habilnet_bilingual_parents"
+          - "cal_dual_language_home_support"
+          - "carla_family_resources"
+          - "tewhariki_multilingual_pathways"
+          - "docdeti_bilingualism"
+          - "russkiymir_bilingual_family"
           - "logoportal_latest"
         format: "bilingual_parents"
         media: ["image_card"]

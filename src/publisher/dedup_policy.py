@@ -120,4 +120,5 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
         "question_week",
         "play_and_speak",
         "bilingual_corner",
+        "tip_of_day",
     }

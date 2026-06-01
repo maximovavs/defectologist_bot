@@ -49,6 +49,11 @@ SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER = _env_float(
     "0.92",
 )
 
+SEMANTIC_THRESHOLD_POST_TIP_OF_DAY = _env_float(
+    "SEMANTIC_THRESHOLD_POST_TIP_OF_DAY",
+    "0.90",
+)
+
 
 def normalize_rubric_id(rubric_id: str | None) -> str:
     """Normalize rubric id for stable policy comparisons."""
@@ -80,6 +85,9 @@ def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
 
     if normalized == "question_week":
         return SEMANTIC_THRESHOLD_POST_QUESTION_WEEK
+
+    if normalized == "tip_of_day":
+        return SEMANTIC_THRESHOLD_POST_TIP_OF_DAY
 
     if normalized == "bilingual_corner":
         return SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER

@@ -14,12 +14,23 @@ from sentence_transformers import SentenceTransformer, util
 SEMANTIC_MODEL_NAME = os.getenv("SEMANTIC_MODEL_NAME", "all-MiniLM-L6-v2").strip() or "all-MiniLM-L6-v2"
 
 _MODEL: Optional[SentenceTransformer] = None
+_SEMANTIC_DISABLED = False
 
 
-def get_semantic_model() -> SentenceTransformer:
-    global _MODEL
+def get_semantic_model() -> Optional[SentenceTransformer]:
+    global _MODEL, _SEMANTIC_DISABLED
+    if _SEMANTIC_DISABLED:
+        return None
     if _MODEL is None:
-        _MODEL = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        try:
+            _MODEL = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        except Exception as e:
+            _SEMANTIC_DISABLED = True
+            print(
+                f"[WARN] semantic_model_unavailable model={SEMANTIC_MODEL_NAME} err={e}",
+                flush=True,
+            )
+            return None
     return _MODEL
 
 
@@ -32,8 +43,17 @@ def text_to_embedding(text: str) -> List[float]:
     if not cleaned:
         return []
     model = get_semantic_model()
-    vec = model.encode(cleaned, normalize_embeddings=True)
-    return [float(x) for x in vec.tolist()]
+    if model is None:
+        return []
+    try:
+        vec = model.encode(cleaned, normalize_embeddings=True)
+        return [float(x) for x in vec.tolist()]
+    except Exception as e:
+        print(
+            f"[WARN] semantic_encode_failed model={SEMANTIC_MODEL_NAME} err={e}",
+            flush=True,
+        )
+        return []
 
 
 def text_batch_to_embeddings(texts: Sequence[str]) -> List[List[float]]:
@@ -41,8 +61,17 @@ def text_batch_to_embeddings(texts: Sequence[str]) -> List[List[float]]:
     if not prepared:
         return []
     model = get_semantic_model()
-    matrix = model.encode(list(prepared), normalize_embeddings=True)
-    return [[float(x) for x in row.tolist()] for row in matrix]
+    if model is None:
+        return [[] for _ in prepared]
+    try:
+        matrix = model.encode(list(prepared), normalize_embeddings=True)
+        return [[float(x) for x in row.tolist()] for row in matrix]
+    except Exception as e:
+        print(
+            f"[WARN] semantic_batch_encode_failed model={SEMANTIC_MODEL_NAME} err={e}",
+            flush=True,
+        )
+        return [[] for _ in prepared]
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -274,7 +303,14 @@ class PublicationStore:
     ) -> None:
         body_norm = normalize_publication_text(body_text)
         evidence_norm = normalize_publication_text(evidence_text)
-        body_vec, evidence_vec = text_batch_to_embeddings([body_norm, evidence_norm])
+        vectors = text_batch_to_embeddings([body_norm, evidence_norm])
+        if len(vectors) >= 2:
+            body_vec, evidence_vec = vectors[0], vectors[1]
+        else:
+            body_vec, evidence_vec = [], []
+
+        body_embedding_model = SEMANTIC_MODEL_NAME if body_vec else ""
+        evidence_embedding_model = SEMANTIC_MODEL_NAME if evidence_vec else ""
 
         with self._connect() as conn:
             conn.execute(
@@ -304,8 +340,8 @@ class PublicationStore:
                     evidence_norm,
                     _vec_to_json(body_vec),
                     _vec_to_json(evidence_vec),
-                    SEMANTIC_MODEL_NAME,
-                    SEMANTIC_MODEL_NAME,
+                    body_embedding_model,
+                    evidence_embedding_model,
                     posted_at,
                     audience,
                     rubric_id,

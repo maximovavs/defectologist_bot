@@ -62,6 +62,12 @@ audiences:
           - "healthychildren_language_development"
           - "cincinnatichildrens_language_development"
           - "mayoclinic_language_milestones"
+          - "parents_language_activities"
+          - "parents_toddler_language_boost"
+          - "parents_sensory_play_language"
+          - "parents_baby_language_activities"
+          - "verywell_dramatic_play_language"
+          - "verywell_household_objects_play"
         format: "exercise_steps"
         media: ["image_card"]
 

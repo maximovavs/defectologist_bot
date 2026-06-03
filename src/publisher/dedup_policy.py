@@ -54,6 +54,11 @@ SEMANTIC_THRESHOLD_POST_TIP_OF_DAY = _env_float(
     "0.90",
 )
 
+SEMANTIC_THRESHOLD_POST_MYTH_FACT = _env_float(
+    "SEMANTIC_THRESHOLD_POST_MYTH_FACT",
+    "0.92",
+)
+
 
 def normalize_rubric_id(rubric_id: str | None) -> str:
     """Normalize rubric id for stable policy comparisons."""
@@ -76,6 +81,9 @@ def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
     Other rubrics keep the global SEMANTIC_THRESHOLD.
     """
     normalized = normalize_rubric_id(rubric_id)
+
+    if normalized == "myth_fact":
+        return SEMANTIC_THRESHOLD_POST_MYTH_FACT
 
     if normalized == "age_norms":
         return SEMANTIC_THRESHOLD_POST_AGE_NORMS
@@ -121,4 +129,5 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
         "play_and_speak",
         "bilingual_corner",
         "tip_of_day",
+        "myth_fact",
     }

@@ -78,6 +78,14 @@ audiences:
           - "asha_multilingual_public"
           - "zerotothree_dual_language"
           - "colorin_bilingual_parents"
+          - "asha_public_speech_sound_disorders"
+          - "asha_developmental_milestones"
+          - "healthychildren_language_development"
+          - "hanen_parent_tips"
+          - "docdeti_bilingualism"
+          - "russkiymir_bilingual_family"
+          - "cal_dual_language_home_support"
+          - "carla_family_resources"
         format: "myth_fact"
         media: ["image_card"]
 

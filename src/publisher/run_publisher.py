@@ -243,6 +243,13 @@ def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def log_field(value: object, max_len: int = 220) -> str:
+    text = norm_space(str(value or "")).replace('"', "'")
+    if len(text) > max_len:
+        text = text[: max_len - 3].rstrip() + "..."
+    return text
+
+
 def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
@@ -1527,6 +1534,7 @@ async def amain() -> None:
                 )
 
                 image_prompt = ""
+                image_prompt_ok = False
                 image_prompt_note = "skipped"
                 try:
                     image_prompt, image_prompt_ok, image_prompt_note = await asyncio.wait_for(
@@ -1567,8 +1575,25 @@ async def amain() -> None:
                         break
                     continue
 
+                visual_title = visual_meta.get("visual_title") or visual_meta.get("title") or h1_title
+                visual_prompt_len = visual_meta.get("prompt_len", len(image_prompt or ""))
+                visual_has_prompt = bool(visual_meta.get("has_image_prompt", bool(image_prompt)))
+                visual_has_token = bool(visual_meta.get("has_token", bool(POLLINATIONS_TOKEN)))
                 print(
-                    f"[VISUAL] rubric={rubric_id} mode={visual_meta.get('mode')} reason={visual_meta.get('reason')} image_prompt_note={image_prompt_note}",
+                    f"[VISUAL] rubric={rubric_id} "
+                    f"mode={log_field(visual_meta.get('mode'))} "
+                    f"reason={log_field(visual_meta.get('reason'))} "
+                    f"image_prompt_note={log_field(image_prompt_note)} "
+                    f"prompt_len={visual_prompt_len} "
+                    f"has_image_prompt={visual_has_prompt} "
+                    f"has_pollinations_token={visual_has_token} "
+                    f"title=\"{log_field(visual_title, max_len=140)}\" "
+                    f"image_prompt_ok={image_prompt_ok} "
+                    f"exception_type={log_field(visual_meta.get('exception_type'))} "
+                    f"model={log_field(visual_meta.get('model'))} "
+                    f"gen_size={log_field(visual_meta.get('gen_size'))} "
+                    f"output_size={log_field(visual_meta.get('output_size'))} "
+                    f"timeout_seconds={visual_meta.get('timeout_seconds', '')}",
                     flush=True,
                 )
 

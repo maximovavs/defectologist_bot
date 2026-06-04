@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import os
+import re
 from typing import Dict, Tuple
 from urllib.parse import quote
 
@@ -33,6 +34,23 @@ HEADERS = {
     "User-Agent": "logoped-channel-bot/visual-pipeline/1.1",
     "Accept": "image/*",
 }
+
+
+def _short_log_message(value: object, max_len: int = 180) -> str:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    text = re.sub(r"([?&]key=)[^&\s]+", r"\1<redacted>", text)
+    text = re.sub(r"/prompt/[^?\s]+", "/prompt/<redacted>", text)
+    if len(text) > max_len:
+        text = text[: max_len - 3].rstrip() + "..."
+    return text
+
+
+def _response_body_hint(raw_bytes: bytes, max_len: int = 80) -> str:
+    if not raw_bytes:
+        return "empty"
+    text = raw_bytes[:240].decode("utf-8", errors="ignore")
+    text = _short_log_message(text, max_len=max_len)
+    return text or f"bytes={len(raw_bytes)}"
 
 
 def _attach_file_metadata(
@@ -104,22 +122,53 @@ def download_pollinations_image(
     if token:
         params["key"] = token
 
-    response = requests.get(
-        url,
-        params=params,
-        headers=HEADERS,
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=HEADERS,
+            timeout=timeout_seconds,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"pollinations_request_failed:{type(e).__name__}:{_short_log_message(e)}"
+        ) from e
+
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as e:
+        content_type = _short_log_message(response.headers.get("Content-Type", ""), max_len=80)
+        body_hint = _response_body_hint(response.content)
+        raise RuntimeError(
+            "pollinations_http_error:"
+            f"status={response.status_code}:content_type={content_type}:body={body_hint}"
+        ) from e
 
     ok, reason = validate_generated_image_bytes(
         response.content,
         response.headers.get("Content-Type", ""),
     )
     if not ok:
-        raise RuntimeError(f"invalid_pollinations_image:{reason}")
+        content_type = _short_log_message(response.headers.get("Content-Type", ""), max_len=80)
+        raise RuntimeError(
+            f"invalid_pollinations_image:{reason}:content_type={content_type}:bytes={len(response.content)}"
+        )
 
     return _normalize_pollinations_image(response.content)
+
+
+def _visual_meta_base(prompt: str, pollinations_token: str, safe_title: str) -> Dict[str, object]:
+    return {
+        "prompt_len": len(prompt),
+        "has_image_prompt": bool(prompt),
+        "has_token": bool((pollinations_token or "").strip()),
+        "model": POLLINATIONS_MODEL,
+        "gen_size": f"{POLLINATIONS_GEN_WIDTH}x{POLLINATIONS_GEN_HEIGHT}",
+        "output_size": f"{POLLINATIONS_WIDTH}x{POLLINATIONS_HEIGHT}",
+        "timeout_seconds": POLLINATIONS_TIMEOUT_SECONDS,
+        "title": safe_title,
+        "visual_title": safe_title,
+    }
 
 
 def build_post_visual(
@@ -128,9 +177,10 @@ def build_post_visual(
     image_prompt: str,
     pollinations_token: str = "",
     fallback_title: str = "Логопедия и дефектология",
-) -> Tuple[BytesIO, Dict[str, str]]:
+) -> Tuple[BytesIO, Dict[str, object]]:
     prompt = (image_prompt or "").strip()
     safe_title = sanitize_cover_title(title, fallback=fallback_title)
+    meta = _visual_meta_base(prompt, pollinations_token, safe_title)
 
     if prompt:
         try:
@@ -139,22 +189,24 @@ def build_post_visual(
                 token=pollinations_token,
             )
             return buffer, {
+                **meta,
                 "mode": "ai",
                 "reason": "ok",
                 "prompt": prompt,
-                "title": safe_title,
             }
         except Exception as e:
+            cause = e.__cause__ or e
             fallback = build_fallback_cover_buffer(
                 title=safe_title,
                 day_key=day_key,
                 fallback_title=fallback_title,
             )
             return fallback, {
+                **meta,
                 "mode": "fallback",
-                "reason": str(e),
+                "reason": _short_log_message(e, max_len=240) or type(e).__name__,
+                "exception_type": type(cause).__name__,
                 "prompt": prompt,
-                "title": safe_title,
             }
 
     fallback = build_fallback_cover_buffer(
@@ -163,8 +215,8 @@ def build_post_visual(
         fallback_title=fallback_title,
     )
     return fallback, {
+        **meta,
         "mode": "fallback",
         "reason": "empty_prompt",
         "prompt": "",
-        "title": safe_title,
     }

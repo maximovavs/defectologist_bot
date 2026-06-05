@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import os
 import re
+import time
 from typing import Dict, Tuple
 from urllib.parse import quote
 
@@ -16,24 +17,65 @@ from src.services.image_builder import (
 )
 
 
-POLLINATIONS_TIMEOUT_SECONDS = int(os.getenv("POLLINATIONS_TIMEOUT_SECONDS", "10"))
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
+POLLINATIONS_TIMEOUT_SECONDS = _env_int("POLLINATIONS_TIMEOUT_SECONDS", 10)
+POLLINATIONS_MAX_RETRIES = max(1, _env_int("POLLINATIONS_MAX_RETRIES", 3))
+POLLINATIONS_RETRY_SLEEP_SECONDS = _env_int("POLLINATIONS_RETRY_SLEEP_SECONDS", 5)
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux").strip() or "flux"
 
 # Финальный размер обложки
-POLLINATIONS_WIDTH = int(os.getenv("POLLINATIONS_WIDTH", "1280"))
-POLLINATIONS_HEIGHT = int(os.getenv("POLLINATIONS_HEIGHT", "720"))
+POLLINATIONS_WIDTH = _env_int("POLLINATIONS_WIDTH", 1280)
+POLLINATIONS_HEIGHT = _env_int("POLLINATIONS_HEIGHT", 720)
 
 # Размер генерации — специально квадратный, чтобы не провоцировать wide-stretch на стороне backend
-POLLINATIONS_GEN_WIDTH = int(os.getenv("POLLINATIONS_GEN_WIDTH", "1024"))
-POLLINATIONS_GEN_HEIGHT = int(os.getenv("POLLINATIONS_GEN_HEIGHT", "1024"))
+POLLINATIONS_GEN_WIDTH = _env_int("POLLINATIONS_GEN_WIDTH", 1024)
+POLLINATIONS_GEN_HEIGHT = _env_int("POLLINATIONS_GEN_HEIGHT", 1024)
 
 # Сила блюра для фоновой подложки
-POLLINATIONS_BLUR_RADIUS = int(os.getenv("POLLINATIONS_BLUR_RADIUS", "18"))
+POLLINATIONS_BLUR_RADIUS = _env_int("POLLINATIONS_BLUR_RADIUS", 18)
 
 HEADERS = {
-    "User-Agent": "logoped-channel-bot/visual-pipeline/1.1",
+    "User-Agent": "logoped-channel-bot/visual-pipeline/1.2",
     "Accept": "image/*",
 }
+
+# Mild image-quality suffix. Kept intentionally general: it improves prompt stability
+# without forcing a human figure into every cover.
+VISUAL_QUALITY_SUFFIX = (
+    "Clean professional educational editorial illustration, warm modern style, "
+    "simple uncluttered composition, one clear focal point, soft natural lighting, "
+    "coherent realistic figure rendering when people are present, balanced composition, "
+    "no duplicated visual elements, no distorted details, no awkward cropping, "
+    "avoid text inside the image."
+)
+
+
+class PollinationsImageError(RuntimeError):
+    def __init__(
+        self,
+        reason: str,
+        *,
+        status_code: int = 0,
+        content_type: str = "",
+        body_hint: str = "",
+        retryable: bool = False,
+        exception_type: str = "",
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.status_code = status_code
+        self.content_type = content_type
+        self.body_hint = body_hint
+        self.retryable = retryable
+        self.exception_type = exception_type or self.__class__.__name__
 
 
 def _short_log_message(value: object, max_len: int = 180) -> str:
@@ -45,12 +87,83 @@ def _short_log_message(value: object, max_len: int = 180) -> str:
     return text
 
 
-def _response_body_hint(raw_bytes: bytes, max_len: int = 80) -> str:
+def _response_body_hint(raw_bytes: bytes, max_len: int = 120) -> str:
     if not raw_bytes:
         return "empty"
-    text = raw_bytes[:240].decode("utf-8", errors="ignore")
+    text = raw_bytes[:320].decode("utf-8", errors="ignore")
     text = _short_log_message(text, max_len=max_len)
     return text or f"bytes={len(raw_bytes)}"
+
+
+def _is_retryable_status(status_code: int, body_hint: str = "") -> bool:
+    body_lower = (body_hint or "").lower()
+    if status_code == 402 and "queue full" in body_lower:
+        return True
+    if status_code == 429:
+        return True
+    if 500 <= status_code <= 599:
+        return True
+    return False
+
+
+def _is_retryable_exception(exc: Exception | None) -> bool:
+    if exc is None:
+        return False
+    if isinstance(exc, PollinationsImageError):
+        return exc.retryable
+    return isinstance(
+        exc,
+        (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ),
+    )
+
+
+def _clean_cover_title(raw_title: str, fallback: str) -> str:
+    title = " ".join((raw_title or "").replace("\r\n", "\n").split()).strip()
+    if not title:
+        return fallback
+
+    # Remove numbering and bullet prefixes that can leak from generated headings.
+    title = re.sub(r"^\s*[•\-–—*]\s+", "", title)
+    title = re.sub(r"^\s*\d+[\.)]\s*", "", title)
+    title = title.strip(" \t\n\r\"'«»")
+
+    # If the heading is a long explanatory construction, keep the strong title part.
+    # Example:
+    # "Логопедический массаж – 15-минутные занятия, 3 раза в неделю"
+    # -> "Логопедический массаж"
+    for sep in (" — ", " – ", " - ", ": "):
+        if sep in title:
+            left, right = title.split(sep, 1)
+            if 8 <= len(left.strip()) <= 58 and len(right.strip()) >= 12:
+                title = left.strip()
+                break
+
+    title = title.rstrip(".。;；")
+
+    if len(title) > 64:
+        cut = title[:64].rsplit(" ", 1)[0].strip()
+        title = cut or title[:64].strip()
+        title = title.rstrip(",:;—–-")
+
+    if len(title) < 4:
+        return fallback
+    return title
+
+
+def _enhance_image_prompt(prompt: str) -> str:
+    cleaned = " ".join((prompt or "").split()).strip()
+    if not cleaned:
+        return ""
+
+    lower = cleaned.lower()
+    if "coherent realistic figure rendering" in lower:
+        return cleaned
+
+    return f"{cleaned}. {VISUAL_QUALITY_SUFFIX}"
 
 
 def _attach_file_metadata(
@@ -66,7 +179,6 @@ def _attach_file_metadata(
 
 def _build_blurred_background_cover(img: Image.Image) -> BytesIO:
     base = img.convert("RGB")
-
     target_size = (POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT)
 
     # Фон: заполняет весь 16:9 кадр, затем размывается
@@ -98,21 +210,20 @@ def _normalize_pollinations_image(raw_bytes: bytes) -> BytesIO:
         return _build_blurred_background_cover(img)
 
 
-def download_pollinations_image(
+def _pollinations_request_once(
     prompt: str,
     token: str = "",
     timeout_seconds: int = POLLINATIONS_TIMEOUT_SECONDS,
 ) -> BytesIO:
     cleaned_prompt = (prompt or "").strip()
     if not cleaned_prompt:
-        raise RuntimeError("empty_image_prompt")
+        raise PollinationsImageError("empty_image_prompt", retryable=False)
 
     encoded_prompt = quote(cleaned_prompt, safe="")
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
 
     params = {
         "model": POLLINATIONS_MODEL,
-        # Генерация теперь квадратная
         "width": str(POLLINATIONS_GEN_WIDTH),
         "height": str(POLLINATIONS_GEN_HEIGHT),
         "safe": "true",
@@ -129,46 +240,114 @@ def download_pollinations_image(
             headers=HEADERS,
             timeout=timeout_seconds,
         )
+    except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+        raise PollinationsImageError(
+            f"pollinations_request_failed:{_short_log_message(e)}",
+            retryable=True,
+            exception_type=e.__class__.__name__,
+        ) from e
     except requests.RequestException as e:
-        raise RuntimeError(
-            f"pollinations_request_failed:{type(e).__name__}:{_short_log_message(e)}"
+        raise PollinationsImageError(
+            f"pollinations_request_failed:{_short_log_message(e)}",
+            retryable=False,
+            exception_type=e.__class__.__name__,
         ) from e
 
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as e:
-        content_type = _short_log_message(response.headers.get("Content-Type", ""), max_len=80)
-        body_hint = _response_body_hint(response.content)
-        raise RuntimeError(
-            "pollinations_http_error:"
-            f"status={response.status_code}:content_type={content_type}:body={body_hint}"
-        ) from e
+    content_type = response.headers.get("Content-Type", "")
+    body_hint = _response_body_hint(response.content)
+
+    if response.status_code >= 400:
+        retryable = _is_retryable_status(response.status_code, body_hint)
+        raise PollinationsImageError(
+            f"pollinations_http_error:status={response.status_code}:content_type={content_type}:body={body_hint}",
+            status_code=response.status_code,
+            content_type=content_type,
+            body_hint=body_hint,
+            retryable=retryable,
+            exception_type="HTTPError",
+        )
 
     ok, reason = validate_generated_image_bytes(
         response.content,
-        response.headers.get("Content-Type", ""),
+        content_type,
     )
     if not ok:
-        content_type = _short_log_message(response.headers.get("Content-Type", ""), max_len=80)
-        raise RuntimeError(
-            f"invalid_pollinations_image:{reason}:content_type={content_type}:bytes={len(response.content)}"
+        raise PollinationsImageError(
+            f"invalid_pollinations_image:{reason}:content_type={content_type}:body={body_hint}",
+            status_code=response.status_code,
+            content_type=content_type,
+            body_hint=body_hint,
+            retryable=False,
+            exception_type="InvalidImage",
         )
 
     return _normalize_pollinations_image(response.content)
 
 
-def _visual_meta_base(prompt: str, pollinations_token: str, safe_title: str) -> Dict[str, object]:
-    return {
-        "prompt_len": len(prompt),
-        "has_image_prompt": bool(prompt),
-        "has_token": bool((pollinations_token or "").strip()),
-        "model": POLLINATIONS_MODEL,
-        "gen_size": f"{POLLINATIONS_GEN_WIDTH}x{POLLINATIONS_GEN_HEIGHT}",
-        "output_size": f"{POLLINATIONS_WIDTH}x{POLLINATIONS_HEIGHT}",
-        "timeout_seconds": POLLINATIONS_TIMEOUT_SECONDS,
-        "title": safe_title,
-        "visual_title": safe_title,
-    }
+def download_pollinations_image(
+    prompt: str,
+    token: str = "",
+    timeout_seconds: int = POLLINATIONS_TIMEOUT_SECONDS,
+) -> BytesIO:
+    buffer, _ = download_pollinations_image_with_meta(
+        prompt=prompt,
+        token=token,
+        timeout_seconds=timeout_seconds,
+    )
+    return buffer
+
+
+def download_pollinations_image_with_meta(
+    prompt: str,
+    token: str = "",
+    timeout_seconds: int = POLLINATIONS_TIMEOUT_SECONDS,
+) -> Tuple[BytesIO, Dict[str, str]]:
+    cleaned_prompt = (prompt or "").strip()
+    if not cleaned_prompt:
+        raise PollinationsImageError("empty_image_prompt", retryable=False)
+
+    attempts = 0
+    last_error: Exception | None = None
+
+    for attempt in range(1, POLLINATIONS_MAX_RETRIES + 1):
+        attempts = attempt
+        try:
+            buffer = _pollinations_request_once(
+                prompt=cleaned_prompt,
+                token=token,
+                timeout_seconds=timeout_seconds,
+            )
+            return buffer, {
+                "attempts_used": str(attempts),
+                "retryable_error": "False",
+                "final_reason": "ok",
+                "pollinations_status": "200",
+                "exception_type": "",
+            }
+        except Exception as e:
+            last_error = e
+            retryable = _is_retryable_exception(e)
+            if not retryable or attempt >= POLLINATIONS_MAX_RETRIES:
+                break
+            time.sleep(POLLINATIONS_RETRY_SLEEP_SECONDS * attempt)
+
+    if isinstance(last_error, PollinationsImageError):
+        reason = last_error.reason
+        status = str(last_error.status_code or "")
+        retryable_str = str(bool(last_error.retryable))
+        exception_type = last_error.exception_type
+    else:
+        reason = _short_log_message(last_error or "unknown_pollinations_error")
+        status = ""
+        retryable_str = str(_is_retryable_exception(last_error))
+        exception_type = (last_error.__class__.__name__ if last_error else "UnknownError")
+
+    raise PollinationsImageError(
+        f"{reason}:attempts={attempts}",
+        status_code=int(status) if status.isdigit() else 0,
+        retryable=retryable_str == "True",
+        exception_type=exception_type,
+    )
 
 
 def build_post_visual(
@@ -177,36 +356,63 @@ def build_post_visual(
     image_prompt: str,
     pollinations_token: str = "",
     fallback_title: str = "Логопедия и дефектология",
-) -> Tuple[BytesIO, Dict[str, object]]:
-    prompt = (image_prompt or "").strip()
-    safe_title = sanitize_cover_title(title, fallback=fallback_title)
-    meta = _visual_meta_base(prompt, pollinations_token, safe_title)
+) -> Tuple[BytesIO, Dict[str, str]]:
+    original_prompt = (image_prompt or "").strip()
+    prompt = _enhance_image_prompt(original_prompt)
+    safe_title = sanitize_cover_title(
+        _clean_cover_title(title, fallback=fallback_title),
+        fallback=fallback_title,
+    )
+
+    base_meta = {
+        "prompt_len": str(len(prompt)),
+        "original_prompt_len": str(len(original_prompt)),
+        "has_image_prompt": str(bool(prompt)),
+        "has_token": str(bool(pollinations_token)),
+        "model": POLLINATIONS_MODEL,
+        "gen_size": f"{POLLINATIONS_GEN_WIDTH}x{POLLINATIONS_GEN_HEIGHT}",
+        "output_size": f"{POLLINATIONS_WIDTH}x{POLLINATIONS_HEIGHT}",
+        "timeout_seconds": str(POLLINATIONS_TIMEOUT_SECONDS),
+        "max_retries": str(POLLINATIONS_MAX_RETRIES),
+        "title": safe_title,
+        "visual_title": safe_title,
+    }
 
     if prompt:
         try:
-            buffer = download_pollinations_image(
+            buffer, download_meta = download_pollinations_image_with_meta(
                 prompt=prompt,
                 token=pollinations_token,
             )
             return buffer, {
-                **meta,
+                **base_meta,
+                **download_meta,
                 "mode": "ai",
-                "reason": "ok",
+                "reason": f"ok:attempts={download_meta.get('attempts_used', '1')}",
                 "prompt": prompt,
             }
         except Exception as e:
-            cause = e.__cause__ or e
             fallback = build_fallback_cover_buffer(
                 title=safe_title,
                 day_key=day_key,
                 fallback_title=fallback_title,
             )
+            exception_type = e.__class__.__name__
+            retryable = str(_is_retryable_exception(e))
+            reason = _short_log_message(e, max_len=220)
+            if isinstance(e, PollinationsImageError):
+                exception_type = e.exception_type
+                retryable = str(bool(e.retryable))
+                reason = _short_log_message(e.reason, max_len=220)
             return fallback, {
-                **meta,
+                **base_meta,
                 "mode": "fallback",
-                "reason": _short_log_message(e, max_len=240) or type(e).__name__,
-                "exception_type": type(cause).__name__,
+                "reason": reason,
+                "final_reason": reason,
                 "prompt": prompt,
+                "attempts_used": str(POLLINATIONS_MAX_RETRIES if retryable == "True" else 1),
+                "retryable_error": retryable,
+                "exception_type": exception_type,
             }
 
     fallback = build_fallback_cover_buffer(
@@ -215,8 +421,12 @@ def build_post_visual(
         fallback_title=fallback_title,
     )
     return fallback, {
-        **meta,
+        **base_meta,
         "mode": "fallback",
         "reason": "empty_prompt",
+        "final_reason": "empty_prompt",
         "prompt": "",
+        "attempts_used": "0",
+        "retryable_error": "False",
+        "exception_type": "",
     }

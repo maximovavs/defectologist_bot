@@ -401,6 +401,76 @@ def _validate_pro_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def _extract_section_after_header(text: str, header_pattern: str, stop_patterns: List[str]) -> str:
+    lines = (text or "").splitlines()
+    collecting = False
+    collected: List[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if collecting:
+                continue
+            continue
+
+        if re.match(header_pattern, stripped, flags=re.IGNORECASE):
+            collecting = True
+            after = re.sub(header_pattern, "", stripped, flags=re.IGNORECASE).strip()
+            if after:
+                collected.append(after)
+            continue
+
+        if collecting:
+            if any(re.match(p, stripped, flags=re.IGNORECASE) for p in stop_patterns):
+                break
+            collected.append(stripped)
+
+    return " ".join(collected).strip()
+
+
+def _validate_question_week_output(text: str) -> Tuple[bool, str]:
+    out = (text or "").strip()
+    lines = _extract_nonempty_lines(out)
+    if not lines:
+        return False, "question_week_empty"
+
+    normalized = out.lower().replace("ё", "е")
+
+    if "❓" not in out or "вопрос недели" not in normalized:
+        return False, "question_week_missing_question"
+
+    if "🧩" not in out or "что попробовать сегодня" not in normalized:
+        return False, "question_week_missing_action"
+
+    if "💡" not in out or "что это дает" not in normalized:
+        return False, "question_week_missing_benefit"
+
+    benefit = _extract_section_after_header(
+        out,
+        r"^💡\s*Что это да[её]т\s*[:：]\s*",
+        [
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+            r"^👶",
+            r"^❓",
+            r"^🧩",
+        ],
+    )
+
+    benefit_clean = benefit.strip(" .…")
+    if len(benefit_clean) < 20:
+        return False, "question_week_empty_benefit"
+
+    if benefit_clean in {"...", "…"}:
+        return False, "question_week_empty_benefit"
+
+    if benefit_clean.lower().replace("ё", "е").startswith("что это дает"):
+        return False, "question_week_empty_benefit"
+
+    return True, "ok"
+
+
 def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -408,6 +478,11 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
+
+    if dk == "FR" or rf == "question_week":
+        ok, reason = _validate_question_week_output(out)
+        if not ok:
+            return ok, reason
 
     if dk == "FR" or rf == "question_week":
         min_len = 200
@@ -937,7 +1012,7 @@ def build_generation_prompt(
             "НЕТ_ДАННЫХ можно вернуть только если текст вообще не про детскую речь, коммуникацию, билингвизм или развитие языка.\n\n"
             "🧩 Что попробовать сегодня:\n"
             "Дай один мягкий следующий шаг для родителя: что спросить, что понаблюдать, какую ситуацию создать или какую фразу попробовать.\n\n"
-            "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
+            "💡 Что это дает: напиши одно завершенное предложение о конкретном навыке или наблюдении для родителя. Не оставляй этот блок пустым и не используй многоточие.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
@@ -1235,6 +1310,8 @@ async def generate_post_plain_from_evidence_async(
                     "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
                     "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
                     "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
+                    "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+                    "Запрещено оставлять «...», «…» или пустой блок. "
                     "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
                     "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
                     "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
@@ -1278,7 +1355,9 @@ async def generate_post_plain_from_evidence_async(
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
 
-            if (dk == "FR" or rf == "question_week") and reason in {"too_short", "no_data_in_source"}:
+            if (dk == "FR" or rf == "question_week") and (
+                reason in {"too_short", "no_data_in_source"} or reason.startswith("question_week_")
+            ):
                 gemini_repair_prompt = repair_prompt or (
                     prompt
                     + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
@@ -1288,6 +1367,8 @@ async def generate_post_plain_from_evidence_async(
                     + "короткий H1, строка 👶 Возраст:, строка ❓ Вопрос недели:, "
                     + "ответ не короче 4 предложений, блок 🧩 Что попробовать сегодня:, "
                     + "блок 💡 Что это дает:. "
+                    + "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+                    + "Запрещено оставлять «...», «…» или пустой блок. "
                     + "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
                     + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
                     + "Итоговый текст: примерно 350–800 символов."

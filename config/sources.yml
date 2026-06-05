@@ -31,6 +31,8 @@ quality:
     - "russkiymir.ru"
     - "parents.actionforchildren.org.uk"
     - "gosh.nhs.uk"
+    - "parents.com"
+    - "verywellfamily.com"
 
   deny_keywords:
     - "форум"
@@ -357,3 +359,39 @@ sources:
     type: static
     urls:
       - "https://www.gosh.nhs.uk/conditions-and-treatments/procedures-and-treatments/speech-and-language-development-12-24-months/"
+
+  - id: parents_language_activities
+    name: "Parents — Child language development activities"
+    type: static
+    urls:
+      - "https://www.parents.com/baby/development/talking/9-ways-to-help-your-childs-language-development/"
+
+  - id: parents_toddler_language_boost
+    name: "Parents — Toddler language skills at home"
+    type: static
+    urls:
+      - "https://www.parents.com/ways-to-help-your-toddler-talk-11981212"
+
+  - id: parents_sensory_play_language
+    name: "Parents — Sensory play and language development"
+    type: static
+    urls:
+      - "https://www.parents.com/why-sensory-play-is-important-8417237"
+
+  - id: parents_baby_language_activities
+    name: "Parents — Baby language play activities"
+    type: static
+    urls:
+      - "https://www.parents.com/baby/development/growth/11-fun-activities-for-babies-6-to-12-months/"
+
+  - id: verywell_dramatic_play_language
+    name: "Verywell Family — Dramatic play and verbal skills"
+    type: static
+    urls:
+      - "https://www.verywellfamily.com/dramatic-play-290162"
+
+  - id: verywell_household_objects_play
+    name: "Verywell Family — Household objects and baby play"
+    type: static
+    urls:
+      - "https://www.verywellfamily.com/benefits-of-letting-baby-play-with-household-objects-5208533"

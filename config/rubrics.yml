@@ -3,7 +3,7 @@ version: 2.5
 channel:
   locale: "ru-RU"
   timezone: "Asia/Nicosia"
-  disclaimer: "Информация носит образовательный характер и не заменяет консультацию специалиста."
+  disclaimer: "Информация носит образовательный характер и не заменяет консультация специалиста."
   hashtags: ["#логопед", "#речь", "#билингвизм", "#развитиеРечи"]
 
 branding:
@@ -41,6 +41,16 @@ audiences:
           - "actionforchildren_communication_milestones"
           - "gosh_speech_language_12_24_months"
           - "healthychildren_language_development"
+          - "cincinnatichildrens_language_development"
+          - "mayoclinic_language_milestones"
+          - "asha_developmental_milestones"
+          - "asha_public_speech_sound_disorders"
+          - "hanen_bilingual_myths"
+          - "habilnet_bilingual_parents"
+          - "cal_dual_language_home_support"
+          - "carla_family_resources"
+          - "docdeti_bilingualism"
+          - "russkiymir_bilingual_family"
         format: "tip_of_day"
         media: ["image_card"]
 
@@ -113,19 +123,6 @@ audiences:
           - "zerotothree_dual_language"
           - "habilnet_bilingual_parents"
           - "asha_multilingual_public"
-          - "hanen_bilingual_myths"
-          - "hanen_parent_tips"
-          - "colorin_bilingual_parents"
-          - "asha_public_speech_sound_disorders"
-          - "asha_developmental_milestones"
-          - "actionforchildren_communication_milestones"
-          - "gosh_speech_language_12_24_months"
-          - "cincinnatichildrens_language_development"
-          - "mayoclinic_language_milestones"
-          - "cal_dual_language_home_support"
-          - "carla_family_resources"
-          - "docdeti_bilingualism"
-          - "russkiymir_bilingual_family"
         format: "question_week"
         media: ["image_card"]
 

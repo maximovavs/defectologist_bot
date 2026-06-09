@@ -51,6 +51,12 @@ audiences:
           - "carla_family_resources"
           - "docdeti_bilingualism"
           - "russkiymir_bilingual_family"
+          - "raisingchildren_bilingual"
+          - "parents_language_activities"
+          - "parents_toddler_language_boost"
+          - "parents_sensory_play_language"
+          - "parents_baby_language_activities"
+          - "verywell_household_objects_play"
         format: "tip_of_day"
         media: ["image_card"]
 
@@ -72,6 +78,14 @@ audiences:
           - "healthychildren_language_development"
           - "cincinnatichildrens_language_development"
           - "mayoclinic_language_milestones"
+          - "fraser_parent_speech_tips"
+          - "raisingchildren_bilingual"
+          - "parents_language_activities"
+          - "parents_toddler_language_boost"
+          - "parents_sensory_play_language"
+          - "parents_baby_language_activities"
+          - "verywell_dramatic_play_language"
+          - "verywell_household_objects_play"
         format: "exercise_steps"
         media: ["image_card"]
 

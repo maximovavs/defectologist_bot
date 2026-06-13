@@ -59,6 +59,11 @@ SEMANTIC_THRESHOLD_POST_MYTH_FACT = _env_float(
     "0.92",
 )
 
+SEMANTIC_THRESHOLD_POST_METHOD_PIGGYBANK = _env_float(
+    "SEMANTIC_THRESHOLD_POST_METHOD_PIGGYBANK",
+    "0.985",
+)
+
 
 def normalize_rubric_id(rubric_id: str | None) -> str:
     """Normalize rubric id for stable policy comparisons."""
@@ -99,6 +104,9 @@ def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
 
     if normalized == "bilingual_corner":
         return SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER
+
+    if normalized == "method_piggybank":
+        return SEMANTIC_THRESHOLD_POST_METHOD_PIGGYBANK
 
     return SEMANTIC_THRESHOLD
 

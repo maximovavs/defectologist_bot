@@ -138,4 +138,5 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
         "bilingual_corner",
         "tip_of_day",
         "myth_fact",
+        "age_norms",
     }

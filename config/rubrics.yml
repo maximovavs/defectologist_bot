@@ -167,6 +167,13 @@ audiences:
           - "cincinnatichildrens_language_development"
           - "actionforchildren_communication_milestones"
           - "gosh_speech_language_12_24_months"
+          - "asha_public_speech_sound_disorders"
+          - "asha_multilingual_public"
+          - "hanen_parent_tips"
+          - "parents_language_activities"
+          - "parents_toddler_language_boost"
+          - "parents_baby_language_activities"
+          - "zerotothree_dual_language"
         format: "age_norms"
         media: ["image_card"]
 

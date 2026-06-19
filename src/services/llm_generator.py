@@ -434,20 +434,45 @@ def _validate_question_week_output(text: str) -> Tuple[bool, str]:
     if not lines:
         return False, "question_week_empty"
 
-    normalized = out.lower().replace("ё", "е")
-
-    if "❓" not in out or "вопрос недели" not in normalized:
+    if not re.search(r"^❓\s*Вопрос недели\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
         return False, "question_week_missing_question"
 
-    if "🧩" not in out or "что попробовать сегодня" not in normalized:
+    if not re.search(
+        r"^🧩\s*Что попробовать сегодня\s*[:：]?",
+        out,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
         return False, "question_week_missing_action"
 
-    if "💡" not in out or "что это дает" not in normalized:
+    if not re.search(
+        r"^💡\s*Что это да[её]т\s*[:：]?",
+        out,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
         return False, "question_week_missing_benefit"
+
+    action = _extract_section_after_header(
+        out,
+        r"^🧩\s*Что попробовать сегодня\s*[:：]?\s*",
+        [
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+            r"^👶",
+            r"^❓",
+        ],
+    )
+
+    if len(action.strip()) < 35:
+        return False, "question_week_empty_action"
+
+    if action.rstrip().endswith(("...", "…")):
+        return False, "question_week_truncated_action"
 
     benefit = _extract_section_after_header(
         out,
-        r"^💡\s*Что это да[её]т\s*[:：]\s*",
+        r"^💡\s*Что это да[её]т\s*[:：]?\s*",
         [
             r"^Источник\s*:",
             r"^🔗",
@@ -458,15 +483,18 @@ def _validate_question_week_output(text: str) -> Tuple[bool, str]:
         ],
     )
 
-    benefit_clean = benefit.strip(" .…")
-    if len(benefit_clean) < 20:
-        return False, "question_week_empty_benefit"
+    if benefit.rstrip().endswith(("...", "…")):
+        return False, "question_week_truncated_benefit"
 
-    if benefit_clean in {"...", "…"}:
+    benefit_clean = benefit.strip()
+    if len(benefit_clean) < 20:
         return False, "question_week_empty_benefit"
 
     if benefit_clean.lower().replace("ё", "е").startswith("что это дает"):
         return False, "question_week_empty_benefit"
+
+    if "..." in out or "…" in out:
+        return False, "question_week_ellipsis_truncation"
 
     return True, "ok"
 

@@ -43,6 +43,7 @@ from bs4 import BeautifulSoup
 from dateutil import tz
 
 from src.services.llm_generator import (
+    _validate_question_week_output,
     generate_image_prompt_async,
     generate_post_plain_from_evidence_async,
 )
@@ -171,6 +172,7 @@ SOFT_SKIP_REASONS = {
     "tip_of_day_post_too_generic",
     "unknown_source_id",
     "llm_invalid_output",
+    "final_invalid_output",
     "no_candidates",
     "max_skips_per_rubric",
 }
@@ -1446,6 +1448,23 @@ async def amain() -> None:
                     source_url=canon,
                     max_chars=POST_MAX_CHARS,
                 )
+
+                if rubric_id == "question_week":
+                    final_ok, final_reason = _validate_question_week_output(plain)
+                    if not final_ok:
+                        kind = note("final_invalid_output", f"{canon} ({final_reason})")
+                        print(
+                            f"[SKIP][{kind}] final_invalid_output "
+                            f"reason={final_reason} url={canon}",
+                            flush=True,
+                        )
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                 if rubric_id == "age_norms" and not _is_age_norms_content_fit(plain):
                     kind = note("rubric_topic_mismatch_post", canon)

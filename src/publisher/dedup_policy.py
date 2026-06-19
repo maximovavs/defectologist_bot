@@ -41,7 +41,7 @@ SEMANTIC_THRESHOLD_POST_PLAY_AND_SPEAK = _env_float(
 
 SEMANTIC_THRESHOLD_POST_QUESTION_WEEK = _env_float(
     "SEMANTIC_THRESHOLD_POST_QUESTION_WEEK",
-    "0.90",
+    "0.94",
 )
 
 SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER = _env_float(
@@ -68,6 +68,22 @@ SEMANTIC_THRESHOLD_POST_METHOD_PIGGYBANK = _env_float(
 def normalize_rubric_id(rubric_id: str | None) -> str:
     """Normalize rubric id for stable policy comparisons."""
     return (rubric_id or "").strip().lower()
+
+
+def should_allow_evergreen_source_reuse(rubric_id: str | None) -> bool:
+    """
+    Return True for rubrics that may reuse the same trusted source/evidence
+    because they are evergreen recurring formats.
+
+    This bypasses only source URL / evidence hash blocking.
+    Final post protections must remain active:
+    - dup_body_hash_db
+    - dup_semantic_post
+    - validation
+    """
+    return normalize_rubric_id(rubric_id) in {
+        "question_week",
+    }
 
 
 def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:
@@ -118,9 +134,9 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
     Some rubrics naturally reuse the same broad evidence topics while still
     producing different final posts.
 
-    We only bypass source-level semantic dedup. Safer final checks remain active:
-    - dup_url_db
-    - dup_evidence_hash_db
+    We only bypass source-level semantic dedup. Other dedup policies separately
+    decide whether trusted evergreen source URL/evidence may be reused.
+    Safer final checks remain active:
     - dup_body_hash_db
     - dup_semantic_post
 

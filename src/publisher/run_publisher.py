@@ -32,6 +32,7 @@ from urllib.parse import urljoin, urlparse
 from src.publisher.dedup_policy import (
     semantic_post_threshold_for_rubric,
     should_bypass_source_semantic_dedup,
+    should_allow_evergreen_source_reuse,
 )
 
 import feedparser
@@ -1240,15 +1241,21 @@ async def amain() -> None:
                     continue
 
                 if store.has_url(canon):
-                    kind = note("dup_url_db", canon)
-                    print(f"[SKIP][{kind}] dup_url_db url={canon}", flush=True)
-                    if kind == "hard":
-                        rubric_skips += 1
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
+                    if should_allow_evergreen_source_reuse(rubric_id):
+                        print(
+                            f"[WARN] dup_url_db_ignored evergreen_reuse rubric={rubric_id} url={canon}",
+                            flush=True,
+                        )
+                    else:
+                        kind = note("dup_url_db", canon)
+                        print(f"[SKIP][{kind}] dup_url_db url={canon}", flush=True)
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                 try:
                     evidence = extract_evidence_text(canon, max_chars=3600)
@@ -1298,15 +1305,21 @@ async def amain() -> None:
                     continue
 
                 if store.has_evidence_hash(evidence_hash):
-                    kind = note("dup_evidence_hash_db", canon)
-                    print(f"[SKIP][{kind}] dup_evidence_hash_db url={canon}", flush=True)
-                    if kind == "hard":
-                        rubric_skips += 1
-                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                        note("max_skips_per_rubric", rubric_id)
-                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                        break
-                    continue
+                    if should_allow_evergreen_source_reuse(rubric_id):
+                        print(
+                            f"[WARN] dup_evidence_hash_db_ignored evergreen_reuse rubric={rubric_id} url={canon}",
+                            flush=True,
+                        )
+                    else:
+                        kind = note("dup_evidence_hash_db", canon)
+                        print(f"[SKIP][{kind}] dup_evidence_hash_db url={canon}", flush=True)
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                 sem_source_hit = store.find_semantic_duplicate(
                     evidence,
@@ -1321,9 +1334,8 @@ async def amain() -> None:
                     # many different method articles use the same professional vocabulary
                     # and can score very high while still producing different practical posts.
                     #
-                    # We still keep the safer checks:
-                    # - dup_url_db
-                    # - dup_evidence_hash_db
+                    # URL/evidence hash DB checks follow their own rubric policy.
+                    # We still keep the final post checks:
                     # - dup_body_hash_db
                     # - dup_semantic_post
                     #

@@ -51,7 +51,7 @@ SEMANTIC_THRESHOLD_POST_BILINGUAL_CORNER = _env_float(
 
 SEMANTIC_THRESHOLD_POST_TIP_OF_DAY = _env_float(
     "SEMANTIC_THRESHOLD_POST_TIP_OF_DAY",
-    "0.90",
+    "0.94",
 )
 
 SEMANTIC_THRESHOLD_POST_MYTH_FACT = _env_float(
@@ -83,6 +83,7 @@ def should_allow_evergreen_source_reuse(rubric_id: str | None) -> bool:
     """
     return normalize_rubric_id(rubric_id) in {
         "question_week",
+        "tip_of_day",
     }
 
 

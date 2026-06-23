@@ -36,7 +36,7 @@ SEMANTIC_THRESHOLD_POST_AGE_NORMS = _env_float(
 
 SEMANTIC_THRESHOLD_POST_PLAY_AND_SPEAK = _env_float(
     "SEMANTIC_THRESHOLD_POST_PLAY_AND_SPEAK",
-    "0.90",
+    "0.94",
 )
 
 SEMANTIC_THRESHOLD_POST_QUESTION_WEEK = _env_float(
@@ -84,6 +84,7 @@ def should_allow_evergreen_source_reuse(rubric_id: str | None) -> bool:
     return normalize_rubric_id(rubric_id) in {
         "question_week",
         "tip_of_day",
+        "play_and_speak",
     }
 
 

@@ -56,7 +56,7 @@ SEMANTIC_THRESHOLD_POST_TIP_OF_DAY = _env_float(
 
 SEMANTIC_THRESHOLD_POST_MYTH_FACT = _env_float(
     "SEMANTIC_THRESHOLD_POST_MYTH_FACT",
-    "0.92",
+    "0.94",
 )
 
 SEMANTIC_THRESHOLD_POST_METHOD_PIGGYBANK = _env_float(
@@ -85,6 +85,7 @@ def should_allow_evergreen_source_reuse(rubric_id: str | None) -> bool:
         "question_week",
         "tip_of_day",
         "play_and_speak",
+        "myth_fact",
     }
 
 

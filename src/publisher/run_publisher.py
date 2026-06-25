@@ -520,25 +520,85 @@ def _remove_footer_lines(lines: List[str]) -> List[str]:
     return cleaned
 
 
+def _body_without_footer(plain_text: str) -> str:
+    lines = (plain_text or "").replace("\r\n", "\n").split("\n")
+    body_lines: List[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if SOURCE_LINE_RE.match(stripped) or stripped.startswith("🔗 "):
+            break
+        if stripped.startswith("#"):
+            break
+        body_lines.append(line)
+
+    while body_lines and not body_lines[-1].strip():
+        body_lines.pop()
+    return "\n".join(body_lines).strip()
+
+
+def _looks_incomplete_final_body(body_text: str) -> bool:
+    lines = [line.strip() for line in (body_text or "").replace("\r\n", "\n").split("\n") if line.strip()]
+    if not lines:
+        return True
+
+    last = lines[-1].strip()
+    if not last:
+        return True
+
+    if last.endswith(("...", "…", ",", ";", ":", "-", "—")):
+        return True
+
+    if last.count("«") != last.count("»"):
+        return True
+
+    if last.count("(") != last.count(")"):
+        return True
+
+    if re.search(r"[«\"“][^»\"”]{0,30}$", last):
+        return True
+
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", last)
+    if words and len(last) < 20:
+        return True
+
+    if re.search(r"[A-Za-zА-Яа-яЁё]$", last) and not re.search(r"[.!?…»)]$", last):
+        return True
+
+    return False
+
+
 def _trim_body_preserving_footer(body_text: str, footer_text: str, max_chars: int) -> str:
     body = (body_text or "").strip()
     footer = (footer_text or "").strip()
 
-    if not footer:
-        return body[:max_chars].rstrip()
-
-    composed = f"{body}\n\n{footer}" if body else footer
-    if len(composed) <= max_chars:
-        return body
-
-    allowance = max_chars - len(footer) - 2
-    if allowance <= 0:
+    if not body:
         return ""
 
-    cut = body[:allowance]
-    if "\n" in cut:
-        cut = cut[:cut.rfind("\n")].rstrip()
-    return (cut.rstrip(" .,:;—-") + "…").strip()
+    if not footer:
+        if len(body) <= max_chars and not _looks_incomplete_final_body(body):
+            return body
+        return ""
+
+    composed = f"{body}\n\n{footer}"
+    if len(composed) <= max_chars and not _looks_incomplete_final_body(body):
+        return body
+
+    body_lines = body.split("\n")
+    while body_lines:
+        while body_lines and not body_lines[-1].strip():
+            body_lines.pop()
+        candidate = "\n".join(body_lines).strip()
+        if not candidate:
+            return ""
+
+        composed = f"{candidate}\n\n{footer}"
+        if len(composed) <= max_chars and not _looks_incomplete_final_body(candidate):
+            return candidate
+
+        body_lines.pop()
+
+    return ""
 
 
 def finalize_plain_post_for_publication(
@@ -580,6 +640,17 @@ def finalize_plain_post_for_publication(
     footer_text = "\n".join(footer_parts).strip()
 
     trimmed_body = _trim_body_preserving_footer(body_text, footer_text, max_chars)
+    if trimmed_body and _looks_incomplete_final_body(trimmed_body):
+        body_lines = trimmed_body.split("\n")
+        while body_lines:
+            body_lines.pop()
+            candidate = "\n".join(body_lines).strip()
+            if candidate and not _looks_incomplete_final_body(candidate):
+                trimmed_body = candidate
+                break
+        else:
+            trimmed_body = ""
+
     return f"{trimmed_body}\n\n{footer_text}".strip() if trimmed_body else footer_text
 
 
@@ -1448,6 +1519,21 @@ async def amain() -> None:
                     source_url=canon,
                     max_chars=POST_MAX_CHARS,
                 )
+
+                if not plain or _looks_incomplete_final_body(_body_without_footer(plain)):
+                    kind = note("final_invalid_output", f"{canon} (final_body_incomplete)")
+                    print(
+                        f"[SKIP][{kind}] final_invalid_output "
+                        f"reason=final_body_incomplete url={canon}",
+                        flush=True,
+                    )
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
 
                 if rubric_id == "question_week":
                     final_ok, final_reason = _validate_question_week_output(plain)

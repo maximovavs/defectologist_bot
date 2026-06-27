@@ -384,20 +384,94 @@ def _has_pro_structure(lines: List[str]) -> bool:
     )
 
 
+PRO_OLD_ACADEMIC_HEADINGS = [
+    "Введение",
+    "Главные выводы",
+    "Практическое применение",
+    "Выводы",
+    "Суть",
+]
+
+PRO_REQUIRED_HEADINGS = [
+    "👩‍⚕️ Аудитория: специалисты",
+    "🎯 Цель:",
+    "🧰 Материалы:",
+    "🔁 Как провести:",
+    "✅ На что смотреть:",
+    "💡 Вариант усложнения:",
+]
+
+PRO_ACTION_VERBS = [
+    "положите",
+    "покажите",
+    "назовите",
+    "попросите",
+    "повторите",
+    "выберите",
+    "сравните",
+    "отметьте",
+    "усложните",
+    "дайте",
+]
+
+
 def _validate_pro_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
         return False, "pro_empty"
 
     title = lines[0]
-    if len(title) > 140:
+    if len(title) > 90:
         return False, "pro_title_too_long"
 
     if _contains_any_fragment(text, ["**", "###", "##", "#пример_тега"]):
         return False, "pro_markdown_or_template_leak"
 
-    # For pro_friendly we do not hard-fail on missing headings anymore.
-    # postprocess() normalizes unstructured pro text into Telegram blocks before validation.
+    if _has_any_header(lines, PRO_OLD_ACADEMIC_HEADINGS):
+        return False, "pro_old_academic_structure"
+
+    blob = _normalize_scan_text(text)
+    if "помогает сохранить фокус занятия" in blob:
+        return False, "pro_generic_benefit"
+
+    if not _find_line(lines, "🎯 Цель:"):
+        return False, "pro_missing_goal"
+    if not _find_line(lines, "🧰 Материалы:"):
+        return False, "pro_missing_materials"
+    if not _find_line(lines, "🔁 Как провести:"):
+        return False, "pro_missing_steps"
+    if not _find_line(lines, "✅ На что смотреть:"):
+        return False, "pro_missing_observation_criterion"
+
+    for heading in PRO_REQUIRED_HEADINGS:
+        if not _find_line(lines, heading):
+            if heading.startswith("🎯"):
+                return False, "pro_missing_goal"
+            if heading.startswith("🧰"):
+                return False, "pro_missing_materials"
+            if heading.startswith("🔁"):
+                return False, "pro_missing_steps"
+            if heading.startswith("✅"):
+                return False, "pro_missing_observation_criterion"
+            return False, "pro_missing_method_card_heading"
+
+    steps = _extract_section_after_header(
+        text,
+        r"^🔁\s*Как провести\s*[:：]?\s*",
+        [
+            r"^✅",
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+        ],
+    )
+    if not re.search(r"(^|\n|\s)1[\).]\s+", steps) or not re.search(r"(^|\n|\s)2[\).]\s+", steps):
+        return False, "pro_missing_steps"
+
+    if not any(verb in blob for verb in PRO_ACTION_VERBS):
+        return False, "pro_too_abstract"
+
     return True, "ok"
 
 
@@ -561,6 +635,11 @@ def _is_pro_heading_line(line: str) -> bool:
     return (
         low.startswith("👩‍⚕️ аудитория:")
         or low.startswith("аудитория:")
+        or low.startswith("🎯 цель")
+        or low.startswith("🧰 материалы")
+        or low.startswith("🔁 как провести")
+        or low.startswith("✅ на что смотреть")
+        or low.startswith("💡 вариант усложнения")
         or low in {"введение", "коротко", "суть"}
         or low in {"главные выводы", "главный вывод", "выводы", "что важно"}
         or low in {"практическое применение", "практика", "как применить", "что взять в работу"}
@@ -577,11 +656,184 @@ def _split_sentences_for_structure(text: str) -> List[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _normalize_pro_structure(text: str) -> str:
-    """Normalize and compact pro_friendly output for Telegram.
+def _pro_section(text: str, header_pattern: str) -> str:
+    return _extract_section_after_header(
+        text,
+        header_pattern,
+        [
+            r"^👩‍⚕️",
+            r"^🎯",
+            r"^🧰",
+            r"^🔁",
+            r"^✅",
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+            r"^Введение\s*$",
+            r"^Главные выводы\s*$",
+            r"^Практическое применение\s*$",
+            r"^Выводы\s*$",
+            r"^Суть\s*$",
+        ],
+    )
 
-    The post must be structured, but also fit POST_MAX_CHARS after source and tags
-    are added by the publisher. Therefore every block is intentionally short.
+
+def _pro_skill_from_text(text: str) -> str:
+    blob = _normalize_scan_text(text)
+    rules = [
+        ("фонематический слух", ["фонемат", "звук", "звука", "слух", "слыш"]),
+        ("артикуляция", ["артикуля", "язык", "губ", "зеркал", "уклад"]),
+        ("слоговая структура", ["слог", "слогов", "ритм слова"]),
+        ("словарь", ["словар", "лексик", "назван", "предмет"]),
+        ("фразовая речь", ["фраз", "предложен", "ответ"]),
+        ("грамматический строй", ["граммат", "падеж", "род ", "число", "окончан"]),
+        ("дыхание", ["дых", "выдох", "воздушн", "дуть"]),
+        ("связная речь", ["связн", "пересказ", "рассказ", "истори"]),
+    ]
+    for skill, probes in rules:
+        if any(probe in blob for probe in probes):
+            return skill
+    return "фразовая речь"
+
+
+def _pro_materials_from_text(text: str) -> str:
+    blob = _normalize_scan_text(text)
+    found: List[str] = []
+    candidates = [
+        ("карточки", ["карточ"]),
+        ("предметы", ["предмет"]),
+        ("зеркало", ["зеркал"]),
+        ("мяч", ["мяч"]),
+        ("картинки", ["картин", "изображ"]),
+        ("фишки", ["фишк", "жетон"]),
+        ("таймер", ["таймер", "время"]),
+    ]
+    for label, probes in candidates:
+        if any(probe in blob for probe in probes) and label not in found:
+            found.append(label)
+    if len(found) < 2:
+        for label in ["карточки", "картинки", "фишки"]:
+            if label not in found:
+                found.append(label)
+            if len(found) >= 3:
+                break
+    return ", ".join(found[:4]) + "."
+
+
+def _pro_goal_for_skill(skill: str, source_text: str) -> str:
+    if skill == "фонематический слух":
+        return "Учить ребёнка слышать и выделять заданный звук в слове."
+    if skill == "артикуляция":
+        return "Учить ребёнка удерживать нужный артикуляционный уклад и контролировать движение."
+    if skill == "слоговая структура":
+        return "Учить ребёнка повторять слово без потери слогов и перестановок."
+    if skill == "словарь":
+        return "Расширять словарь через называние предметов, действий или признаков."
+    if skill == "фразовая речь":
+        return "Учить ребёнка отвечать короткой фразой по образцу взрослого."
+    if skill == "грамматический строй":
+        return "Учить ребёнка выбирать правильную грамматическую форму в короткой фразе."
+    if skill == "дыхание":
+        return "Тренировать плавный речевой выдох без напряжения."
+    if skill == "связная речь":
+        return "Учить ребёнка последовательно рассказывать о картинке или событии."
+    sentences = _split_sentences_for_structure(source_text)
+    return _clip_text_for_structure(sentences[0], 120) if sentences else "Отработать один конкретный речевой навык в короткой игре."
+
+
+def _pro_steps_for_skill(skill: str) -> List[str]:
+    if skill == "фонематический слух":
+        return [
+            "Разложите 6-8 карточек перед ребёнком.",
+            "Назовите целевой звук и попросите выбрать картинку, где он слышится.",
+            "Попросите ребёнка повторить слово и отметьте точность выбора.",
+        ]
+    if skill == "артикуляция":
+        return [
+            "Покажите артикуляционный уклад перед зеркалом.",
+            "Попросите ребёнка повторить положение губ или языка 3-4 раза.",
+            "Отметьте, удерживает ли ребёнок уклад без лишнего напряжения.",
+        ]
+    if skill == "слоговая структура":
+        return [
+            "Покажите картинку и назовите слово по слогам.",
+            "Попросите ребёнка повторить слово в том же ритме.",
+            "Сравните повтор с образцом и мягко исправьте пропущенный слог.",
+        ]
+    if skill == "словарь":
+        return [
+            "Положите перед ребёнком 5-7 предметов или картинок.",
+            "Попросите выбрать нужный предмет и назвать его.",
+            "Дайте короткую подсказку и отметьте самостоятельные называния.",
+        ]
+    if skill == "грамматический строй":
+        return [
+            "Покажите две картинки с разным количеством предметов.",
+            "Попросите ребёнка выбрать правильную форму слова в короткой фразе.",
+            "Повторите фразу вместе и сравните окончание с образцом.",
+        ]
+    if skill == "дыхание":
+        return [
+            "Покажите спокойный вдох носом и длинный мягкий выдох.",
+            "Попросите ребёнка повторить выдох на слоге или коротком слове.",
+            "Отметьте, получается ли говорить без добора воздуха внутри слова.",
+        ]
+    if skill == "связная речь":
+        return [
+            "Покажите картинку и назовите, кто на ней действует.",
+            "Попросите ребёнка ответить, что произошло сначала и потом.",
+            "Дайте опору вопросом и отметьте связность короткого рассказа.",
+        ]
+    return [
+        "Покажите ребёнку картинку или предмет и назовите образец ответа.",
+        "Попросите повторить ответ короткой фразой.",
+        "Дайте подсказку при ошибке и отметьте более точную повторную попытку.",
+    ]
+
+
+def _pro_criterion_for_skill(skill: str) -> str:
+    if skill == "фонематический слух":
+        return "Ребёнок выбирает нужную картинку и повторяет слово без потери целевого звука."
+    if skill == "артикуляция":
+        return "Ребёнок удерживает артикуляцию несколько секунд и исправляет ошибку после подсказки."
+    if skill == "слоговая структура":
+        return "Ребёнок повторяет слово с нужным количеством слогов и без перестановок."
+    if skill == "словарь":
+        return "Ребёнок называет или выбирает нужную картинку после инструкции."
+    if skill == "грамматический строй":
+        return "Ребёнок отвечает фразой с нужной формой слова после образца или подсказки."
+    if skill == "дыхание":
+        return "Ребёнок произносит слог или слово на плавном выдохе без заметного напряжения."
+    if skill == "связная речь":
+        return "Ребёнок удерживает последовательность и отвечает фразой, а не отдельным словом."
+    return "Ребёнок выполняет действие по инструкции и исправляет ошибку после подсказки."
+
+
+def _pro_variation_for_skill(skill: str) -> str:
+    if skill == "фонематический слух":
+        return "Попросите ребёнка придумать ещё одно слово с этим звуком."
+    if skill == "артикуляция":
+        return "Усложните задачу: удержать уклад и затем произнести слог по образцу."
+    if skill == "слоговая структура":
+        return "Усложните задачу словами с большим количеством слогов."
+    if skill == "словарь":
+        return "Попросите назвать признак предмета или действие с ним."
+    if skill == "грамматический строй":
+        return "Дайте новую картинку и попросите выбрать форму без готового образца."
+    if skill == "дыхание":
+        return "Усложните задачу: произнести короткую фразу на одном плавном выдохе."
+    if skill == "связная речь":
+        return "Попросите ребёнка добавить один новый эпизод к рассказу."
+    return "Усложните задачу: уберите одну подсказку и попросите выполнить действие самостоятельно."
+
+
+def _normalize_pro_structure(text: str) -> str:
+    """Normalize pro_friendly output into a practical method card.
+
+    The final post must read as a protocol for a specialist, not as an article
+    summary. If the model already produced a method card, keep its concrete
+    content and clean the layout; otherwise derive a compact card from evidence.
     """
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -596,15 +848,15 @@ def _normalize_pro_structure(text: str) -> str:
         if low.startswith("источник:") or st.startswith("🔗 ") or st.startswith("#") or st.startswith("ℹ️ "):
             footer_lines.append(st)
             continue
-        if _is_pro_heading_line(st):
-            continue
         content_lines.append(st)
 
     if not content_lines:
         return text.strip()
 
-    raw_title = content_lines[0]
-    rest_lines = content_lines[1:]
+    body_text = "\n".join(content_lines)
+    non_heading_lines = [line for line in content_lines if not _is_pro_heading_line(line)]
+    raw_title = non_heading_lines[0] if non_heading_lines else content_lines[0]
+    rest_lines = non_heading_lines[1:] if non_heading_lines else content_lines[1:]
 
     if len(raw_title) <= 90 and not raw_title.endswith((".", "!", "?")):
         title = raw_title
@@ -618,38 +870,56 @@ def _normalize_pro_structure(text: str) -> str:
     if not body_seed:
         body_seed = "Этот материал можно превратить в короткий рабочий прием для занятия или домашней практики."
 
-    sentences = _split_sentences_for_structure(body_seed)
+    skill = _pro_skill_from_text(title + " " + body_seed)
+    existing_goal = _pro_section(body_text, r"^🎯\s*Цель\s*[:：]?\s*")
+    existing_materials = _pro_section(body_text, r"^🧰\s*Материалы\s*[:：]?\s*")
+    existing_steps = _pro_section(body_text, r"^🔁\s*Как провести\s*[:：]?\s*")
+    existing_criterion = _pro_section(body_text, r"^✅\s*На что смотреть\s*[:：]?\s*")
+    existing_variation = _pro_section(body_text, r"^💡\s*Вариант усложнения\s*[:：]?\s*")
 
-    intro_raw = sentences[0] if sentences else body_seed
-    findings_raw = " ".join(sentences[1:3]).strip()
-    practice_raw = " ".join(sentences[3:6]).strip()
+    goal = _clip_text_for_structure(existing_goal, 140) if existing_goal else _pro_goal_for_skill(skill, body_seed)
+    materials = _clip_text_for_structure(existing_materials, 120) if existing_materials else _pro_materials_from_text(body_seed)
+    criterion = (
+        _clip_text_for_structure(existing_criterion, 150)
+        if existing_criterion
+        else _pro_criterion_for_skill(skill)
+    )
+    variation = (
+        _clip_text_for_structure(existing_variation, 150)
+        if existing_variation
+        else _pro_variation_for_skill(skill)
+    )
 
-    if not findings_raw:
-        findings_raw = "Главный смысл — выбрать одну понятную задачу и не перегружать ребенка несколькими требованиями сразу."
-    if not practice_raw:
-        practice_raw = "Возьмите один элемент из материала и превратите его в короткую повторяемую инструкцию: покажите действие, дайте ребенку время повторить, затем мягко расширьте ответ."
-
-    intro = _clip_text_for_structure(intro_raw, 150)
-    findings = _clip_text_for_structure(findings_raw, 210)
-    practice = _clip_text_for_structure(practice_raw, 260)
-    benefit = "Помогает сохранить фокус занятия и сделать прием понятным для ребенка и семьи."
+    step_matches = re.findall(r"(?:^|\s)([1-3][\).]\s+.*?)(?=\s+[1-3][\).]\s+|$)", existing_steps)
+    if len(step_matches) >= 2:
+        steps = [_clip_text_for_structure(re.sub(r"^[1-3][\).]\s*", "", step), 120) for step in step_matches[:3]]
+    else:
+        steps = _pro_steps_for_skill(skill)
+    if len(steps) < 3:
+        steps.extend(_pro_steps_for_skill(skill)[len(steps):3])
 
     normalized = [
         title,
         "",
         "👩‍⚕️ Аудитория: специалисты",
         "",
-        "Введение",
-        intro,
+        "🎯 Цель:",
+        goal,
         "",
-        "Главные выводы",
-        findings,
+        "🧰 Материалы:",
+        materials,
         "",
-        "Практическое применение",
-        practice,
+        "🔁 Как провести:",
         "",
-        "💡 Что это дает:",
-        benefit,
+        f"1. {steps[0]}",
+        f"2. {steps[1]}",
+        f"3. {steps[2]}",
+        "",
+        "✅ На что смотреть:",
+        criterion,
+        "",
+        "💡 Вариант усложнения:",
+        variation,
     ]
 
     if footer_lines:
@@ -896,27 +1166,33 @@ def build_generation_prompt(
 
     if aud == "pros":
         template = (
-            "Первая строка — короткий живой H1 по сути метода, без названия рубрики.\n"
+            "Первая строка — короткое конкретное название метода, игры или приема, до 90 символов.\n"
             "Не используй Markdown и не выделяй слова звёздочками.\n"
             "Не начинай с диагноза или пугающей клинической формулировки.\n"
-            "Пиши так, чтобы специалисту было полезно, а родителю — не страшно.\n\n"
+            "Пиши как практическую карточку методики: цель, материалы, протокол, критерий наблюдения.\n"
+            "Не используй заголовки Введение, Главные выводы, Практическое применение, Коротко, Суть, Выводы.\n\n"
             "👩‍⚕️ Аудитория: специалисты\n\n"
-            "Введение\n"
-            "1–2 предложения: какая профессиональная ситуация или навык обсуждается.\n\n"
-            "Главные выводы\n"
-            "1–2 коротких предложения: что важно понять специалисту из материала. Без длинных списков.\n\n"
-            "Практическое применение\n"
-            "2–3 коротких предложения: один конкретный прием, упражнение или наблюдение, которое можно взять в работу. "
-            "Добавь пример инструкции специалиста или реплики взрослого.\n\n"
-            "💡 Что это дает:\n"
-            "1 короткое предложение о практическом эффекте.\n\n"
+            "🎯 Цель:\n"
+            "1 предложение с конкретным навыком: фонематический слух, артикуляция, слоговая структура, словарь, "
+            "фразовая речь, грамматический строй, дыхание или связная речь.\n\n"
+            "🧰 Материалы:\n"
+            "1 короткая строка: карточки, предметы, зеркало, мяч, картинки, фишки, таймер — только то, что подходит.\n\n"
+            "🔁 Как провести:\n\n"
+            "1. Конкретное действие специалиста.\n"
+            "2. Конкретная инструкция ребёнку.\n"
+            "3. Как отметить или исправить ответ.\n\n"
+            "✅ На что смотреть:\n"
+            "1 предложение с наблюдаемым критерием: ребёнок различает звук, повторяет слово, удерживает артикуляцию, "
+            "отвечает фразой, выбирает нужную картинку или исправляет ошибку после подсказки.\n\n"
+            "💡 Вариант усложнения:\n"
+            "1 практическая вариация, не общий benefit.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
         return (
             rules
             + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и редактор профессиональной, но понятной Telegram-рубрики.\n"
-            + "Твоя задача — не академический конспект и не список из методички, а короткий структурированный пост с одним применимым выводом.\n"
+            + "Твоя задача — не академический конспект, а короткая практическая карточка метода для занятия.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -1355,8 +1631,12 @@ async def generate_post_plain_from_evidence_async(
             if aud == "pros" or rf == "pro_friendly":
                 repair_prompt += (
                     "Для pro_friendly обязательно верни структурированный Telegram-пост: "
-                    "H1, затем строка 👩‍⚕️ Аудитория: специалисты, затем блоки Введение, "
-                    "Главные выводы, Практическое применение. Без Markdown и без звездочек."
+                    "H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, затем блоки 🎯 Цель:, "
+                    "🧰 Материалы:, 🔁 Как провести: с шагами 1., 2., 3., ✅ На что смотреть:, "
+                    "💡 Вариант усложнения:. Это должна быть практическая карточка метода, "
+                    "не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
+                    "В шагах должны быть конкретные действия: покажите, назовите, попросите, повторите, "
+                    "выберите, сравните, отметьте или дайте. Без Markdown и без звездочек."
                 )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))

@@ -22,7 +22,7 @@ Patch 5.4.8 — compact pro_friendly structure to prevent truncation
 7) Источник и ссылка достраиваются кодом, если модель их пропустила.
 8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
 9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
-10) Минимальный fallback по спискам GROQ_MODELS и GEMINI_MODELS.
+10) Минимальный fallback: GROQ_MODEL -> GROQ_FALLBACK_MODEL и GEMINI_MODELS.
 11) Очистка Markdown-артефактов перед Telegram HTML render.
 12) Sunday validator: no false-positive 'рас', softer min length, invalid Groq can fall back to Gemini.
 13) pro_friendly validator and safer specialist prompt for method_piggybank structure.
@@ -937,7 +937,13 @@ LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
 LLM_BACKOFF_MIN = float(os.getenv("LLM_BACKOFF_MIN", "15"))
 LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+DEFAULT_GROQ_FALLBACK_MODEL = "openai/gpt-oss-20b"
+GROQ_MODEL = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+GROQ_FALLBACK_MODEL = (
+    os.getenv("GROQ_FALLBACK_MODEL", DEFAULT_GROQ_FALLBACK_MODEL).strip()
+    or DEFAULT_GROQ_FALLBACK_MODEL
+)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
 
 _throttle_lock = asyncio.Lock()
@@ -945,18 +951,23 @@ _next_allowed_ts = 0.0
 _gemini_region_blocked = False
 
 
-def _parse_model_list(raw: str, single_fallback: str) -> List[str]:
+def _unique_nonempty_models(*models: str) -> List[str]:
     items: List[str] = []
-    for part in (raw or "").split(","):
-        model = part.strip()
+    for model in models:
+        model = (model or "").strip()
         if model and model not in items:
             items.append(model)
-    if single_fallback and single_fallback not in items:
-        items.append(single_fallback)
     return items
 
 
-GROQ_MODELS = _parse_model_list(os.getenv("GROQ_MODELS", ""), GROQ_MODEL)
+def _parse_model_list(raw: str, single_fallback: str) -> List[str]:
+    return _unique_nonempty_models(
+        *((part.strip() for part in (raw or "").split(","))),
+        single_fallback,
+    )
+
+
+GROQ_MODELS = _unique_nonempty_models(GROQ_MODEL, GROQ_FALLBACK_MODEL)
 GEMINI_MODELS = _parse_model_list(os.getenv("GEMINI_MODELS", ""), GEMINI_MODEL)
 
 
@@ -1023,6 +1034,7 @@ async def groq_chat(prompt: str, api_key: str) -> str:
 
             if resp.status_code == 200:
                 j = resp.json()
+                print(f"[LLM][groq] selected model={model}", flush=True)
                 return (j["choices"][0]["message"]["content"] or "").strip()
 
             txt = resp.text or ""

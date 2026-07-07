@@ -170,6 +170,16 @@ SOFT_SKIP_REASONS = {
     "rubric_topic_mismatch_source",
     "rubric_topic_mismatch_post",
     "tip_of_day_post_too_generic",
+    "unsupported_mechanism_claim",
+    "pro_unsupported_concrete_detail",
+    "pro_insufficient_evidence",
+    "bilingual_topic_mismatch",
+    "bilingual_missing_family_action",
+    "bilingual_false_causality",
+    "bilingual_unsupported_mechanism",
+    "missing_parent_safety_note",
+    "blanket_reassurance",
+    "misleading_politeness_framing",
     "unknown_source_id",
     "llm_invalid_output",
     "final_invalid_output",
@@ -489,8 +499,29 @@ def _body_supports_tag(tag: str, body_text: str) -> bool:
     return sum(1 for tok in tokens if len(tok) >= 4 and tok in body_norm) >= 1
 
 
+CONTROLLED_THEMATIC_TAGS: List[tuple[List[str], str]] = [
+    (["фонемат", "различает звук"], "#фонематический_слух"),
+    (["артикуляц", "положение языка", "положение губ"], "#артикуляция"),
+    (["фраз", "два слова", "просьба"], "#фразовая_речь"),
+    (["словар", "название предметов"], "#словарный_запас"),
+    (["билингв", "двуязыч", "два языка"], "#билингвизм"),
+    (["слог"], "#слоговая_структура"),
+    (["связн", "рассказ", "пересказ"], "#связная_речь"),
+    (["понимание речи", "выполняет просьбу"], "#понимание_речи"),
+]
+
+
+def _controlled_thematic_tag(body_text: str) -> str:
+    blob = (body_text or "").lower().replace("ё", "е")
+    for markers, tag in CONTROLLED_THEMATIC_TAGS:
+        if any(marker in blob for marker in markers):
+            return tag
+    return ""
+
+
 def _filter_relevant_thematic_tags(tags: List[str], body_text: str) -> List[str]:
-    return [tag for tag in tags if _body_supports_tag(tag, body_text)][:2]
+    controlled = _controlled_thematic_tag(body_text)
+    return [controlled] if controlled else []
 
 
 def _extract_source_line(lines: List[str], fallback_domain: str) -> str:

@@ -319,6 +319,160 @@ def validate_evidence_grounding(
     return True, "ok"
 
 
+PRO_CONCRETE_DETAIL_PATTERNS: List[Tuple[str, str, List[str]]] = [
+    (r"\bтаймер\w*", "таймер", ["таймер"]),
+    (r"\bзеркал\w*", "зеркало", ["зеркал"]),
+    (r"\bпланшет\w*", "планшет", ["планшет"]),
+    (r"\bкомпьютер\w*", "компьютер", ["компьютер"]),
+    (r"\bнаушник\w*", "наушники", ["наушник"]),
+    (r"\bприложени\w*", "приложение", ["приложени"]),
+    (r"\bпрограмм\w*", "программа", ["программ"]),
+    (r"\bуровен\w*", "уровень", ["уровен"]),
+    (r"\bрежим\w*", "режим", ["режим"]),
+    (r"\bсекунд\w*", "секунд", ["секунд"]),
+    (r"\bминут\w*", "минут", ["минут"]),
+    (r"\bраз(?:а|)\s+повтор\w*", "раз повторить", ["раз", "повтор"]),
+]
+
+BILINGUAL_TERMS = [
+    "двуязычие",
+    "билингвизм",
+    "два языка",
+    "домашний язык",
+    "переключение языков",
+    "язык семьи",
+    "язык среды",
+    "многоязыч",
+]
+
+PARENT_RISK_MARKERS = [
+    "мало говорит",
+    "не говорит",
+    "перестал говорить",
+    "потерял навыки",
+    "регресс",
+    "не понимает речь",
+    "задержка речи",
+]
+
+PARENT_SAFETY_ACTIONS = [
+    "обсудить с педиатром",
+    "обратиться к логопеду",
+    "проверить слух",
+    "проконсультироваться со специалистом",
+]
+
+BLANKET_REASSURANCE = [
+    "не стоит беспокоиться",
+    "беспокоиться не о чем",
+    "это точно нормально",
+]
+
+MISLEADING_POLITENESS_TITLE_PATTERNS = [
+    "без пожалуйста",
+    "не говорите пожалуйста",
+    "уберите пожалуйста",
+]
+
+
+def validate_pro_concrete_details(output_text: str, evidence_text: str) -> Tuple[bool, str]:
+    out = _normalize_scan_text(output_text)
+    if not out:
+        return True, "ok"
+    for pattern, label, evidence_terms in PRO_CONCRETE_DETAIL_PATTERNS:
+        if re.search(pattern, out, flags=re.IGNORECASE) and not _all_terms_present(evidence_text, evidence_terms):
+            return False, f"pro_unsupported_concrete_detail:{label}"
+    return True, "ok"
+
+
+def _has_pro_minimum_evidence(evidence_text: str) -> bool:
+    evidence = _normalize_scan_text(evidence_text)
+    action_ok = bool(
+        re.search(
+            r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|игра|дела)\w*",
+            evidence,
+            flags=re.IGNORECASE,
+        )
+    )
+    material_ok = bool(
+        re.search(
+            r"(без дополнительных материалов|материал\w*|карточ\w*|картин\w*|игруш\w*|мяч\w*|зеркал\w*|компьютер\w*|планшет\w*|книга\w*|предмет\w*)",
+            evidence,
+            flags=re.IGNORECASE,
+        )
+    )
+    criterion_ok = bool(
+        re.search(
+            r"\b(смотр|наблюд|оцени|критери|получа|реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима))\w*",
+            evidence,
+            flags=re.IGNORECASE,
+        )
+    )
+    return action_ok and material_ok and criterion_ok
+
+
+def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
+    blob = _normalize_scan_text(text)
+    blanket = _contains_any_fragment(blob, BLANKET_REASSURANCE)
+    if blanket:
+        return False, "blanket_reassurance"
+
+    if not _contains_any_fragment(blob, PARENT_RISK_MARKERS):
+        return True, "ok"
+
+    if not _contains_any_fragment(blob, PARENT_SAFETY_ACTIONS):
+        return False, "missing_parent_safety_note"
+
+    return True, "ok"
+
+
+def _validate_politeness_title(text: str) -> Tuple[bool, str]:
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return True, "ok"
+    title = re.sub(r"[^a-zа-я0-9]+", " ", _normalize_scan_text(lines[0]), flags=re.IGNORECASE)
+    if _contains_any_fragment(title, MISLEADING_POLITENESS_TITLE_PATTERNS):
+        return False, "misleading_politeness_framing"
+    return True, "ok"
+
+
+def _validate_bilingual_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
+    blob = _normalize_scan_text(text)
+    if not _contains_any_fragment(blob, BILINGUAL_TERMS):
+        return False, "bilingual_topic_mismatch"
+
+    if "🌍 что помогает в двуязычной семье" not in blob:
+        return False, "bilingual_topic_mismatch"
+
+    false_cause_patterns = [
+        r"(двуязычи\w*|билингвизм|два\s+язык\w*|переключени\w+\s+язык\w*)\s+\w{0,20}\s*(вызыва\w+|привод\w+|станов\w+\s+причин\w+)",
+        r"из-за\s+(двуязычи\w*|билингвизм\w*|двух\s+язык\w*)",
+    ]
+    if any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in false_cause_patterns):
+        return False, "bilingual_false_causality"
+
+    family_action_ok = bool(
+        re.search(
+            r"(говор\w+|чита\w+|обсужда\w+|называ\w+|пересказыва\w+|поддержива\w+|выбира\w+|использу\w+).{0,80}(язык\w*|русск\w*|домашн\w+|семь\w+)",
+            blob,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r"(язык\w*|русск\w*|домашн\w+|семь\w+).{0,80}(говор\w+|чита\w+|обсужда\w+|называ\w+|пересказыва\w+|поддержива\w+|выбира\w+|использу\w+)",
+            blob,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not family_action_ok:
+        return False, "bilingual_missing_family_action"
+
+    grounded, _reason = validate_evidence_grounding(text, evidence_text, "bilingual_parents")
+    if not grounded:
+        return False, "bilingual_unsupported_mechanism"
+
+    return True, "ok"
+
+
 def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -455,7 +609,7 @@ PRO_ACTION_VERBS = [
 ]
 
 
-def _validate_pro_output(text: str) -> Tuple[bool, str]:
+def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
         return False, "pro_empty"
@@ -511,6 +665,13 @@ def _validate_pro_output(text: str) -> Tuple[bool, str]:
 
     if not any(verb in blob for verb in PRO_ACTION_VERBS):
         return False, "pro_too_abstract"
+
+    if evidence_text and not _has_pro_minimum_evidence(evidence_text):
+        return False, "pro_insufficient_evidence"
+
+    ok, reason = validate_pro_concrete_details(text, evidence_text)
+    if not ok:
+        return False, reason
 
     return True, "ok"
 
@@ -617,6 +778,7 @@ def _validate_output(
     text: str,
     day_key: str = "",
     rubric_format: str = "",
+    audience: str = "",
     evidence_text: str = "",
 ) -> Tuple[bool, str]:
     out = (text or "").strip()
@@ -625,6 +787,11 @@ def _validate_output(
 
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
+    aud = (audience or "").strip().lower()
+
+    ok, reason = _validate_politeness_title(out)
+    if not ok:
+        return False, reason
 
     if dk == "FR" or rf == "question_week":
         ok, reason = _validate_question_week_output(out)
@@ -647,18 +814,28 @@ def _validate_output(
     if _has_template_leak(out):
         return False, "template_leak"
 
+    if aud != "pros":
+        ok, reason = _validate_parent_safety_output(out)
+        if not ok:
+            return False, reason
+
     grounded, grounding_reason = validate_evidence_grounding(out, evidence_text, rf)
     if not grounded:
+        if dk == "TH" or rf == "bilingual_parents":
+            return False, "bilingual_unsupported_mechanism"
         return False, grounding_reason
 
     if dk == "MO" or rf == "tip_of_day":
         return _validate_tip_of_day_output(out)
 
+    if dk == "TH" or rf == "bilingual_parents":
+        return _validate_bilingual_output(out, evidence_text)
+
     if dk == "SU" or rf == "age_norms":
         return _validate_age_norms_output(out)
 
     if rf == "pro_friendly":
-        return _validate_pro_output(out)
+        return _validate_pro_output(out, evidence_text)
 
     return True, "ok"
 
@@ -878,101 +1055,25 @@ def _pro_variation_for_skill(skill: str) -> str:
 
 
 def _normalize_pro_structure(text: str) -> str:
-    """Normalize pro_friendly output into a practical method card.
-
-    The final post must read as a protocol for a specialist, not as an article
-    summary. If the model already produced a method card, keep its concrete
-    content and clean the layout; otherwise derive a compact card from evidence.
-    """
+    """Normalize pro_friendly layout without inventing missing method details."""
     lines = _extract_nonempty_lines(text)
     if not lines:
         return text
 
-    footer_lines: List[str] = []
-    content_lines: List[str] = []
-
-    for line in lines:
-        st = line.strip()
-        low = st.lower()
-        if low.startswith("источник:") or st.startswith("🔗 ") or st.startswith("#") or st.startswith("ℹ️ "):
-            footer_lines.append(st)
-            continue
-        content_lines.append(st)
-
-    if not content_lines:
+    if not all(_find_line(lines, heading) for heading in PRO_REQUIRED_HEADINGS):
         return text.strip()
 
-    body_text = "\n".join(content_lines)
-    non_heading_lines = [line for line in content_lines if not _is_pro_heading_line(line)]
-    raw_title = non_heading_lines[0] if non_heading_lines else content_lines[0]
-    rest_lines = non_heading_lines[1:] if non_heading_lines else content_lines[1:]
-
-    if len(raw_title) <= 90 and not raw_title.endswith((".", "!", "?")):
-        title = raw_title
-        body_seed = " ".join(rest_lines).strip()
-    else:
-        title_sentences = _split_sentences_for_structure(raw_title)
-        title = title_sentences[0] if title_sentences else "Методический прием без лишней сложности"
-        title = _clip_text_for_structure(title, 90).rstrip(".")
-        body_seed = " ".join((title_sentences[1:] if len(title_sentences) > 1 else []) + rest_lines).strip()
-
-    if not body_seed:
-        body_seed = "Этот материал можно превратить в короткий рабочий прием для занятия или домашней практики."
-
-    skill = _pro_skill_from_text(title + " " + body_seed)
-    existing_goal = _pro_section(body_text, r"^🎯\s*Цель\s*[:：]?\s*")
-    existing_materials = _pro_section(body_text, r"^🧰\s*Материалы\s*[:：]?\s*")
-    existing_steps = _pro_section(body_text, r"^🔁\s*Как провести\s*[:：]?\s*")
-    existing_criterion = _pro_section(body_text, r"^✅\s*На что смотреть\s*[:：]?\s*")
-    existing_variation = _pro_section(body_text, r"^💡\s*Вариант усложнения\s*[:：]?\s*")
-
-    goal = _clip_text_for_structure(existing_goal, 140) if existing_goal else _pro_goal_for_skill(skill, body_seed)
-    materials = _clip_text_for_structure(existing_materials, 120) if existing_materials else _pro_materials_from_text(body_seed)
-    criterion = (
-        _clip_text_for_structure(existing_criterion, 150)
-        if existing_criterion
-        else _pro_criterion_for_skill(skill)
-    )
-    variation = (
-        _clip_text_for_structure(existing_variation, 150)
-        if existing_variation
-        else _pro_variation_for_skill(skill)
-    )
-
-    step_matches = re.findall(r"(?:^|\s)([1-3][\).]\s+.*?)(?=\s+[1-3][\).]\s+|$)", existing_steps)
-    if len(step_matches) >= 2:
-        steps = [_clip_text_for_structure(re.sub(r"^[1-3][\).]\s*", "", step), 120) for step in step_matches[:3]]
-    else:
-        steps = _pro_steps_for_skill(skill)
-    if len(steps) < 3:
-        steps.extend(_pro_steps_for_skill(skill)[len(steps):3])
-
-    normalized = [
-        title,
-        "",
-        "👩‍⚕️ Аудитория: специалисты",
-        "",
-        "🎯 Цель:",
-        goal,
-        "",
-        "🧰 Материалы:",
-        materials,
-        "",
-        "🔁 Как провести:",
-        "",
-        f"1. {steps[0]}",
-        f"2. {steps[1]}",
-        f"3. {steps[2]}",
-        "",
-        "✅ На что смотреть:",
-        criterion,
-        "",
-        "💡 Вариант усложнения:",
-        variation,
-    ]
-
-    if footer_lines:
-        normalized.extend(["", *footer_lines])
+    normalized: List[str] = []
+    previous_blank = False
+    for raw in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            if normalized and not previous_blank:
+                normalized.append("")
+            previous_blank = True
+            continue
+        normalized.append(line)
+        previous_blank = False
 
     return "\n".join(normalized).strip()
 
@@ -1166,6 +1267,8 @@ def _common_rules(max_chars: int) -> str:
         "Любое физиологическое, неврологическое, причинное, диагностическое или терапевтическое объяснение должно быть прямо поддержано EVIDENCE.\n"
         "Не придумывай, почему упражнение работает. Если механизм не объяснен в EVIDENCE, описывай только действие взрослого и наблюдаемую реакцию ребенка.\n"
         "Предпочитай наблюдаемые результаты механизмам: ребенок повторяет слово, удерживает внимание, выбирает картинку, отвечает фразой.\n"
+        "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.\n"
+        "Упрощение фразы — временная подсказка, а не отказ от вежливости: взрослый может дать короткую модель и естественно показывать полную вежливую фразу.\n"
         "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
         "Опирайся преимущественно на перефразирование, не используй прямые цитаты из текста.\n"
         "Нельзя копировать длинные фразы из статьи.\n"
@@ -1257,6 +1360,8 @@ def build_generation_prompt(
             rules
             + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и редактор профессиональной, но понятной Telegram-рубрики.\n"
             + "Твоя задача — не академический конспект, а короткая практическая карточка метода для занятия.\n"
+            + "Строй карточку только из EVIDENCE. Не достраивай недостающие материалы, шаги, таймеры, уровни, режимы, количество повторов или этапы прогрессии.\n"
+            + "Если в EVIDENCE нет хотя бы одного действия, материала/ясного «без дополнительных материалов» и наблюдаемого критерия — верни НЕТ_ДАННЫХ.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -1362,6 +1467,8 @@ def build_generation_prompt(
         return (
             rules
             + "\nРОЛЬ:\nТы — Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
+            + "Не представляй двуязычие, переключение языков или два языка как причину нарушений звукопроизношения, задержки речи или речевого расстройства.\n"
+            + "Различай языковые особенности билингвального ребенка и возможные коммуникативные трудности. Совет должен касаться реальной практики двуязычной семьи.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -1638,7 +1745,7 @@ async def generate_post_plain_from_evidence_async(
             out_lines and out_lines[0].strip().upper().startswith("НЕТ_ДАННЫХ")
         ):
             return False, "no_data_in_source"
-        return _validate_output(out, day_key=dk, rubric_format=rf, evidence_text=ev)
+        return _validate_output(out, day_key=dk, rubric_format=rf, audience=aud, evidence_text=ev)
 
     if prov == "none":
         return "", False, "provider:none"
@@ -1700,7 +1807,9 @@ async def generate_post_plain_from_evidence_async(
                     "💡 Вариант усложнения:. Это должна быть практическая карточка метода, "
                     "не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
                     "В шагах должны быть конкретные действия: покажите, назовите, попросите, повторите, "
-                    "выберите, сравните, отметьте или дайте. Без Markdown и без звездочек."
+                    "выберите, сравните, отметьте или дайте. Строй карточку только из EVIDENCE; "
+                    "не придумывай таймеры, зеркало, карточки, картинки, уровни, режимы, программы, количество повторов или этапы прогрессии. "
+                    "Если данных не хватает — верни НЕТ_ДАННЫХ. Без Markdown и без звездочек."
                 )
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))

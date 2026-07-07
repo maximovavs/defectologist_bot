@@ -1662,6 +1662,7 @@ async def amain() -> None:
                             provider=PROVIDER,
                             groq_key=GROQ_API_KEY,
                             gemini_key=GEMINI_API_KEY,
+                            rubric_id=rubric_id,
                         ),
                         timeout=IMAGE_PROMPT_TIMEOUT_SECONDS,
                     )

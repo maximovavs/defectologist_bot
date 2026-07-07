@@ -1589,24 +1589,62 @@ def _validate_image_prompt(prompt: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def _mentioned_visual_props(body_text: str) -> List[str]:
+    blob = _normalize_scan_text(body_text)
+    prop_map = [
+        ("book", ["книга", "книжка", "читать"]),
+        ("picture cards", ["карточ", "картин"]),
+        ("toy", ["игруш"]),
+        ("ball", ["мяч"]),
+        ("mirror", ["зеркал"]),
+        ("tablet", ["планшет"]),
+        ("computer", ["компьютер"]),
+        ("headphones", ["наушник"]),
+        ("notebook", ["блокнот", "тетрад"]),
+    ]
+    props: List[str] = []
+    for label, markers in prop_map:
+        if any(marker in blob for marker in markers) and label not in props:
+            props.append(label)
+    return props[:4]
+
+
 def build_image_prompt_prompt(
     title: str,
     body_text: str,
     audience: str,
+    rubric_id: str = "",
 ) -> str:
     safe_title = norm_space(title)
     safe_body = body_text.replace("\r\n", "\n").strip()
     safe_body = "\n".join([x.strip() for x in safe_body.split("\n") if x.strip()][:8])
     safe_body = safe_body[:900]
+    rubric = (rubric_id or "").strip().lower()
+
+    scene_guidance = {
+        "myth_fact": "one parent and one child; adult calmly models the correct word; child remains engaged in play",
+        "bilingual_corner": "parent and child with two books or cards representing two languages; natural family communication; no random floating letters",
+        "question_week": "parent observing a child during play or reading; optional small notebook; match the exact action",
+        "method_piggybank": "specialist and child in a professional activity setting; show only props explicitly mentioned in the post body",
+        "age_norms": "child performing the exact milestone from the post, such as pointing, naming an object, or using a gesture",
+        "tip_of_day": "one adult and one child performing the exact home activity or dialogue",
+    }.get(rubric, "one adult and one child performing the exact action from the post")
+
+    props = _mentioned_visual_props(safe_body)
+    prop_rule = ", ".join(props) if props else "no extra props unless clearly present in the post body"
 
     return (
         "You are an art director for Telegram educational covers.\n"
         "Read the Russian post title and short post body.\n"
         "Return exactly one short English image prompt for a friendly illustration.\n"
         "Requirements:\n"
-        "- 10 to 22 words\n"
-        "- describe subject + mood + style\n"
-        "- add style hints like soft pastel colors, 2d flat illustration, clean background only when relevant\n"
+        "- include native full-bleed 16:9 landscape composition, horizontal scene designed for 1280x720\n"
+        "- describe one clear interaction that matches the post topic\n"
+        "- use relevant props taken from the post only\n"
+        "- no portrait poster composition\n"
+        "- no blurred side panels\n"
+        "- no duplicate people\n"
+        "- no random letters or numbers\n"
         "- no quotes\n"
         "- no numbering\n"
         "- no explanations\n"
@@ -1615,7 +1653,13 @@ def build_image_prompt_prompt(
         "- no words\n"
         "- no logo\n"
         "- no watermark\n\n"
+        "- no elderly or Santa-like character unless explicitly requested\n"
+        "- no headphones unless the post mentions listening or headphones\n"
+        "- no holiday imagery unless the post is seasonal\n"
         f"Audience: {audience or 'parents'}\n"
+        f"Rubric: {rubric or 'unknown'}\n"
+        f"Scene guidance: {scene_guidance}\n"
+        f"Allowed props: {prop_rule}\n"
         f"Title: {safe_title}\n"
         f"Post body:\n{safe_body}\n"
     )
@@ -1628,9 +1672,10 @@ async def generate_image_prompt_async(
     provider: str,
     groq_key: str,
     gemini_key: str,
+    rubric_id: str = "",
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
-    prompt = build_image_prompt_prompt(title=title, body_text=body_text, audience=audience)
+    prompt = build_image_prompt_prompt(title=title, body_text=body_text, audience=audience, rubric_id=rubric_id)
 
     async def _try_groq() -> Tuple[str, bool, str]:
         if not groq_key:

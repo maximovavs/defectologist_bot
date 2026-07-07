@@ -279,6 +279,46 @@ def _contains_any_fragment(text: str, fragments: List[str]) -> Optional[str]:
     return None
 
 
+RISKY_MECHANISM_CLAIMS: List[Tuple[str, str, List[str]]] = [
+    (r"спастик\w*\s+диафрагм\w*", "спастика диафрагмы", ["спастик", "диафрагм"]),
+    (r"снима\w+\s+спастик\w*", "снимает спастику", ["снима", "спастик"]),
+    (r"тонус\w*\s+кор\w*", "тонус коры", ["тонус", "кор"]),
+    (r"повыша\w+\s+тонус\w*\s+кор\w*", "повышает тонус коры", ["повыша", "тонус", "кор"]),
+    (r"активир\w+\s+речев\w+\s+зон\w*", "активирует речевые зоны", ["активир", "речев", "зон"]),
+    (r"готов\w+\s+речев\w+\s+зон\w*", "готовит речевые зоны", ["готов", "речев", "зон"]),
+    (r"моторик\w*\s+рук\w*\s+перенос\w*", "моторика руки переносится", ["моторик", "рук", "перенос"]),
+    (r"перенос\w+\s+в\s+движени\w+\s+язык\w*", "переносится в движение языка", ["перенос", "движени", "язык"]),
+    (r"минуя\s+напряжени\w*", "минуя напряжение", ["минуя", "напряжени"]),
+    (r"язык\w*\s+вибрир\w+\s+свободн\w*", "язык вибрирует свободнее", ["язык", "вибрир", "свободн"]),
+    (r"формир\w+\s+нейронн\w+\s+связ\w*", "формирует нейронные связи", ["формир", "нейронн", "связ"]),
+    (r"запуска\w+\s+речев\w+\s+центр\w*", "запускает речевые центры", ["запуска", "речев", "центр"]),
+    (r"активир\w+\s+мозг\w*", "активирует мозг", ["активир", "мозг"]),
+    (r"стимулир\w+\s+мозгов\w+\s+зон\w*", "стимулирует мозговые зоны", ["стимулир", "мозгов", "зон"]),
+]
+
+
+def _all_terms_present(text: str, terms: List[str]) -> bool:
+    blob = _normalize_scan_text(text)
+    return all(_normalize_scan_text(term) in blob for term in terms if term)
+
+
+def validate_evidence_grounding(
+    output_text: str,
+    evidence_text: str,
+    rubric_format: str = "",
+) -> Tuple[bool, str]:
+    """Reject high-risk mechanism claims unless the mechanism is in evidence."""
+    out = _normalize_scan_text(output_text)
+    if not out:
+        return True, "ok"
+
+    for pattern, label, evidence_terms in RISKY_MECHANISM_CLAIMS:
+        if re.search(pattern, out, flags=re.IGNORECASE) and not _all_terms_present(evidence_text, evidence_terms):
+            return False, f"unsupported_mechanism_claim:{label}"
+
+    return True, "ok"
+
+
 def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -573,7 +613,12 @@ def _validate_question_week_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
-def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> Tuple[bool, str]:
+def _validate_output(
+    text: str,
+    day_key: str = "",
+    rubric_format: str = "",
+    evidence_text: str = "",
+) -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
         return False, "empty"
@@ -601,6 +646,10 @@ def _validate_output(text: str, day_key: str = "", rubric_format: str = "") -> T
 
     if _has_template_leak(out):
         return False, "template_leak"
+
+    grounded, grounding_reason = validate_evidence_grounding(out, evidence_text, rf)
+    if not grounded:
+        return False, grounding_reason
 
     if dk == "MO" or rf == "tip_of_day":
         return _validate_tip_of_day_output(out)
@@ -1114,6 +1163,9 @@ def _common_rules(max_chars: int) -> str:
         "Пиши по-русски.\n"
         f"Весь пост не должен превышать {max_chars} символов.\n"
         "Опирайся только на EVIDENCE ниже.\n"
+        "Любое физиологическое, неврологическое, причинное, диагностическое или терапевтическое объяснение должно быть прямо поддержано EVIDENCE.\n"
+        "Не придумывай, почему упражнение работает. Если механизм не объяснен в EVIDENCE, описывай только действие взрослого и наблюдаемую реакцию ребенка.\n"
+        "Предпочитай наблюдаемые результаты механизмам: ребенок повторяет слово, удерживает внимание, выбирает картинку, отвечает фразой.\n"
         "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
         "Опирайся преимущественно на перефразирование, не используй прямые цитаты из текста.\n"
         "Нельзя копировать длинные фразы из статьи.\n"
@@ -1586,7 +1638,7 @@ async def generate_post_plain_from_evidence_async(
             out_lines and out_lines[0].strip().upper().startswith("НЕТ_ДАННЫХ")
         ):
             return False, "no_data_in_source"
-        return _validate_output(out, day_key=dk, rubric_format=rf)
+        return _validate_output(out, day_key=dk, rubric_format=rf, evidence_text=ev)
 
     if prov == "none":
         return "", False, "provider:none"

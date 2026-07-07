@@ -57,6 +57,28 @@ class HashtagPolicyTest(unittest.TestCase):
         self.assertIn("#играем_и_говорим", final)
         self.assertNotIn("#что_угодно", final)
 
+    def test_bilingual_rubric_prioritizes_bilingual_tag(self):
+        plain = (
+            "Фраза на двух языках\n\n"
+            "🌍 Что помогает в двуязычной семье:\n"
+            "Когда дома звучат два языка, короткая фраза помогает ребёнку спокойно отвечать в игре.\n\n"
+            "Источник: Example\n"
+            "🔗 https://example.com\n"
+            "#фразовая_речь"
+        )
+
+        final = finalize_plain_post_for_publication(
+            plain,
+            day_key="TH",
+            source_domain="Example",
+            source_url="https://example.com",
+            max_chars=1000,
+            rubric_id="bilingual_corner",
+        )
+
+        self.assertIn("#билингвизм", final)
+        self.assertNotIn("#фразовая_речь", final)
+
 
 if __name__ == "__main__":
     unittest.main()

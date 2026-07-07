@@ -319,30 +319,35 @@ def validate_evidence_grounding(
     return True, "ok"
 
 
-PRO_CONCRETE_DETAIL_PATTERNS: List[Tuple[str, str, List[str]]] = [
-    (r"\bтаймер\w*", "таймер", ["таймер"]),
-    (r"\bзеркал\w*", "зеркало", ["зеркал"]),
-    (r"\bпланшет\w*", "планшет", ["планшет"]),
-    (r"\bкомпьютер\w*", "компьютер", ["компьютер"]),
-    (r"\bнаушник\w*", "наушники", ["наушник"]),
-    (r"\bприложени\w*", "приложение", ["приложени"]),
-    (r"\bпрограмм\w*", "программа", ["программ"]),
-    (r"\bуровен\w*", "уровень", ["уровен"]),
-    (r"\bрежим\w*", "режим", ["режим"]),
-    (r"\bсекунд\w*", "секунд", ["секунд"]),
-    (r"\bминут\w*", "минут", ["минут"]),
-    (r"\bраз(?:а|)\s+повтор\w*", "раз повторить", ["раз", "повтор"]),
+PRO_CONCRETE_DETAIL_PATTERNS: List[Tuple[str, str, List[List[str]]]] = [
+    (r"\bтаймер\w*|\btimer\b", "таймер", [["таймер"], ["timer"]]),
+    (r"\bзеркал\w*|\bmirror\b", "зеркало", [["зеркал"], ["mirror"]]),
+    (r"\bпланшет\w*|\btablet\b", "планшет", [["планшет"], ["tablet"]]),
+    (r"\bкомпьютер\w*|\bcomputer\b", "компьютер", [["компьютер"], ["computer"]]),
+    (r"\bнаушник\w*|\bheadphones?\b|\bheadset\b", "наушники", [["наушник"], ["headphones"], ["headphone"], ["headset"]]),
+    (r"\bприложени\w*|\bapp\b|\bapplication\b", "приложение", [["приложени"], ["application"], ["app"]]),
+    (r"\bпрограмм\w*|\bprogram\b|\bsoftware\b", "программа", [["программ"], ["program"], ["software"]]),
+    (r"\bуровен\w*|\blevel\b", "уровень", [["уровен"], ["level"]]),
+    (r"\bрежим\w*|\bmode\b", "режим", [["режим"], ["mode"]]),
+    (r"\bсекунд\w*|\bseconds?\b|\bsec\b", "секунд", [["секунд"], ["second"], ["seconds"], ["sec"]]),
+    (r"\bминут\w*|\bminutes?\b|\bmin\b", "минут", [["минут"], ["minute"], ["minutes"], ["min"]]),
+    (r"\bкарточ\w*|\bкартин\w*|\bcards?\b|\bpictures?\b|\bimages?\b", "карточки/картинки", [["карточ"], ["картин"], ["cards"], ["picture cards"], ["pictures"], ["images"]]),
+    (r"\bраз(?:а|)\s+повтор\w*", "раз повторить", [["раз", "повтор"], ["times", "repeat"]]),
 ]
 
-BILINGUAL_TERMS = [
-    "двуязычие",
-    "билингвизм",
-    "два языка",
-    "домашний язык",
-    "переключение языков",
-    "язык семьи",
-    "язык среды",
-    "многоязыч",
+BILINGUAL_TERM_PATTERNS = [
+    r"двуязыч\w*",
+    r"билингв\w*",
+    r"многоязыч\w*",
+    r"дв[ау]\s+язык\w*",
+    r"двух\s+язык\w*",
+    r"домашн\w*\s+язык\w*",
+    r"язык\w*\s+семь\w*",
+    r"язык\w*\s+сред\w*",
+    r"переключ\w*.{0,40}между\s+язык\w*",
+    r"переключ\w*\s+язык\w*",
+    r"(русск\w*|english|английск\w*|greek|греческ\w*|another language).{0,80}(семь\w*|дом\w*|сад\w*|kindergarten|family)",
+    r"(семь\w*|дом\w*|сад\w*|kindergarten|family).{0,80}(русск\w*|english|английск\w*|greek|греческ\w*|another language)",
 ]
 
 PARENT_RISK_MARKERS = [
@@ -357,6 +362,9 @@ PARENT_RISK_MARKERS = [
 
 PARENT_SAFETY_ACTIONS = [
     "обсудить с педиатром",
+    "обсудить это с педиатром",
+    "обсудить с логопедом",
+    "педиатром или логопедом",
     "обратиться к логопеду",
     "проверить слух",
     "проконсультироваться со специалистом",
@@ -379,8 +387,10 @@ def validate_pro_concrete_details(output_text: str, evidence_text: str) -> Tuple
     out = _normalize_scan_text(output_text)
     if not out:
         return True, "ok"
-    for pattern, label, evidence_terms in PRO_CONCRETE_DETAIL_PATTERNS:
-        if re.search(pattern, out, flags=re.IGNORECASE) and not _all_terms_present(evidence_text, evidence_terms):
+    evidence = _normalize_scan_text(evidence_text)
+    for pattern, label, evidence_aliases in PRO_CONCRETE_DETAIL_PATTERNS:
+        has_evidence_concept = any(all(term in evidence for term in alias_terms) for alias_terms in evidence_aliases)
+        if re.search(pattern, out, flags=re.IGNORECASE) and not has_evidence_concept:
             return False, f"pro_unsupported_concrete_detail:{label}"
     return True, "ok"
 
@@ -389,26 +399,52 @@ def _has_pro_minimum_evidence(evidence_text: str) -> bool:
     evidence = _normalize_scan_text(evidence_text)
     action_ok = bool(
         re.search(
-            r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|игра|дела)\w*",
+            r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|игра|дела|show|ask|repeat|name|choose|select|compare|listen|read|tell|play|practice|perform)\w*",
             evidence,
             flags=re.IGNORECASE,
         )
     )
     material_ok = bool(
         re.search(
-            r"(без дополнительных материалов|материал\w*|карточ\w*|картин\w*|игруш\w*|мяч\w*|зеркал\w*|компьютер\w*|планшет\w*|книга\w*|предмет\w*)",
+            r"(без дополнительных материалов|no additional materials|материал\w*|material\w*|карточ\w*|card\w*|картин\w*|picture\w*|image\w*|игруш\w*|toy\w*|мяч\w*|ball\w*|зеркал\w*|mirror\w*|компьютер\w*|computer\w*|планшет\w*|tablet\w*|книга\w*|book\w*|предмет\w*|object\w*)",
             evidence,
             flags=re.IGNORECASE,
         )
     )
     criterion_ok = bool(
         re.search(
-            r"\b(смотр|наблюд|оцени|критери|получа|реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима))\w*",
+            r"\b(смотр|наблюд|оцени|критери|получа|observe|watch|assess|notice|реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима)|child\s+(repeats?|names?|chooses?|selects?|answers?|maintains?|understands?))\w*",
             evidence,
             flags=re.IGNORECASE,
         )
     )
     return action_ok and material_ok and criterion_ok
+
+
+def _has_parent_specific_risk(blob: str) -> bool:
+    lines = [line.strip() for line in (blob or "").split("\n") if line.strip()]
+    specific_patterns = [
+        r"\bмой\s+реб[её]нок.{0,60}мало\s+говор",
+        r"\bреб[её]нок.{0,60}мало\s+говор",
+        r"\bреб[её]нок.{0,60}перестал\w*\s+говор",
+        r"\bперестал\w*\s+говор",
+        r"\b(он|она).{0,40}потерял\w*.{0,40}навык",
+        r"\bреб[её]нок.{0,60}потерял\w*.{0,40}навык",
+        r"\bпотерял\w*.{0,20}(уже\s+)?появивш\w*.{0,30}навык",
+        r"\bреб[её]нок.{0,60}не\s+понимает.{0,40}(бытов\w*\s+просьб|реч)",
+    ]
+    general_exclusions = [
+        r"^\W*миф\s*:",
+        r"не\s+вызыва\w*.{0,20}задержк\w*\s+реч",
+        r"статья\s+рассматривает.{0,40}задержк\w*\s+реч",
+        r"задержк\w*\s+реч\w*\s+может\s+иметь\s+разн\w*\s+причин",
+    ]
+    for line in lines:
+        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in general_exclusions):
+            continue
+        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in specific_patterns):
+            return True
+    return False
 
 
 def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
@@ -417,7 +453,7 @@ def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
     if blanket:
         return False, "blanket_reassurance"
 
-    if not _contains_any_fragment(blob, PARENT_RISK_MARKERS):
+    if not _has_parent_specific_risk(blob):
         return True, "ok"
 
     if not _contains_any_fragment(blob, PARENT_SAFETY_ACTIONS):
@@ -438,7 +474,7 @@ def _validate_politeness_title(text: str) -> Tuple[bool, str]:
 
 def _validate_bilingual_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
     blob = _normalize_scan_text(text)
-    if not _contains_any_fragment(blob, BILINGUAL_TERMS):
+    if not any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in BILINGUAL_TERM_PATTERNS):
         return False, "bilingual_topic_mismatch"
 
     if "🌍 что помогает в двуязычной семье" not in blob:
@@ -447,6 +483,8 @@ def _validate_bilingual_output(text: str, evidence_text: str = "") -> Tuple[bool
     false_cause_patterns = [
         r"(двуязычи\w*|билингвизм|два\s+язык\w*|переключени\w+\s+язык\w*)\s+\w{0,20}\s*(вызыва\w+|привод\w+|станов\w+\s+причин\w+)",
         r"из-за\s+(двуязычи\w*|билингвизм\w*|двух\s+язык\w*)",
+        r"(двуязычи\w*|два\s+язык\w*|двух\s+язык\w*|русск\w*.{0,40}английск\w*|английск\w*.{0,40}русск\w*).{0,80}(вызыва\w+|привод\w+|меша\w+|из-за).{0,80}(нарушени\w+\s+звуков|плохо\s+говор|задержк\w*\s+реч)",
+        r"переключ\w*.{0,80}(меша\w+|поэтому|в\s+итоге).{0,80}(не\s+может|плохо\s+говор|произнест)",
     ]
     if any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in false_cause_patterns):
         return False, "bilingual_false_causality"
@@ -923,137 +961,6 @@ def _pro_skill_from_text(text: str) -> str:
     return "фразовая речь"
 
 
-def _pro_materials_from_text(text: str) -> str:
-    blob = _normalize_scan_text(text)
-    found: List[str] = []
-    candidates = [
-        ("карточки", ["карточ"]),
-        ("предметы", ["предмет"]),
-        ("зеркало", ["зеркал"]),
-        ("мяч", ["мяч"]),
-        ("картинки", ["картин", "изображ"]),
-        ("фишки", ["фишк", "жетон"]),
-        ("таймер", ["таймер", "время"]),
-    ]
-    for label, probes in candidates:
-        if any(probe in blob for probe in probes) and label not in found:
-            found.append(label)
-    if len(found) < 2:
-        for label in ["карточки", "картинки", "фишки"]:
-            if label not in found:
-                found.append(label)
-            if len(found) >= 3:
-                break
-    return ", ".join(found[:4]) + "."
-
-
-def _pro_goal_for_skill(skill: str, source_text: str) -> str:
-    if skill == "фонематический слух":
-        return "Учить ребёнка слышать и выделять заданный звук в слове."
-    if skill == "артикуляция":
-        return "Учить ребёнка удерживать нужный артикуляционный уклад и контролировать движение."
-    if skill == "слоговая структура":
-        return "Учить ребёнка повторять слово без потери слогов и перестановок."
-    if skill == "словарь":
-        return "Расширять словарь через называние предметов, действий или признаков."
-    if skill == "фразовая речь":
-        return "Учить ребёнка отвечать короткой фразой по образцу взрослого."
-    if skill == "грамматический строй":
-        return "Учить ребёнка выбирать правильную грамматическую форму в короткой фразе."
-    if skill == "дыхание":
-        return "Тренировать плавный речевой выдох без напряжения."
-    if skill == "связная речь":
-        return "Учить ребёнка последовательно рассказывать о картинке или событии."
-    sentences = _split_sentences_for_structure(source_text)
-    return _clip_text_for_structure(sentences[0], 120) if sentences else "Отработать один конкретный речевой навык в короткой игре."
-
-
-def _pro_steps_for_skill(skill: str) -> List[str]:
-    if skill == "фонематический слух":
-        return [
-            "Разложите 6-8 карточек перед ребёнком.",
-            "Назовите целевой звук и попросите выбрать картинку, где он слышится.",
-            "Попросите ребёнка повторить слово и отметьте точность выбора.",
-        ]
-    if skill == "артикуляция":
-        return [
-            "Покажите артикуляционный уклад перед зеркалом.",
-            "Попросите ребёнка повторить положение губ или языка 3-4 раза.",
-            "Отметьте, удерживает ли ребёнок уклад без лишнего напряжения.",
-        ]
-    if skill == "слоговая структура":
-        return [
-            "Покажите картинку и назовите слово по слогам.",
-            "Попросите ребёнка повторить слово в том же ритме.",
-            "Сравните повтор с образцом и мягко исправьте пропущенный слог.",
-        ]
-    if skill == "словарь":
-        return [
-            "Положите перед ребёнком 5-7 предметов или картинок.",
-            "Попросите выбрать нужный предмет и назвать его.",
-            "Дайте короткую подсказку и отметьте самостоятельные называния.",
-        ]
-    if skill == "грамматический строй":
-        return [
-            "Покажите две картинки с разным количеством предметов.",
-            "Попросите ребёнка выбрать правильную форму слова в короткой фразе.",
-            "Повторите фразу вместе и сравните окончание с образцом.",
-        ]
-    if skill == "дыхание":
-        return [
-            "Покажите спокойный вдох носом и длинный мягкий выдох.",
-            "Попросите ребёнка повторить выдох на слоге или коротком слове.",
-            "Отметьте, получается ли говорить без добора воздуха внутри слова.",
-        ]
-    if skill == "связная речь":
-        return [
-            "Покажите картинку и назовите, кто на ней действует.",
-            "Попросите ребёнка ответить, что произошло сначала и потом.",
-            "Дайте опору вопросом и отметьте связность короткого рассказа.",
-        ]
-    return [
-        "Покажите ребёнку картинку или предмет и назовите образец ответа.",
-        "Попросите повторить ответ короткой фразой.",
-        "Дайте подсказку при ошибке и отметьте более точную повторную попытку.",
-    ]
-
-
-def _pro_criterion_for_skill(skill: str) -> str:
-    if skill == "фонематический слух":
-        return "Ребёнок выбирает нужную картинку и повторяет слово без потери целевого звука."
-    if skill == "артикуляция":
-        return "Ребёнок удерживает артикуляцию несколько секунд и исправляет ошибку после подсказки."
-    if skill == "слоговая структура":
-        return "Ребёнок повторяет слово с нужным количеством слогов и без перестановок."
-    if skill == "словарь":
-        return "Ребёнок называет или выбирает нужную картинку после инструкции."
-    if skill == "грамматический строй":
-        return "Ребёнок отвечает фразой с нужной формой слова после образца или подсказки."
-    if skill == "дыхание":
-        return "Ребёнок произносит слог или слово на плавном выдохе без заметного напряжения."
-    if skill == "связная речь":
-        return "Ребёнок удерживает последовательность и отвечает фразой, а не отдельным словом."
-    return "Ребёнок выполняет действие по инструкции и исправляет ошибку после подсказки."
-
-
-def _pro_variation_for_skill(skill: str) -> str:
-    if skill == "фонематический слух":
-        return "Попросите ребёнка придумать ещё одно слово с этим звуком."
-    if skill == "артикуляция":
-        return "Усложните задачу: удержать уклад и затем произнести слог по образцу."
-    if skill == "слоговая структура":
-        return "Усложните задачу словами с большим количеством слогов."
-    if skill == "словарь":
-        return "Попросите назвать признак предмета или действие с ним."
-    if skill == "грамматический строй":
-        return "Дайте новую картинку и попросите выбрать форму без готового образца."
-    if skill == "дыхание":
-        return "Усложните задачу: произнести короткую фразу на одном плавном выдохе."
-    if skill == "связная речь":
-        return "Попросите ребёнка добавить один новый эпизод к рассказу."
-    return "Усложните задачу: уберите одну подсказку и попросите выполнить действие самостоятельно."
-
-
 def _normalize_pro_structure(text: str) -> str:
     """Normalize pro_friendly layout without inventing missing method details."""
     lines = _extract_nonempty_lines(text)
@@ -1280,6 +1187,7 @@ def _common_rules(max_chars: int) -> str:
         "Твоя задача — вытащить практическую суть: игру, упражнение, прием, последовательность действий, примеры слов, формулировки для родителя.\n"
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
+        "Если прямо описываешь ребёнка, у которого пропал навык, есть вопросы к пониманию речи, ребёнок перестал говорить или долго нет прогресса, добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.»\n"
         "Не используй Markdown и кодовые блоки.\n"
         "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
         "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
@@ -1574,7 +1482,7 @@ def _clean_image_prompt(text: str) -> str:
     return s
 
 
-def _validate_image_prompt(prompt: str) -> Tuple[bool, str]:
+def _validate_image_prompt(prompt: str, body_text: str = "", rubric_id: str = "") -> Tuple[bool, str]:
     p = _clean_image_prompt(prompt)
     if not p:
         return False, "empty"
@@ -1586,6 +1494,27 @@ def _validate_image_prompt(prompt: str) -> Tuple[bool, str]:
         return False, "non_english"
     if any(marker in p for marker in ["EVIDENCE", "ШАБЛОН", "#пример_тега"]):
         return False, "template_leak"
+
+    prompt_blob = _normalize_scan_text(p)
+    body_blob = _normalize_scan_text(body_text)
+
+    seasonal_or_elderly_context = bool(
+        re.search(r"(новогод|рождеств|праздник|санта|дед мороз|пожил|бабуш|дедуш|elderly|grandparent|holiday|christmas|santa)", body_blob)
+    )
+    if re.search(r"\b(santa|father christmas|christmas|holiday|elderly (?:man|woman))\b", prompt_blob) and not seasonal_or_elderly_context:
+        return False, "visual_prompt_topic_mismatch"
+
+    listening_context = bool(re.search(r"(слуш|аудио|звук|фонемат|наушник|headphones?|headset|listen|audio|sound)", body_blob))
+    if re.search(r"\b(headphones?|headset)\b", prompt_blob) and not listening_context:
+        return False, "visual_prompt_topic_mismatch"
+
+    letter_context = bool(
+        re.search(r"(букв|чтен|читать|прочит|звукобукв|звук\s*[-—]\s*букв|letter|reading|sound-letter)", body_blob)
+    )
+    random_letters = re.search(r"\b(random|floating|scattered)\s+(?:letters?|numbers?|alphabet|abc)\b", prompt_blob)
+    letter_props = re.search(r"\b(letter|alphabet|abc)\s+(?:cards?|blocks?|tiles?)\b", prompt_blob)
+    if (random_letters or letter_props) and not letter_context:
+        return False, "visual_prompt_topic_mismatch"
     return True, "ok"
 
 
@@ -1682,13 +1611,15 @@ async def generate_image_prompt_async(
             return "", False, "GROQ_API_KEY_missing"
         raw = await groq_chat(prompt, groq_key)
         cleaned = _clean_image_prompt(raw)
-        ok, reason = _validate_image_prompt(cleaned)
+        ok, reason = _validate_image_prompt(cleaned, body_text=body_text, rubric_id=rubric_id)
         if ok:
             return cleaned, True, "ok:groq"
         repair_prompt = prompt + "\nReturn only one English prompt line. Nothing else."
+        if reason == "visual_prompt_topic_mismatch":
+            repair_prompt += " Remove unrelated Santa, holiday, elderly, headphones, headset, random letters, or random numbers unless they are explicitly present in the post body."
         raw2 = await groq_chat(repair_prompt, groq_key)
         cleaned2 = _clean_image_prompt(raw2)
-        ok2, reason2 = _validate_image_prompt(cleaned2)
+        ok2, reason2 = _validate_image_prompt(cleaned2, body_text=body_text, rubric_id=rubric_id)
         if ok2:
             return cleaned2, True, "ok:groq_retry"
         return "", False, f"invalid_groq_image_prompt:{reason2}"
@@ -1698,7 +1629,7 @@ async def generate_image_prompt_async(
             return "", False, "GEMINI_API_KEY_missing"
         raw = await gemini_generate(prompt, gemini_key)
         cleaned = _clean_image_prompt(raw)
-        ok, reason = _validate_image_prompt(cleaned)
+        ok, reason = _validate_image_prompt(cleaned, body_text=body_text, rubric_id=rubric_id)
         if ok:
             return cleaned, True, f"ok:gemini:{GEMINI_MODELS[0]}"
         return "", False, f"invalid_gemini_image_prompt:{reason}"
@@ -1823,6 +1754,13 @@ async def generate_post_plain_from_evidence_async(
                     "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
                     "никаких обзоров темы и общих формулировок. "
                     "Сохрани блоки 🧩, 👄 и 💡."
+                )
+
+            if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
+                repair_prompt += (
+                    "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
+                    "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
+                    "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
                 )
 
             if dk == "FR" or rf == "question_week":

@@ -180,6 +180,7 @@ SOFT_SKIP_REASONS = {
     "missing_parent_safety_note",
     "blanket_reassurance",
     "misleading_politeness_framing",
+    "visual_prompt_topic_mismatch",
     "unknown_source_id",
     "llm_invalid_output",
     "final_invalid_output",
@@ -511,16 +512,28 @@ CONTROLLED_THEMATIC_TAGS: List[tuple[List[str], str]] = [
 ]
 
 
-def _controlled_thematic_tag(body_text: str) -> str:
+def _controlled_thematic_tag(body_text: str, day_key: str = "", rubric_id: str = "") -> str:
     blob = (body_text or "").lower().replace("ё", "е")
+    dk = (day_key or "").strip().upper()
+    rubric = (rubric_id or "").strip().lower()
+    bilingual_markers = ["билингв", "двуязыч", "два языка", "двух язык", "домашний язык"]
+    if (rubric in {"bilingual_corner", "bilingual_parents"} or dk == "TH") and any(
+        marker in blob for marker in bilingual_markers
+    ):
+        return "#билингвизм"
     for markers, tag in CONTROLLED_THEMATIC_TAGS:
         if any(marker in blob for marker in markers):
             return tag
     return ""
 
 
-def _filter_relevant_thematic_tags(tags: List[str], body_text: str) -> List[str]:
-    controlled = _controlled_thematic_tag(body_text)
+def _filter_relevant_thematic_tags(
+    tags: List[str],
+    body_text: str,
+    day_key: str = "",
+    rubric_id: str = "",
+) -> List[str]:
+    controlled = _controlled_thematic_tag(body_text, day_key=day_key, rubric_id=rubric_id)
     return [controlled] if controlled else []
 
 
@@ -638,6 +651,7 @@ def finalize_plain_post_for_publication(
     source_domain: str,
     source_url: str,
     max_chars: int,
+    rubric_id: str = "",
 ) -> str:
     raw_lines = (plain_text or "").replace("\r\n", "\n").split("\n")
     while raw_lines and not raw_lines[-1].strip():
@@ -653,7 +667,7 @@ def finalize_plain_post_for_publication(
     age_tag = _build_age_tag(age_value)
 
     body_text = "\n".join(body_lines).strip()
-    thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text)
+    thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text, day_key=day_key, rubric_id=rubric_id)
 
     final_tags: List[str] = []
     for tag in [rubric_tag, age_tag, *thematic_tags]:
@@ -1549,6 +1563,7 @@ async def amain() -> None:
                     source_domain=sd,
                     source_url=canon,
                     max_chars=POST_MAX_CHARS,
+                    rubric_id=rubric_id,
                 )
 
                 if not plain or _looks_incomplete_final_body(_body_without_footer(plain)):

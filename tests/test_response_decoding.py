@@ -33,6 +33,15 @@ class ResponseDecodingTest(unittest.TestCase):
 
         self.assertIn("Логопедическая", _decode_response_text(r))
 
+    def test_windows_1251_html_without_charset_decodes_to_readable_russian(self):
+        html = "<html><body>Логопедическая игра</body></html>"
+        r = _response(html.encode("cp1251"), "text/html")
+
+        decoded = _decode_response_text(r)
+
+        self.assertIn("Логопедическая игра", decoded)
+        self.assertNotIn("Ëîãî", decoded)
+
     def test_incorrect_declared_charset_does_not_choose_mojibake(self):
         html = "<html><body>Занятие: ребенок выбирает картинку</body></html>"
         r = _response(html.encode("utf-8"), "text/html; charset=iso-8859-1")

@@ -37,7 +37,6 @@ from src.publisher.dedup_policy import (
 
 import feedparser
 import requests
-from requests.utils import get_encoding_from_headers
 import urllib3
 import yaml
 from bs4 import BeautifulSoup
@@ -882,10 +881,16 @@ def _decode_candidate_score(text: str) -> tuple[int, int]:
     return (text.count("�") * 10 + marker_count * 6, marker_count)
 
 
+def _explicit_charset_from_headers(headers: requests.structures.CaseInsensitiveDict) -> str:
+    content_type = headers.get("Content-Type", "") or ""
+    match = re.search(r"(?:^|;)\s*charset\s*=\s*['\"]?([^;'\"]+)", content_type, flags=re.IGNORECASE)
+    return (match.group(1).strip() if match else "")
+
+
 def _decode_response_text(r: requests.Response) -> str:
     encodings: List[str] = []
 
-    header_encoding = get_encoding_from_headers(r.headers)
+    header_encoding = _explicit_charset_from_headers(r.headers)
     if header_encoding:
         encodings.append(header_encoding)
 

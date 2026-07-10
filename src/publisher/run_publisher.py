@@ -182,6 +182,11 @@ SOFT_SKIP_REASONS = {
     "pro_too_abstract",
     "pro_old_academic_structure",
     "pro_risky_manual_technique",
+    "pro_generic_benefit",
+    "pro_missing_method_card_heading",
+    "pro_too_short",
+    "pro_no_data_in_source",
+    "pro_template_leak",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
     "bilingual_false_causality",
@@ -217,6 +222,11 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_risky_manual_technique",
     "pro_unsupported_concrete_detail",
     "pro_unsupported_numeric_detail",
+    "pro_generic_benefit",
+    "pro_missing_method_card_heading",
+    "pro_too_short",
+    "pro_no_data_in_source",
+    "pro_template_leak",
 }
 
 PRO_VALIDATION_SKIP_PREFIXES = (
@@ -365,12 +375,26 @@ def _extract_pro_validation_skip_reason(llm_note: str) -> str:
     note = norm_space(llm_note)
     if not note:
         return ""
-    pieces = re.split(r"\s*\|\s*", note)
-    for piece in pieces:
-        candidate = piece
-        if ":" in candidate:
-            candidate = candidate.split(":", 1)[1]
+
+    reason_aliases = {
+        "too_short": "pro_too_short",
+        "no_data_in_source": "pro_no_data_in_source",
+        "template_leak": "pro_template_leak",
+    }
+
+    candidates = []
+    candidates.extend(re.findall(r"invalid_(?:groq|groq_retry|gemini|gemini_retry):([^|]+)", note))
+    candidates.extend(re.split(r"\s*\|\s*", note))
+
+    for candidate in candidates:
         candidate = candidate.strip()
+        if "=" in candidate:
+            candidate = candidate.split("=", 1)[1].strip()
+        if candidate.startswith("invalid_") and ":" in candidate:
+            candidate = candidate.split(":", 1)[1].strip()
+
+        candidate = reason_aliases.get(candidate, candidate)
+
         if candidate in PRO_VALIDATION_SKIP_REASONS:
             return candidate
         if any(candidate.startswith(prefix + ":") for prefix in PRO_VALIDATION_SKIP_PREFIXES):

@@ -808,6 +808,81 @@ PRO_FRIENDLY_REPAIR_INSTRUCTION = (
 )
 
 
+def build_pro_friendly_repair_prompt(
+    base_prompt: str,
+    previous_output: str,
+    reason: str,
+) -> str:
+    reason = (reason or "").strip()
+    if reason == "no_data_in_source":
+        return ""
+
+    reason_rules = {
+        "pro_missing_goal": (
+            "Добавь точную строку «🎯 Цель:». Напиши одну короткую наблюдаемую цель из EVIDENCE. "
+            "Не создавай новую активность."
+        ),
+        "pro_missing_materials": (
+            "Добавь точную строку «🧰 Материалы:». Используй только реквизит из EVIDENCE. "
+            "«без специальных материалов» можно писать только если это поддержано EVIDENCE."
+        ),
+        "pro_missing_steps": (
+            "Добавь ровно шаги 1., 2., 3. Используй только действия из EVIDENCE. "
+            "Не добавляй реквизит, числа, время или повторы."
+        ),
+        "pro_missing_observation_criterion": (
+            "Добавь «✅ На что смотреть:». Используй наблюдаемую реакцию ребёнка из EVIDENCE."
+        ),
+        "pro_risky_manual_technique": (
+            "Удали рискованную ручную или внутриротовую технику. "
+            "Если безопасной evidence-grounded активности не остаётся, верни НЕТ_ДАННЫХ."
+        ),
+        "pro_too_abstract": (
+            "Замени общие объяснения на действия из EVIDENCE и наблюдаемую реакцию ребёнка."
+        ),
+        "pro_old_academic_structure": (
+            "Сохрани полезное содержание, но перестрой его в точные headings методической карточки."
+        ),
+        "too_short": (
+            "Дополни только отсутствующие обязательные разделы из EVIDENCE."
+        ),
+        "pro_too_short": (
+            "Дополни только отсутствующие обязательные разделы из EVIDENCE."
+        ),
+    }
+
+    if reason.startswith("pro_unsupported_numeric_detail:"):
+        reason_rules[reason] = (
+            "Удали неподдержанное число и единицу. Не заменяй их другим числом. "
+            "Перепиши инструкцию без длительности или количества. Например, если это поддержано смыслом EVIDENCE: "
+            "«Проведите короткую игру и завершите её, пока ребёнок сохраняет интерес.»"
+        )
+    elif reason.startswith("pro_unsupported_concrete_detail:"):
+        reason_rules[reason] = (
+            "Удали неподдержанный реквизит или оборудование. Не подставляй другой реквизит."
+        )
+
+    specific_rule = reason_rules.get(reason, "")
+    previous = (previous_output or "").strip()
+    if len(previous) > 1200:
+        previous = previous[:1200].rsplit("\n", 1)[0].strip()
+
+    return (
+        base_prompt
+        + "\n\nПОВТОРИ pro_friendly method card.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + "Предыдущий вариант:\n"
+        + previous
+        + "\n\n"
+        + "Сохрани уже валидные evidence-grounded части. Не придумывай то, чего нет в EVIDENCE. "
+        + "Rebuild the method card only from EVIDENCE. Do not invent materials, numbers, timing, equipment, levels, or software modes. "
+        + "Если EVIDENCE не поддерживает полную карточку метода, верни НЕТ_ДАННЫХ.\n"
+        + specific_rule
+        + "\n"
+        + PRO_FRIENDLY_REPAIR_INSTRUCTION
+    )
+
+
 def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -1331,7 +1406,14 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
 # Prompt templates
 # -----------------------
 
-def _common_rules(max_chars: int) -> str:
+def _common_rules(max_chars: int, rubric_format: str = "") -> str:
+    rf = (rubric_format or "").strip().lower()
+    numbered_list_rule = (
+        "Для pro_friendly под «🔁 Как провести:» обязательно дай ровно 3 коротких шага: 1., 2., 3. "
+        "Не добавляй шаг 4. и более длинный список, если это прямо не требуется EVIDENCE.\n"
+        if rf == "pro_friendly"
+        else "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
+    )
     return (
         "Ты — практикующий Логопед-дефектолог и сильный Telegram-редактор.\n"
         "Пиши по-русски.\n"
@@ -1357,7 +1439,7 @@ def _common_rules(max_chars: int) -> str:
         "Не используй Markdown и кодовые блоки.\n"
         "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
         "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
-        "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
+        + numbered_list_rule +
         "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
         "Используй формат вроде: #билингвизм #запуск_речи\n"
         "Никогда не пиши больше двух тематических хештегов.\n"
@@ -1403,7 +1485,7 @@ def build_generation_prompt(
     aud = (audience or "parents").strip().lower()
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
-    rules = _common_rules(max_chars)
+    rules = _common_rules(max_chars, rubric_format=rf)
 
     if aud == "pros":
         template = (
@@ -1414,19 +1496,22 @@ def build_generation_prompt(
             "Не используй заголовки Введение, Главные выводы, Практическое применение, Коротко, Суть, Выводы.\n\n"
             "👩‍⚕️ Аудитория: специалисты\n\n"
             "🎯 Цель:\n"
-            "1 предложение с конкретным навыком: фонематический слух, артикуляция, слоговая структура, словарь, "
-            "фразовая речь, грамматический строй, дыхание или связная речь.\n\n"
+            "Всегда напечатай точный заголовок «🎯 Цель:». Затем 1 короткое предложение: один наблюдаемый навык только из EVIDENCE. Не используй общую цель.\n\n"
             "🧰 Материалы:\n"
-            "1 короткая строка: карточки, предметы, зеркало, мяч, картинки, фишки, таймер — только то, что подходит.\n\n"
+            "Всегда напечатай точный заголовок «🧰 Материалы:». Укажи только материалы, прямо названные в EVIDENCE. "
+            "Если validator поддерживает отсутствие реквизита, напиши: без специальных материалов. "
+            "Никогда не придумывай таймер, длительность, число повторов, карточки, зеркало, приложение, уровень, режим или оборудование.\n\n"
             "🔁 Как провести:\n\n"
+            "Ровно 3 коротких шага, каждый только из EVIDENCE:\n"
             "1. Конкретное действие специалиста.\n"
             "2. Конкретная инструкция ребёнку.\n"
-            "3. Как отметить или исправить ответ.\n\n"
+            "3. Как обработать или отметить ответ.\n"
+            "Не добавляй числа, длительность или количество повторов, если они не указаны в EVIDENCE.\n\n"
             "✅ На что смотреть:\n"
-            "1 предложение с наблюдаемым критерием: ребёнок различает звук, повторяет слово, удерживает артикуляцию, "
-            "отвечает фразой, выбирает нужную картинку или исправляет ошибку после подсказки.\n\n"
+            "Всегда напечатай точный заголовок «✅ На что смотреть:». 1 предложение: наблюдаемая реакция ребёнка, уже поддержанная EVIDENCE.\n\n"
             "💡 Вариант усложнения:\n"
-            "1 практическая вариация, не общий benefit.\n\n"
+            "Только безопасная вариация из EVIDENCE. Если её нет, усложни только языковую сложность без новых материалов, времени, повторов или оборудования. "
+            "Если даже это не поддержано, верни НЕТ_ДАННЫХ.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )
@@ -1846,6 +1931,7 @@ async def generate_post_plain_from_evidence_async(
     aud = (audience or "parents").strip().lower()
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
+    is_pro_format = aud == "pros" or rf == "pro_friendly"
 
     ev = (evidence_text or "").strip()
     if len(ev) < 260:
@@ -1871,7 +1957,7 @@ async def generate_post_plain_from_evidence_async(
         s = re.sub(r"\n```$", "", s)
         s = _strip_placeholder_artifacts(s)
         s = _strip_markdown_artifacts(s)
-        if aud == "pros" or rf == "pro_friendly":
+        if is_pro_format:
             s = _normalize_pro_structure(s)
         s = _ensure_source_and_link(
             text=s,
@@ -1893,74 +1979,103 @@ async def generate_post_plain_from_evidence_async(
         return "", False, "provider:none"
 
     groq_err = ""
+    groq_repair_prompt = ""
+
+    def build_generic_repair_prompt(reason: str) -> str:
+        repair = (
+            prompt
+            + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+            + reason
+            + ". "
+            + "Сделай текст живее, плотнее и конкретнее. "
+            + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
+            + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
+            + "Сразу иди к сути и не делай текст слишком коротким. "
+        )
+
+        if dk == "MO" or rf == "tip_of_day":
+            repair += (
+                "Для Monday обязательно: первая строка — один прикладной совет, "
+                "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
+                "никаких обзоров темы и общих формулировок. "
+                "Сохрани блоки 🧩, 👄 и 💡."
+            )
+
+        if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
+            repair += (
+                "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
+                "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
+                "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
+            )
+
+        if dk == "FR" or rf == "question_week":
+            repair += (
+                "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
+                "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
+                "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
+                "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+                "Запрещено оставлять «...», «…» или пустой блок. "
+                "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
+            )
+
+        if dk == "SU" or rf == "age_norms":
+            repair += (
+                "Для Sunday обязательно: только возрастные ориентиры и milestones, "
+                "без патологической, диагностической и коррекционной лексики, "
+                "с фразой «Каждый ребенок развивается индивидуально»."
+            )
+
+        return repair
+
+    def build_question_week_repair_prompt(reason: str) -> str:
+        return (
+            prompt
+            + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+            + reason
+            + ". "
+            + "Для Friday/question_week обязательно сделай полноценный Telegram Q&A-пост: "
+            + "короткий H1, строка 👶 Возраст:, строка ❓ Вопрос недели:, "
+            + "ответ не короче 4 предложений, блок 🧩 Что попробовать сегодня:, "
+            + "блок 💡 Что это дает:. "
+            + "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+            + "Запрещено оставлять «...», «…» или пустой блок. "
+            + "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+            + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+            + "Итоговый текст: примерно 350–800 символов."
+        )
 
     if prov in ("auto", "groq"):
         if not groq_key:
-            return "", False, "GROQ_API_KEY_missing"
-        try:
-            out = postprocess(await groq_chat(prompt, groq_key))
-            ok, reason = validate(out)
-            if ok:
-                return out, True, "ok:groq"
-
-            repair_prompt = (
-                prompt
-                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
-                + reason
-                + ". "
-                + "Сделай текст живее, плотнее и конкретнее. "
-                + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
-                + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
-                + "Сразу иди к сути и не делай текст слишком коротким. "
-            )
-
-            if dk == "MO" or rf == "tip_of_day":
-                repair_prompt += (
-                    "Для Monday обязательно: первая строка — один прикладной совет, "
-                    "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
-                    "никаких обзоров темы и общих формулировок. "
-                    "Сохрани блоки 🧩, 👄 и 💡."
-                )
-
-            if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
-                repair_prompt += (
-                    "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
-                    "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
-                    "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
-                )
-
-            if dk == "FR" or rf == "question_week":
-                repair_prompt += (
-                    "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
-                    "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
-                    "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
-                    "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
-                    "Запрещено оставлять «...», «…» или пустой блок. "
-                    "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
-                    "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
-                    "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
-                )
-
-            if dk == "SU" or rf == "age_norms":
-                repair_prompt += (
-                    "Для Sunday обязательно: только возрастные ориентиры и milestones, "
-                    "без патологической, диагностической и коррекционной лексики, "
-                    "с фразой «Каждый ребенок развивается индивидуально»."
-                )
-
-            if aud == "pros" or rf == "pro_friendly":
-                repair_prompt += PRO_FRIENDLY_REPAIR_INSTRUCTION
-
-            out2 = postprocess(await groq_chat(repair_prompt, groq_key))
-            ok2, reason2 = validate(out2)
-            if ok2:
-                return out2, True, "ok:groq_retry"
-
-            groq_err = f"invalid_groq:{reason2}"
+            groq_err = "GROQ_API_KEY_missing"
             if prov == "groq":
                 return "", False, groq_err
+        try:
+            if groq_key:
+                out = postprocess(await groq_chat(prompt, groq_key))
+                ok, reason = validate(out)
+                if ok:
+                    return out, True, "ok:groq"
 
-            print(f"[LLM][groq] invalid output, falling back to gemini: {reason2}", flush=True)
+                groq_repair_prompt = (
+                    build_pro_friendly_repair_prompt(prompt, out, reason)
+                    if is_pro_format
+                    else build_generic_repair_prompt(reason)
+                )
+                if groq_repair_prompt:
+                    out2 = postprocess(await groq_chat(groq_repair_prompt, groq_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, "ok:groq_retry"
+                    groq_err = f"invalid_groq_retry:{reason2}"
+                else:
+                    groq_err = f"invalid_groq:{reason}"
+
+                if prov == "groq":
+                    return "", False, groq_err
+
+                print(f"[LLM][groq] invalid output, falling back to gemini: {groq_err}", flush=True)
         except Exception as e:
             groq_err = str(e)
             if prov == "groq":
@@ -1975,24 +2090,20 @@ async def generate_post_plain_from_evidence_async(
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
 
+            if is_pro_format:
+                gemini_repair_prompt = build_pro_friendly_repair_prompt(prompt, out, reason)
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+                return "", False, f"invalid_gemini:{reason}"
+
             if (dk == "FR" or rf == "question_week") and (
                 reason in {"too_short", "no_data_in_source"} or reason.startswith("question_week_")
             ):
-                gemini_repair_prompt = repair_prompt or (
-                    prompt
-                    + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
-                    + reason
-                    + ". "
-                    + "Для Friday/question_week обязательно сделай полноценный Telegram Q&A-пост: "
-                    + "короткий H1, строка 👶 Возраст:, строка ❓ Вопрос недели:, "
-                    + "ответ не короче 4 предложений, блок 🧩 Что попробовать сегодня:, "
-                    + "блок 💡 Что это дает:. "
-                    + "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
-                    + "Запрещено оставлять «...», «…» или пустой блок. "
-                    + "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
-                    + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
-                    + "Итоговый текст: примерно 350–800 символов."
-                )
+                gemini_repair_prompt = groq_repair_prompt or build_question_week_repair_prompt(reason)
                 out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
                 ok2, reason2 = validate(out2)
                 if ok2:

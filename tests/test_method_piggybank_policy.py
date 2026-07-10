@@ -70,6 +70,28 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
 
         self.assertEqual(reason, "pro_unsupported_numeric_detail:30_seconds")
 
+    def test_publisher_extracts_gemini_retry_detail_reason(self):
+        reason = _extract_pro_validation_skip_reason(
+            "invalid_gemini_retry:pro_unsupported_numeric_detail:5_minutes"
+        )
+
+        self.assertEqual(reason, "pro_unsupported_numeric_detail:5_minutes")
+
+    def test_publisher_extracts_gemini_missing_goal_reason(self):
+        reason = _extract_pro_validation_skip_reason("invalid_gemini:pro_missing_goal")
+
+        self.assertEqual(reason, "pro_missing_goal")
+
+    def test_publisher_extracts_groq_generic_benefit_reason(self):
+        reason = _extract_pro_validation_skip_reason("invalid_groq:pro_generic_benefit")
+
+        self.assertEqual(reason, "pro_generic_benefit")
+
+    def test_publisher_maps_plain_too_short_to_pro_reason(self):
+        reason = _extract_pro_validation_skip_reason("invalid_gemini:too_short")
+
+        self.assertEqual(reason, "pro_too_short")
+
     def test_audit_exit_decision_fails_below_min_pass(self):
         self.assertEqual(exit_code_for_pass_count(pass_count=4, min_pass=5), 1)
         self.assertEqual(exit_code_for_pass_count(pass_count=5, min_pass=5), 0)

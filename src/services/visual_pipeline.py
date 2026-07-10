@@ -35,9 +35,14 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux").strip() or "flux"
 POLLINATIONS_WIDTH = _env_int("POLLINATIONS_WIDTH", 1280)
 POLLINATIONS_HEIGHT = _env_int("POLLINATIONS_HEIGHT", 720)
 
-# Размер генерации — специально квадратный, чтобы не провоцировать wide-stretch на стороне backend
-POLLINATIONS_GEN_WIDTH = _env_int("POLLINATIONS_GEN_WIDTH", 1024)
-POLLINATIONS_GEN_HEIGHT = _env_int("POLLINATIONS_GEN_HEIGHT", 1024)
+# Размер генерации — нативный landscape под финальную обложку.
+POLLINATIONS_GEN_WIDTH = _env_int("POLLINATIONS_GEN_WIDTH", 1280)
+POLLINATIONS_GEN_HEIGHT = _env_int("POLLINATIONS_GEN_HEIGHT", 720)
+VISUAL_USE_BLURRED_BACKGROUND = os.getenv("VISUAL_USE_BLURRED_BACKGROUND", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Сила блюра для фоновой подложки
 POLLINATIONS_BLUR_RADIUS = _env_int("POLLINATIONS_BLUR_RADIUS", 18)
@@ -50,11 +55,13 @@ HEADERS = {
 # Mild image-quality suffix. Kept intentionally general: it improves prompt stability
 # without forcing a human figure into every cover.
 VISUAL_QUALITY_SUFFIX = (
-    "Clean professional educational editorial illustration, warm modern style, "
-    "simple uncluttered composition, one clear focal point, soft natural lighting, "
+    "Native full-bleed 16:9 landscape composition, horizontal scene designed for 1280x720, "
+    "clean professional educational editorial illustration, warm modern style, "
+    "simple uncluttered composition, one clear interaction, relevant props from the post, soft natural lighting, "
     "coherent realistic figure rendering when people are present, balanced composition, "
-    "no duplicated visual elements, no distorted details, no awkward cropping, "
-    "avoid text inside the image."
+    "no portrait poster composition, no blurred side panels, no duplicate people, no random letters or numbers, "
+    "no text in image, no elderly or Santa-like character unless explicitly requested, "
+    "no headphones unless the post mentions listening or headphones, no holiday imagery unless the post is seasonal."
 )
 
 
@@ -207,7 +214,19 @@ def _build_blurred_background_cover(img: Image.Image) -> BytesIO:
 
 def _normalize_pollinations_image(raw_bytes: bytes) -> BytesIO:
     with Image.open(BytesIO(raw_bytes)) as img:
-        return _build_blurred_background_cover(img)
+        if VISUAL_USE_BLURRED_BACKGROUND:
+            return _build_blurred_background_cover(img)
+
+        base = img.convert("RGB")
+        fitted = ImageOps.fit(
+            base,
+            (POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+        buffer = BytesIO()
+        fitted.save(buffer, format="PNG", optimize=True)
+        return _attach_file_metadata(buffer, filename="cover_ai.png", mime_type="image/png")
 
 
 def _pollinations_request_once(

@@ -37,6 +37,7 @@ from src.publisher.dedup_policy import (
 
 import feedparser
 import requests
+from requests.utils import get_encoding_from_headers
 import urllib3
 import yaml
 from bs4 import BeautifulSoup
@@ -181,6 +182,7 @@ SOFT_SKIP_REASONS = {
     "pro_missing_observation_criterion",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_risky_manual_technique",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
     "bilingual_false_causality",
@@ -213,6 +215,7 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_missing_observation_criterion",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_risky_manual_technique",
     "pro_unsupported_concrete_detail",
     "pro_unsupported_numeric_detail",
 }
@@ -871,18 +874,47 @@ def fetch_static(urls: List[str]) -> List[Dict[str, str]]:
     return [{"title": "", "link": u, "summary": ""} for u in (urls or [])]
 
 
-def _decode_response_text(r: requests.Response) -> str:
-    text = r.text
-    if text.count("�") < 5:
-        return text
+MOJIBAKE_MARKERS = ("Р°", "Рµ", "С‚", "Ð", "Ñ")
 
-    candidates = [text]
-    for encoding in ("cp1251", "windows-1251", "utf-8"):
-        try:
-            candidates.append(r.content.decode(encoding))
-        except UnicodeDecodeError:
+
+def _decode_candidate_score(text: str) -> tuple[int, int]:
+    marker_count = sum(text.count(marker) for marker in MOJIBAKE_MARKERS)
+    return (text.count("�") * 10 + marker_count * 6, marker_count)
+
+
+def _decode_response_text(r: requests.Response) -> str:
+    encodings: List[str] = []
+
+    header_encoding = get_encoding_from_headers(r.headers)
+    if header_encoding:
+        encodings.append(header_encoding)
+
+    apparent_encoding = getattr(r, "apparent_encoding", None)
+    if apparent_encoding:
+        encodings.append(apparent_encoding)
+
+    encodings.extend(["utf-8", "windows-1251"])
+
+    candidates: List[tuple[str, str]] = []
+    seen: set[str] = set()
+    for encoding in encodings:
+        normalized = (encoding or "").strip().lower()
+        if not normalized or normalized in seen:
             continue
-    return min(candidates, key=lambda value: (value.count("�"), -len(value)))
+        seen.add(normalized)
+        try:
+            candidates.append((normalized, r.content.decode(encoding)))
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    if not candidates:
+        return r.text
+
+    header_candidate = candidates[0][1] if header_encoding else ""
+    if header_candidate and _decode_candidate_score(header_candidate) == (0, 0):
+        return header_candidate
+
+    return min(candidates, key=lambda item: _decode_candidate_score(item[1]))[1]
 
 
 def _abs(base_url: str, href: str) -> str:

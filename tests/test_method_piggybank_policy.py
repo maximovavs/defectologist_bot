@@ -3,6 +3,7 @@ from pathlib import Path
 
 import yaml
 
+from scripts.audit_method_piggybank_sources import exit_code_for_pass_count
 from src.publisher.run_publisher import _extract_pro_validation_skip_reason
 
 
@@ -49,6 +50,7 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
 
         self.assertEqual(curated.get("type"), "static")
         self.assertGreaterEqual(len(curated.get("urls") or []), 5)
+        self.assertNotIn("https://logoportal.ru/statya-20253.html", curated.get("urls") or [])
 
     def test_dead_logopediya_publications_source_removed_from_registry(self):
         cfg = yaml.safe_load((ROOT / "config" / "sources.yml").read_text(encoding="utf-8"))
@@ -67,6 +69,10 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
         )
 
         self.assertEqual(reason, "pro_unsupported_numeric_detail:30_seconds")
+
+    def test_audit_exit_decision_fails_below_min_pass(self):
+        self.assertEqual(exit_code_for_pass_count(pass_count=4, min_pass=5), 1)
+        self.assertEqual(exit_code_for_pass_count(pass_count=5, min_pass=5), 0)
 
 
 if __name__ == "__main__":

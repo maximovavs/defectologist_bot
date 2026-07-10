@@ -780,6 +780,18 @@ PRO_ACTION_VERBS = [
     "дайте",
 ]
 
+PRO_RISKY_MANUAL_TECHNIQUE_PATTERNS = [
+    r"логопедическ\w*\s+зонд",
+    r"зондозаменител\w*",
+    r"ватн\w*\s+палочк\w*.{0,40}под\s+язык",
+    r"ввест\w*\s+зонд",
+    r"введ\w*\s+зонд",
+    r"механическ\w*\s+помощ\w*.{0,40}под\s+язык",
+    r"двигат\w*\s+зонд\w*",
+    r"двиг\w*\s+зонд\w*",
+    r"вызват\w*\s+вибрац\w*\s+зонд\w*",
+]
+
 PRO_FRIENDLY_REPAIR_INSTRUCTION = (
     "Для pro_friendly обязательно верни структурированный Telegram-пост: "
     "H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, затем блоки 🎯 Цель:, "
@@ -812,6 +824,9 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
         return False, "pro_old_academic_structure"
 
     blob = _normalize_scan_text(text)
+    if any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in PRO_RISKY_MANUAL_TECHNIQUE_PATTERNS):
+        return False, "pro_risky_manual_technique"
+
     if "помогает сохранить фокус занятия" in blob:
         return False, "pro_generic_benefit"
 

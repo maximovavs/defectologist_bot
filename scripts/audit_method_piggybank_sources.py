@@ -70,12 +70,18 @@ def audit(max_per_source: int) -> int:
     return passed
 
 
+def exit_code_for_pass_count(pass_count: int, min_pass: int) -> int:
+    return 0 if pass_count >= min_pass else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-per-source", type=int, default=25)
+    parser.add_argument("--min-pass", type=int, default=5)
     args = parser.parse_args()
     passed = audit(max_per_source=args.max_per_source)
     print(f"PASS_COUNT={passed}")
+    raise SystemExit(exit_code_for_pass_count(passed, args.min_pass))
 
 
 if __name__ == "__main__":

@@ -87,6 +87,7 @@ def should_allow_evergreen_source_reuse(rubric_id: str | None) -> bool:
         "play_and_speak",
         "myth_fact",
         "age_norms",
+        "method_piggybank",
     }
 
 

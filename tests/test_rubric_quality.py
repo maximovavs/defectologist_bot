@@ -124,6 +124,74 @@ class RubricQualityTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "pro_unsupported_concrete_detail:без специальных материалов")
 
+    def test_pro_risky_intraoral_mechanical_instruction_fails(self):
+        evidence = (
+            "The method describes a probe under the tongue and mechanical help. "
+            "The child responds when the specialist moves the probe."
+        )
+        output = (
+            "Постановка звука механической помощью\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель: вызвать вибрацию языка.\n\n"
+            "🧰 Материалы: логопедический зонд.\n\n"
+            "🔁 Как провести:\n"
+            "1. Введите зонд под язык.\n"
+            "2. Двигайте зондом для вибрации.\n"
+            "3. Отметьте ответ ребёнка.\n\n"
+            "✅ На что смотреть: ребёнок отвечает на механическую помощь.\n\n"
+            "💡 Вариант усложнения: повторите движение."
+        )
+
+        ok, reason = _validate_pro_output(output, evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_risky_manual_technique")
+
+    def test_pro_safe_articulation_observation_in_mirror_passes(self):
+        evidence = (
+            "Use a mirror. Ask the child to name a word and watch mouth position in the mirror. "
+            "Observe whether the child repeats the word and identifies the target sound."
+        )
+        output = (
+            "Звук перед зеркалом\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель: увидеть положение губ при слове.\n\n"
+            "🧰 Материалы: зеркало.\n\n"
+            "🔁 Как провести:\n"
+            "1. Покажите ребёнку зеркало.\n"
+            "2. Попросите назвать слово перед зеркалом.\n"
+            "3. Отметьте, повторил ли ребёнок целевой звук.\n\n"
+            "✅ На что смотреть: ребёнок повторяет слово и узнаёт целевой звук.\n\n"
+            "💡 Вариант усложнения: сравните два коротких слова."
+        )
+
+        ok, reason = _validate_pro_output(output, evidence)
+
+        self.assertTrue(ok, reason)
+
+    def test_risky_source_still_cannot_generate_risky_technique(self):
+        evidence = (
+            "Источник описывает логопедический зонд, зондозаменитель и ватную палочку под язык. "
+            "Ребёнок повторяет звук после механической помощи."
+        )
+        output = (
+            "Зондовая постановка звука\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель: вызвать звук.\n\n"
+            "🧰 Материалы: ватная палочка под язык.\n\n"
+            "🔁 Как провести:\n"
+            "1. Ввести зонд под язык.\n"
+            "2. Вызвать вибрацию зондом.\n"
+            "3. Отметить повтор звука.\n\n"
+            "✅ На что смотреть: ребёнок повторяет звук.\n\n"
+            "💡 Вариант усложнения: двигать зондом быстрее."
+        )
+
+        ok, reason = _validate_pro_output(output, evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_risky_manual_technique")
+
     def test_pro_friendly_repair_instruction_preserves_anti_invention_rules(self):
         instruction = PRO_FRIENDLY_REPAIR_INSTRUCTION.lower()
 

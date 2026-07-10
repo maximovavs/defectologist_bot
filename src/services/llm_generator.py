@@ -460,12 +460,54 @@ MISLEADING_POLITENESS_TITLE_PATTERNS = [
     "уберите пожалуйста",
 ]
 
+PRO_EVIDENCE_ACTION_RE = re.compile(
+    r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|"
+    r"игра|дела|использу|дайте|отмет|show|ask|repeat|name|choose|select|compare|"
+    r"listen|read|tell|play|practice|perform|use|give|mark)\w*",
+    re.IGNORECASE,
+)
+
+PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE = re.compile(
+    r"(без\s+(?:дополнительных|специальных)\s+материалов|no\s+(?:additional|special)\s+materials|"
+    r"материал\w*|material\w*|карточ\w*|card\w*|картин\w*|picture\w*|image\w*|"
+    r"игруш\w*|toy\w*|мяч\w*|ball\w*|зеркал\w*|mirror\w*|таймер\w*|timer\w*|"
+    r"компьютер\w*|computer\w*|планшет\w*|tablet\w*|книга\w*|book\w*|"
+    r"предмет\w*|object\w*|упражн\w*|задани\w*|игр\w*|при[её]м\w*|"
+    r"activity\w*|game\w*|exercise\w*|task\w*|protocol\w*|method\w*)",
+    re.IGNORECASE,
+)
+
+PRO_EVIDENCE_CONCRETE_PROP_RE = re.compile(
+    r"(карточ\w*|card\w*|картин\w*|picture\w*|image\w*|игруш\w*|toy\w*|мяч\w*|ball\w*|"
+    r"зеркал\w*|mirror\w*|таймер\w*|timer\w*|компьютер\w*|computer\w*|планшет\w*|tablet\w*|"
+    r"книга\w*|book\w*|предмет\w*|object\w*)",
+    re.IGNORECASE,
+)
+
+PRO_EVIDENCE_NO_MATERIALS_RE = re.compile(
+    r"без\s+(?:дополнительных|специальных)\s+материалов|no\s+(?:additional|special)\s+materials",
+    re.IGNORECASE,
+)
+
+PRO_EVIDENCE_CRITERION_RE = re.compile(
+    r"\b(смотр|наблюд|оцени|критери|результат|получа|отмет|провер|observe|watch|"
+    r"assess|notice|look\s+for|criterion|result|whether|mark|check|"
+    r"реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима|различа|определя)|"
+    r"child\s+(repeats?|names?|chooses?|selects?|answers?|maintains?|understands?|identifies?|discriminates?))\w*",
+    re.IGNORECASE,
+)
+
 
 def validate_pro_concrete_details(output_text: str, evidence_text: str) -> Tuple[bool, str]:
     out = _normalize_scan_text(output_text)
     if not out:
         return True, "ok"
     evidence = _normalize_scan_text(evidence_text)
+
+    if re.search(r"материал\w*\s*:\s*без\s+специальных\s+материалов|no\s+special\s+materials", out, flags=re.IGNORECASE):
+        if not _evidence_supports_no_special_materials(evidence_text):
+            return False, "pro_unsupported_concrete_detail:без специальных материалов"
+
     for pattern, label, evidence_aliases in PRO_CONCRETE_DETAIL_PATTERNS:
         has_evidence_concept = any(all(term in evidence for term in alias_terms) for alias_terms in evidence_aliases)
         if re.search(pattern, out, flags=re.IGNORECASE) and not has_evidence_concept:
@@ -481,28 +523,29 @@ def validate_pro_concrete_details(output_text: str, evidence_text: str) -> Tuple
 
 def _has_pro_minimum_evidence(evidence_text: str) -> bool:
     evidence = _normalize_scan_text(evidence_text)
-    action_ok = bool(
-        re.search(
-            r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|игра|дела|show|ask|repeat|name|choose|select|compare|listen|read|tell|play|practice|perform)\w*",
-            evidence,
-            flags=re.IGNORECASE,
-        )
-    )
-    material_ok = bool(
-        re.search(
-            r"(без дополнительных материалов|no additional materials|материал\w*|material\w*|карточ\w*|card\w*|картин\w*|picture\w*|image\w*|игруш\w*|toy\w*|мяч\w*|ball\w*|зеркал\w*|mirror\w*|компьютер\w*|computer\w*|планшет\w*|tablet\w*|книга\w*|book\w*|предмет\w*|object\w*)",
-            evidence,
-            flags=re.IGNORECASE,
-        )
-    )
-    criterion_ok = bool(
-        re.search(
-            r"\b(смотр|наблюд|оцени|критери|получа|observe|watch|assess|notice|реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима)|child\s+(repeats?|names?|chooses?|selects?|answers?|maintains?|understands?))\w*",
-            evidence,
-            flags=re.IGNORECASE,
-        )
-    )
+    action_ok = bool(PRO_EVIDENCE_ACTION_RE.search(evidence))
+    material_ok = bool(PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE.search(evidence))
+    criterion_ok = bool(PRO_EVIDENCE_CRITERION_RE.search(evidence))
     return action_ok and material_ok and criterion_ok
+
+
+def validate_pro_evidence_for_generation(evidence_text: str) -> Tuple[bool, str]:
+    if not _has_pro_minimum_evidence(evidence_text):
+        return False, "pro_insufficient_evidence"
+    return True, "ok"
+
+
+def _evidence_supports_no_special_materials(evidence_text: str) -> bool:
+    evidence = _normalize_scan_text(evidence_text)
+    if PRO_EVIDENCE_NO_MATERIALS_RE.search(evidence):
+        return True
+    if PRO_EVIDENCE_CONCRETE_PROP_RE.search(evidence):
+        return False
+    return (
+        bool(PRO_EVIDENCE_ACTION_RE.search(evidence))
+        and bool(PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE.search(evidence))
+        and bool(PRO_EVIDENCE_CRITERION_RE.search(evidence))
+    )
 
 
 def _has_parent_specific_risk(text_or_lines: str | List[str]) -> bool:
@@ -795,8 +838,10 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
     if not any(verb in blob for verb in PRO_ACTION_VERBS):
         return False, "pro_too_abstract"
 
-    if evidence_text and not _has_pro_minimum_evidence(evidence_text):
-        return False, "pro_insufficient_evidence"
+    if evidence_text:
+        ok, reason = validate_pro_evidence_for_generation(evidence_text)
+        if not ok:
+            return False, reason
 
     ok, reason = validate_pro_concrete_details(text, evidence_text)
     if not ok:

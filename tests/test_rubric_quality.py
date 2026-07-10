@@ -5,6 +5,7 @@ from src.services.llm_generator import (
     _validate_output,
     _validate_parent_safety_output,
     _validate_pro_output,
+    validate_pro_evidence_for_generation,
     validate_pro_concrete_details,
 )
 
@@ -47,6 +48,59 @@ class RubricQualityTest(unittest.TestCase):
         ok, reason = _validate_pro_output(output, evidence)
 
         self.assertTrue(ok, reason)
+
+    def test_pro_overview_evidence_skipped_before_llm(self):
+        evidence = "Bilingual children can benefit from support at home and school."
+
+        ok, reason = validate_pro_evidence_for_generation(evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_insufficient_evidence")
+
+    def test_pro_activity_without_props_passes_with_no_special_materials(self):
+        evidence = (
+            "Play a word game with no special materials. Ask the child to repeat a short word, "
+            "then say another word. Observe whether the child repeats the target word clearly."
+        )
+        output = (
+            "Игра без предметов\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель: проверить повторение короткого слова.\n\n"
+            "🧰 Материалы: без специальных материалов\n\n"
+            "🔁 Как провести:\n"
+            "1. Назовите короткое слово.\n"
+            "2. Попросите ребёнка повторить слово.\n"
+            "3. Отметьте, повторил ли ребёнок целевое слово.\n\n"
+            "✅ На что смотреть: ребёнок повторяет целевое слово достаточно ясно.\n\n"
+            "💡 Вариант усложнения: дайте второе короткое слово."
+        )
+
+        ok, reason = _validate_pro_output(output, evidence)
+
+        self.assertTrue(ok, reason)
+
+    def test_pro_no_special_materials_rejected_when_evidence_uses_props(self):
+        evidence = (
+            "Use picture cards. Ask the child to select the picture and repeat the word. "
+            "Observe whether the child identifies the correct sound."
+        )
+        output = (
+            "Карточки без карточек\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель: проверить выбор звука.\n\n"
+            "🧰 Материалы: без специальных материалов\n\n"
+            "🔁 Как провести:\n"
+            "1. Покажите ребёнку слово.\n"
+            "2. Попросите выбрать нужный звук.\n"
+            "3. Отметьте, был ли выбор точным.\n\n"
+            "✅ На что смотреть: ребёнок выбирает нужный звук.\n\n"
+            "💡 Вариант усложнения: добавьте второе слово."
+        )
+
+        ok, reason = _validate_pro_output(output, evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_unsupported_concrete_detail:без специальных материалов")
 
     def test_pro_timer_supported_by_english_evidence(self):
         evidence = "Use a timer for 30 seconds. Observe whether the child maintains attention."

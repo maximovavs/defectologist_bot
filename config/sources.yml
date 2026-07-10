@@ -120,12 +120,6 @@ sources:
     type: rss
     url: "https://logopediya.com/ppt/rss.xml"
 
-  - id: logopediya_publications_latest
-    name: "Logopediya.com — Публикации (последние)"
-    type: html_site
-    url: "https://logopediya.com/publ/"
-    parser: "logopediya_publ"
-
   - id: logorina_latest
     name: "Logorina.ru — Последние материалы"
     type: html_site

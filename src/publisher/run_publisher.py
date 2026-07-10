@@ -46,6 +46,7 @@ from src.services.llm_generator import (
     _validate_question_week_output,
     generate_image_prompt_async,
     generate_post_plain_from_evidence_async,
+    validate_pro_evidence_for_generation,
 )
 from src.services.publication_store import PublicationStore
 from src.services.visual_pipeline import build_post_visual
@@ -172,7 +173,14 @@ SOFT_SKIP_REASONS = {
     "tip_of_day_post_too_generic",
     "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
+    "pro_unsupported_numeric_detail",
     "pro_insufficient_evidence",
+    "pro_missing_goal",
+    "pro_missing_materials",
+    "pro_missing_steps",
+    "pro_missing_observation_criterion",
+    "pro_too_abstract",
+    "pro_old_academic_structure",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
     "bilingual_false_causality",
@@ -196,6 +204,21 @@ HARD_SKIP_REASONS = {
     "telegram_send_failed",
     "max_run_seconds",
 }
+
+PRO_VALIDATION_SKIP_REASONS = {
+    "pro_insufficient_evidence",
+    "pro_missing_goal",
+    "pro_missing_materials",
+    "pro_missing_steps",
+    "pro_missing_observation_criterion",
+    "pro_too_abstract",
+    "pro_old_academic_structure",
+}
+
+PRO_VALIDATION_SKIP_PREFIXES = (
+    "pro_unsupported_concrete_detail",
+    "pro_unsupported_numeric_detail",
+)
 
 AGE_NORMS_BAD_MARKERS = [
     "дисграф",
@@ -332,6 +355,23 @@ def _resolve_publication_db_path() -> Path:
 
 def _skip_kind(reason: str) -> str:
     return "hard" if reason in HARD_SKIP_REASONS else "soft"
+
+
+def _extract_pro_validation_skip_reason(llm_note: str) -> str:
+    note = norm_space(llm_note)
+    if not note:
+        return ""
+    pieces = re.split(r"\s*\|\s*", note)
+    for piece in pieces:
+        candidate = piece
+        if ":" in candidate:
+            candidate = candidate.split(":", 1)[1]
+        candidate = candidate.strip()
+        if candidate in PRO_VALIDATION_SKIP_REASONS:
+            return candidate
+        if any(candidate.startswith(prefix + ":") for prefix in PRO_VALIDATION_SKIP_PREFIXES):
+            return candidate
+    return ""
 
 
 def _build_posted_zero_alert_plain(
@@ -1505,6 +1545,23 @@ async def amain() -> None:
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
+                if rf == "pro_friendly":
+                    pro_evidence_ok, pro_evidence_reason = validate_pro_evidence_for_generation(evidence)
+                    if not pro_evidence_ok:
+                        kind = note(pro_evidence_reason, canon)
+                        print(
+                            f"[SKIP][{kind}] {pro_evidence_reason} "
+                            f"stage=pre_llm url={canon}",
+                            flush=True,
+                        )
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
+
                 try:
                     plain_raw, ok, llm_note = await asyncio.wait_for(
                         generate_post_plain_from_evidence_async(
@@ -1547,8 +1604,10 @@ async def amain() -> None:
                     continue
 
                 if not ok or not plain_raw:
-                    kind = note("llm_invalid_output", canon)
-                    print(f"[SKIP][{kind}] {llm_note} url={canon}", flush=True)
+                    pro_reason = _extract_pro_validation_skip_reason(llm_note) if rf == "pro_friendly" else ""
+                    skip_reason = pro_reason or "llm_invalid_output"
+                    kind = note(skip_reason, canon)
+                    print(f"[SKIP][{kind}] {llm_note} reason={skip_reason} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:

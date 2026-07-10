@@ -57,6 +57,77 @@ class RubricQualityTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "pro_insufficient_evidence")
 
+    def test_pro_concrete_activity_without_explicit_observation_passes_pre_llm_gate(self):
+        evidence = (
+            "Разложите перед ребёнком картинки со словами на звук С. "
+            "Предложите найти слово, произнести его и соединить изображение со схемой слова."
+        )
+
+        ok, reason = validate_pro_evidence_for_generation(evidence)
+
+        self.assertTrue(ok, reason)
+
+    def test_pro_theoretical_text_without_concrete_action_fails_pre_llm_gate(self):
+        evidence = (
+            "Фонематическое восприятие является важной частью речевого развития. "
+            "Специалисту важно учитывать возраст, особенности внимания и уровень сформированности навыка."
+        )
+
+        ok, reason = validate_pro_evidence_for_generation(evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_insufficient_evidence")
+
+    def test_pro_general_benefit_only_text_fails_pre_llm_gate(self):
+        evidence = (
+            "Игры полезны для речи, внимания и общения. "
+            "Они помогают ребёнку развиваться, поддерживают интерес и создают положительную атмосферу."
+        )
+
+        ok, reason = validate_pro_evidence_for_generation(evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_insufficient_evidence")
+
+    def test_pro_old_academic_structure_still_fails(self):
+        output = (
+            "Введение\n\n"
+            "Главные выводы\n\n"
+            "Практическое применение\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n"
+            "🎯 Цель: проверить повторение слова.\n"
+            "🧰 Материалы: без специальных материалов\n"
+            "🔁 Как провести:\n"
+            "1. Назовите слово.\n"
+            "2. Попросите ребёнка повторить слово.\n"
+            "3. Отметьте ответ.\n"
+            "✅ На что смотреть: ребёнок повторяет слово.\n"
+            "💡 Вариант усложнения: предложите более сложное слово."
+        )
+
+        ok, reason = _validate_pro_output(output, "Play a word game with no special materials. Ask the child to repeat a word.")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_old_academic_structure")
+
+    def test_pro_method_card_without_observation_still_fails(self):
+        output = (
+            "Игра со словом\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель: проверить повторение слова.\n\n"
+            "🧰 Материалы: без специальных материалов\n\n"
+            "🔁 Как провести:\n"
+            "1. Назовите слово.\n"
+            "2. Попросите ребёнка повторить слово.\n"
+            "3. Отметьте ответ.\n\n"
+            "💡 Вариант усложнения: предложите более сложное слово."
+        )
+
+        ok, reason = _validate_pro_output(output, "Play a word game with no special materials. Ask the child to repeat a word.")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_missing_observation_criterion")
+
     def test_pro_activity_without_props_passes_with_no_special_materials(self):
         evidence = (
             "Play a word game with no special materials. Ask the child to repeat a short word, "
@@ -155,6 +226,37 @@ class RubricQualityTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "pro_unsupported_concrete_detail:таймер")
+
+    def test_pro_unsupported_timer_cards_minutes_and_repetitions_still_fail(self):
+        detail_cases = [
+            (
+                "Use picture cards.",
+                "Покажите карточки и включите таймер.",
+                "pro_unsupported_concrete_detail:таймер",
+            ),
+            (
+                "Repeat the word in a short game.",
+                "Покажите карточки со словами.",
+                "pro_unsupported_concrete_detail:карточки/картинки",
+            ),
+            (
+                "Play the game for 3 minutes.",
+                "Играйте 5 минут.",
+                "pro_unsupported_numeric_detail:5_minutes",
+            ),
+            (
+                "Repeat the word 3 times.",
+                "Повторите слово 5 раз.",
+                "pro_unsupported_numeric_detail:5_repetitions",
+            ),
+        ]
+
+        for evidence, output, expected_reason in detail_cases:
+            with self.subTest(expected_reason=expected_reason):
+                ok, reason = validate_pro_concrete_details(output, evidence)
+
+                self.assertFalse(ok)
+                self.assertEqual(reason, expected_reason)
 
     def test_bilingual_rejects_false_causality(self):
         output = (

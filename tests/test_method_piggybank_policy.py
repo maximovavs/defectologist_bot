@@ -1,9 +1,10 @@
 import unittest
+import random
 from pathlib import Path
 
 import yaml
 
-from src.publisher.run_publisher import _extract_pro_validation_skip_reason
+from src.publisher.run_publisher import _extract_pro_validation_skip_reason, order_candidates_for_rubric
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,36 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
         )
 
         self.assertEqual(reason, "pro_unsupported_numeric_detail:30_seconds")
+
+    def test_method_piggybank_candidates_are_round_robin_by_source(self):
+        candidates = [
+            {"source_id": "big", "link": f"https://big.example/{idx}"}
+            for idx in range(8)
+        ] + [
+            {"source_id": "small_a", "link": "https://a.example/1"},
+            {"source_id": "small_b", "link": "https://b.example/1"},
+        ]
+
+        ordered = order_candidates_for_rubric("method_piggybank", candidates, random.Random(123))
+        first_sources = [candidate["source_id"] for candidate in ordered[:3]]
+
+        self.assertEqual(set(first_sources), {"big", "small_a", "small_b"})
+        self.assertNotEqual(first_sources, ["big", "big", "big"])
+
+    def test_non_method_piggybank_candidate_order_uses_existing_shuffle(self):
+        candidates = [
+            {"source_id": "big", "link": f"https://big.example/{idx}"}
+            for idx in range(5)
+        ] + [
+            {"source_id": "small", "link": f"https://small.example/{idx}"}
+            for idx in range(3)
+        ]
+        expected = [dict(candidate) for candidate in candidates]
+        random.Random(456).shuffle(expected)
+
+        ordered = order_candidates_for_rubric("tip_of_day", candidates, random.Random(456))
+
+        self.assertEqual(ordered, expected)
 
 
 if __name__ == "__main__":

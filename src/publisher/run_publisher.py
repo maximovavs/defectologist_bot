@@ -986,6 +986,37 @@ def fetch_source(src: Source) -> List[Dict[str, str]]:
     raise ValueError(f"Unsupported source type: {src.type}")
 
 
+def order_candidates_for_rubric(
+    rubric_id: str,
+    candidates: List[Dict[str, str]],
+    rng: random.Random,
+) -> List[Dict[str, str]]:
+    items = [dict(candidate) for candidate in candidates]
+    if rubric_id != "method_piggybank":
+        rng.shuffle(items)
+        return items
+
+    grouped: Dict[str, List[Dict[str, str]]] = {}
+    source_order: List[str] = []
+    for candidate in items:
+        source_id = (candidate.get("source_id") or "unknown").strip() or "unknown"
+        if source_id not in grouped:
+            grouped[source_id] = []
+            source_order.append(source_id)
+        grouped[source_id].append(candidate)
+
+    for source_id in source_order:
+        rng.shuffle(grouped[source_id])
+
+    ordered: List[Dict[str, str]] = []
+    while any(grouped[source_id] for source_id in source_order):
+        for source_id in source_order:
+            if grouped[source_id]:
+                ordered.append(grouped[source_id].pop(0))
+
+    return ordered
+
+
 def get_canonical(url: str) -> str:
     try:
         r = requests.get(url, headers=HEADERS, timeout=25, verify=_verify_for_url(url))
@@ -1322,7 +1353,10 @@ async def amain() -> None:
                         rubric_skips += 1
                     continue
                 try:
-                    all_items.extend(fetch_source(src))
+                    for item in fetch_source(src):
+                        candidate = dict(item)
+                        candidate["source_id"] = sid
+                        all_items.append(candidate)
                 except Exception as e:
                     kind = note("source_fetch_failed", f"{sid}: {e}")
                     print(f"[SKIP][{kind}] source_fetch_failed source={sid} err={e}", flush=True)
@@ -1335,7 +1369,7 @@ async def amain() -> None:
 
             seed = int(hashlib.sha1(f"{now.date()}|{rubric_id}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(seed)
-            rng.shuffle(all_items)
+            all_items = order_candidates_for_rubric(rubric_id, all_items, rng)
 
             print(
                 f"[RUBRIC] rubric={rubric_id} audience={aud} candidates_total={len(all_items)} max_scan={MAX_CANDIDATES_PER_RUBRIC}",
@@ -1344,6 +1378,7 @@ async def amain() -> None:
 
             for cand in all_items[:MAX_CANDIDATES_PER_RUBRIC]:
                 url = (cand.get("link") or "").strip()
+                candidate_source_id = (cand.get("source_id") or "unknown").strip() or "unknown"
 
                 elapsed = time.monotonic() - run_started_monotonic
                 if elapsed > MAX_RUN_SECONDS:
@@ -1351,11 +1386,15 @@ async def amain() -> None:
                     print(f"[STOP][{kind}] max_run_seconds reached: {elapsed:.1f}s", flush=True)
                     break
 
-                print(f"[CANDIDATE] rubric={rubric_id} audience={aud} url={url}", flush=True)
+                print(
+                    f"[CANDIDATE] rubric={rubric_id} audience={aud} "
+                    f"source={candidate_source_id} url={url}",
+                    flush=True,
+                )
 
                 if not url.startswith(("http://", "https://")):
                     kind = note("bad_candidate_url", url or "(empty)")
-                    print(f"[SKIP][{kind}] bad_candidate_url url={url}", flush=True)
+                    print(f"[SKIP][{kind}] bad_candidate_url source={candidate_source_id} url={url}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1366,7 +1405,7 @@ async def amain() -> None:
 
                 if _SKIP_EXT_RE.search(url):
                     kind = note("skip_non_html_asset", url)
-                    print(f"[SKIP][{kind}] skip_non_html_asset url={url}", flush=True)
+                    print(f"[SKIP][{kind}] skip_non_html_asset source={candidate_source_id} url={url}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1378,7 +1417,7 @@ async def amain() -> None:
                 canon = get_canonical(url)
                 if _SKIP_EXT_RE.search(canon):
                     kind = note("skip_non_html_asset", canon)
-                    print(f"[SKIP][{kind}] skip_non_html_asset canon={canon}", flush=True)
+                    print(f"[SKIP][{kind}] skip_non_html_asset source={candidate_source_id} canon={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1389,7 +1428,7 @@ async def amain() -> None:
 
                 if canon in seen_urls_this_run:
                     kind = note("dup_url_same_run", canon)
-                    print(f"[SKIP][{kind}] dup_url_same_run url={canon}", flush=True)
+                    print(f"[SKIP][{kind}] dup_url_same_run source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1406,7 +1445,7 @@ async def amain() -> None:
                         )
                     else:
                         kind = note("dup_url_db", canon)
-                        print(f"[SKIP][{kind}] dup_url_db url={canon}", flush=True)
+                        print(f"[SKIP][{kind}] dup_url_db source={candidate_source_id} url={canon}", flush=True)
                         if kind == "hard":
                             rubric_skips += 1
                         if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1419,7 +1458,11 @@ async def amain() -> None:
                     evidence = extract_evidence_text(canon, max_chars=3600)
                 except Exception as e:
                     kind = note("evidence_fetch_failed", f"{canon} ({e})")
-                    print(f"[SKIP][{kind}] evidence_fetch_failed url={canon} err={e}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] evidence_fetch_failed source={candidate_source_id} "
+                        f"url={canon} err={e}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1430,7 +1473,7 @@ async def amain() -> None:
 
                 if len((evidence or "").strip()) < 260:
                     kind = note("no_evidence_short", canon)
-                    print(f"[SKIP][{kind}] no_evidence_short url={canon}", flush=True)
+                    print(f"[SKIP][{kind}] no_evidence_short source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1441,7 +1484,11 @@ async def amain() -> None:
 
                 if rubric_id == "age_norms" and not _is_age_norms_content_fit(evidence):
                     kind = note("rubric_topic_mismatch_source", canon)
-                    print(f"[SKIP][{kind}] rubric_topic_mismatch_source url={canon}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] rubric_topic_mismatch_source source={candidate_source_id} "
+                        f"url={canon}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1453,7 +1500,7 @@ async def amain() -> None:
                 evidence_hash = sha1(norm_space(evidence))
                 if evidence_hash in seen_evidence_hashes_this_run:
                     kind = note("dup_evidence_same_run", canon)
-                    print(f"[SKIP][{kind}] dup_evidence_same_run url={canon}", flush=True)
+                    print(f"[SKIP][{kind}] dup_evidence_same_run source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1470,7 +1517,11 @@ async def amain() -> None:
                         )
                     else:
                         kind = note("dup_evidence_hash_db", canon)
-                        print(f"[SKIP][{kind}] dup_evidence_hash_db url={canon}", flush=True)
+                        print(
+                            f"[SKIP][{kind}] dup_evidence_hash_db source={candidate_source_id} "
+                            f"url={canon}",
+                            flush=True,
+                        )
                         if kind == "hard":
                             rubric_skips += 1
                         if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1508,7 +1559,7 @@ async def amain() -> None:
                     else:
                         kind = note("dup_semantic_source", canon)
                         print(
-                            f"[SKIP][{kind}] dup_semantic_source url={canon} "
+                            f"[SKIP][{kind}] dup_semantic_source source={candidate_source_id} url={canon} "
                             f"matched={sem_source_hit.canonical_url} "
                             f"score={sem_source_hit.similarity:.3f}",
                             flush=True,
@@ -1551,7 +1602,7 @@ async def amain() -> None:
                         kind = note(pro_evidence_reason, canon)
                         print(
                             f"[SKIP][{kind}] {pro_evidence_reason} "
-                            f"stage=pre_llm url={canon}",
+                            f"stage=pre_llm source={candidate_source_id} url={canon}",
                             flush=True,
                         )
                         if kind == "hard":
@@ -1584,7 +1635,7 @@ async def amain() -> None:
                     )
                 except asyncio.TimeoutError:
                     kind = note("llm_timeout", canon)
-                    print(f"[SKIP][{kind}] llm_timeout url={canon}", flush=True)
+                    print(f"[SKIP][{kind}] llm_timeout source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1594,7 +1645,11 @@ async def amain() -> None:
                     continue
                 except Exception as e:
                     kind = note("llm_failed", f"{canon} ({e})")
-                    print(f"[SKIP][{kind}] llm_failed url={canon} err={e}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] llm_failed source={candidate_source_id} "
+                        f"url={canon} err={e}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1607,7 +1662,11 @@ async def amain() -> None:
                     pro_reason = _extract_pro_validation_skip_reason(llm_note) if rf == "pro_friendly" else ""
                     skip_reason = pro_reason or "llm_invalid_output"
                     kind = note(skip_reason, canon)
-                    print(f"[SKIP][{kind}] {llm_note} reason={skip_reason} url={canon}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] {llm_note} reason={skip_reason} "
+                        f"source={candidate_source_id} url={canon}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1629,7 +1688,7 @@ async def amain() -> None:
                     kind = note("final_invalid_output", f"{canon} (final_body_incomplete)")
                     print(
                         f"[SKIP][{kind}] final_invalid_output "
-                        f"reason=final_body_incomplete url={canon}",
+                        f"reason=final_body_incomplete source={candidate_source_id} url={canon}",
                         flush=True,
                     )
                     if kind == "hard":
@@ -1646,7 +1705,7 @@ async def amain() -> None:
                         kind = note("final_invalid_output", f"{canon} ({final_reason})")
                         print(
                             f"[SKIP][{kind}] final_invalid_output "
-                            f"reason={final_reason} url={canon}",
+                            f"reason={final_reason} source={candidate_source_id} url={canon}",
                             flush=True,
                         )
                         if kind == "hard":
@@ -1659,7 +1718,11 @@ async def amain() -> None:
 
                 if rubric_id == "age_norms" and not _is_age_norms_content_fit(plain):
                     kind = note("rubric_topic_mismatch_post", canon)
-                    print(f"[SKIP][{kind}] rubric_topic_mismatch_post url={canon}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] rubric_topic_mismatch_post source={candidate_source_id} "
+                        f"url={canon}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1670,7 +1733,11 @@ async def amain() -> None:
 
                 if rubric_id == "tip_of_day" and not _is_tip_of_day_content_fit(plain):
                     kind = note("tip_of_day_post_too_generic", canon)
-                    print(f"[SKIP][{kind}] tip_of_day_post_too_generic url={canon}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] tip_of_day_post_too_generic source={candidate_source_id} "
+                        f"url={canon}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1682,7 +1749,7 @@ async def amain() -> None:
                 body_hash = sha1(norm_space(plain))
                 if body_hash in seen_body_hashes_this_run:
                     kind = note("dup_body_same_run", canon)
-                    print(f"[SKIP][{kind}] dup_body_same_run url={canon}", flush=True)
+                    print(f"[SKIP][{kind}] dup_body_same_run source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1693,7 +1760,7 @@ async def amain() -> None:
 
                 if store.has_body_hash(body_hash):
                     kind = note("dup_body_hash_db", canon)
-                    print(f"[SKIP][{kind}] dup_body_hash_db url={canon}", flush=True)
+                    print(f"[SKIP][{kind}] dup_body_hash_db source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1713,7 +1780,7 @@ async def amain() -> None:
                 if sem_body_hit:
                     kind = note("dup_semantic_post", canon)
                     print(
-                        f"[SKIP][{kind}] dup_semantic_post url={canon} "
+                        f"[SKIP][{kind}] dup_semantic_post source={candidate_source_id} url={canon} "
                         f"matched={sem_body_hit.canonical_url} "
                         f"score={sem_body_hit.similarity:.3f} "
                         f"threshold={sem_body_threshold:.3f}",
@@ -1789,7 +1856,11 @@ async def amain() -> None:
                     )
                 except Exception as e:
                     kind = note("visual_build_failed", f"{canon} ({e})")
-                    print(f"[SKIP][{kind}] visual_build_failed url={canon} err={e}", flush=True)
+                    print(
+                        f"[SKIP][{kind}] visual_build_failed source={candidate_source_id} "
+                        f"url={canon} err={e}",
+                        flush=True,
+                    )
                     if kind == "hard":
                         rubric_skips += 1
                     if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
@@ -1838,7 +1909,11 @@ async def amain() -> None:
                         send_post_with_visual(target_chat_id, visual_buffer, plain, html_full)
                     except Exception as e:
                         kind = note("telegram_send_failed", f"{canon} ({e})")
-                        print(f"[SKIP][{kind}] telegram_send_failed url={canon} err={e}", flush=True)
+                        print(
+                            f"[SKIP][{kind}] telegram_send_failed source={candidate_source_id} "
+                            f"url={canon} err={e}",
+                            flush=True,
+                        )
                         if kind == "hard":
                             rubric_skips += 1
                         if rubric_skips >= MAX_SKIPS_PER_RUBRIC:

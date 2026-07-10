@@ -462,8 +462,10 @@ MISLEADING_POLITENESS_TITLE_PATTERNS = [
 
 PRO_EVIDENCE_ACTION_RE = re.compile(
     r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|"
-    r"игра|дела|использу|дайте|отмет|show|ask|repeat|name|choose|select|compare|"
-    r"listen|read|tell|play|practice|perform|use|give|mark)\w*",
+    r"игра|дела|использу|дайте|отмет|укаж|сортир|подбер|разлож|предлож|произнес|"
+    r"найд|определ|соедин|состав|распредел|сгруппир|хлопн|хлопа|дуть|дуй|дуйте|"
+    r"встав|законч|автоматиз|дифференцир|show|ask|repeat|name|choose|select|compare|"
+    r"listen|read|tell|play|practice|perform|use|give|mark|point|sort|match)\w*",
     re.IGNORECASE,
 )
 
@@ -472,7 +474,9 @@ PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE = re.compile(
     r"материал\w*|material\w*|карточ\w*|card\w*|картин\w*|picture\w*|image\w*|"
     r"игруш\w*|toy\w*|мяч\w*|ball\w*|зеркал\w*|mirror\w*|таймер\w*|timer\w*|"
     r"компьютер\w*|computer\w*|планшет\w*|tablet\w*|книга\w*|book\w*|"
-    r"предмет\w*|object\w*|упражн\w*|задани\w*|игр\w*|при[её]м\w*|"
+    r"предмет\w*|object\w*|слов\w*|слог\w*|фраз\w*|предложени\w*|текст\w*|"
+    r"скороговор\w*|чистоговор\w*|мнемотаблиц\w*|схем\w*|таблиц\w*|фишк\w*|"
+    r"кубик\w*|сюжет\w*|изображени\w*|упражн\w*|задани\w*|игр\w*|при[её]м\w*|"
     r"activity\w*|game\w*|exercise\w*|task\w*|protocol\w*|method\w*)",
     re.IGNORECASE,
 )
@@ -494,6 +498,21 @@ PRO_EVIDENCE_CRITERION_RE = re.compile(
     r"assess|notice|look\s+for|criterion|result|whether|mark|check|"
     r"реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима|различа|определя)|"
     r"child\s+(repeats?|names?|chooses?|selects?|answers?|maintains?|understands?|identifies?|discriminates?))\w*",
+    re.IGNORECASE,
+)
+
+PRO_OBSERVATION_ALLOWED_RE = re.compile(
+    r"\b(реб[её]нок\s+(повтор|различа|выбира|называ|выполня|отвеча|показыва|указывает|"
+    r"сортиру|соединя|составля|наход|определя|произнос|хлопа|дует|удержива|понима)|"
+    r"(повторяет|различает|выбирает|называет|выполняет|отвечает|показывает|указывает|"
+    r"сортирует|соединяет|составляет|находит|определяет|произносит|хлопает|дует|"
+    r"удерживает|понимает))\w*",
+    re.IGNORECASE,
+)
+
+PRO_OBSERVATION_UNSUPPORTED_CLAIM_RE = re.compile(
+    r"(мозг\w*|нейро\w*|нейрон\w*|речев\w*\s+зон\w*|речев\w*\s+центр\w*|"
+    r"диагноз\w*|медицин\w*|тонус\w*|коры|леч\w*|исправля\w*\s+нарушени\w*)",
     re.IGNORECASE,
 )
 
@@ -525,8 +544,7 @@ def _has_pro_minimum_evidence(evidence_text: str) -> bool:
     evidence = _normalize_scan_text(evidence_text)
     action_ok = bool(PRO_EVIDENCE_ACTION_RE.search(evidence))
     material_ok = bool(PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE.search(evidence))
-    criterion_ok = bool(PRO_EVIDENCE_CRITERION_RE.search(evidence))
-    return action_ok and material_ok and criterion_ok
+    return action_ok and material_ok
 
 
 def validate_pro_evidence_for_generation(evidence_text: str) -> Tuple[bool, str]:
@@ -834,6 +852,21 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
     )
     if not re.search(r"(^|\n|\s)1[\).]\s+", steps) or not re.search(r"(^|\n|\s)2[\).]\s+", steps):
         return False, "pro_missing_steps"
+
+    observation = _extract_section_after_header(
+        text,
+        r"^✅\s*На что смотреть\s*[:：]?\s*",
+        [
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+        ],
+    )
+    if not PRO_OBSERVATION_ALLOWED_RE.search(_normalize_scan_text(observation)):
+        return False, "pro_missing_observation_criterion"
+    if PRO_OBSERVATION_UNSUPPORTED_CLAIM_RE.search(_normalize_scan_text(observation)):
+        return False, "pro_unsupported_observation_claim"
 
     if not any(verb in blob for verb in PRO_ACTION_VERBS):
         return False, "pro_too_abstract"

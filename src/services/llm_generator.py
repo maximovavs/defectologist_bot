@@ -252,6 +252,14 @@ def _normalize_scan_text(text: str) -> str:
     return norm_space(text).replace("ё", "е").lower()
 
 
+def _normalize_scan_lines(text: str) -> List[str]:
+    return [
+        norm_space(line).replace("ё", "е").lower()
+        for line in (text or "").replace("\r\n", "\n").split("\n")
+        if norm_space(line)
+    ]
+
+
 def _contains_banned(text: str) -> Optional[str]:
     blob = _normalize_scan_text(text or "")
     for ph in BANNED_PHRASES:
@@ -296,10 +304,25 @@ RISKY_MECHANISM_CLAIMS: List[Tuple[str, str, List[str]]] = [
     (r"стимулир\w+\s+мозгов\w+\s+зон\w*", "стимулирует мозговые зоны", ["стимулир", "мозгов", "зон"]),
 ]
 
+RISKY_MECHANISM_ENGLISH_ALIASES = {
+    "тонус коры": ["cortical tone"],
+    "повышает тонус коры": ["cortical tone"],
+    "активирует речевые зоны": ["activates speech areas", "activates language areas"],
+    "формирует нейронные связи": ["neural connections"],
+    "запускает речевые центры": ["speech centers"],
+}
+
 
 def _all_terms_present(text: str, terms: List[str]) -> bool:
     blob = _normalize_scan_text(text)
     return all(_normalize_scan_text(term) in blob for term in terms if term)
+
+
+def _supports_risky_mechanism_claim(text: str, label: str, terms: List[str]) -> bool:
+    blob = _normalize_scan_text(text)
+    if _all_terms_present(blob, terms):
+        return True
+    return any(_normalize_scan_text(alias) in blob for alias in RISKY_MECHANISM_ENGLISH_ALIASES.get(label, []))
 
 
 def validate_evidence_grounding(
@@ -313,7 +336,7 @@ def validate_evidence_grounding(
         return True, "ok"
 
     for pattern, label, evidence_terms in RISKY_MECHANISM_CLAIMS:
-        if re.search(pattern, out, flags=re.IGNORECASE) and not _all_terms_present(evidence_text, evidence_terms):
+        if re.search(pattern, out, flags=re.IGNORECASE) and not _supports_risky_mechanism_claim(evidence_text, label, evidence_terms):
             return False, f"unsupported_mechanism_claim:{label}"
 
     return True, "ok"
@@ -334,6 +357,61 @@ PRO_CONCRETE_DETAIL_PATTERNS: List[Tuple[str, str, List[List[str]]]] = [
     (r"\bкарточ\w*|\bкартин\w*|\bcards?\b|\bpictures?\b|\bimages?\b", "карточки/картинки", [["карточ"], ["картин"], ["cards"], ["picture cards"], ["pictures"], ["images"]]),
     (r"\bраз(?:а|)\s+повтор\w*", "раз повторить", [["раз", "повтор"], ["times", "repeat"]]),
 ]
+
+SIMPLE_NUMBER_WORDS = {
+    "one": "1",
+    "один": "1",
+    "одна": "1",
+    "two": "2",
+    "два": "2",
+    "две": "2",
+    "three": "3",
+    "три": "3",
+    "four": "4",
+    "четыре": "4",
+    "five": "5",
+    "пять": "5",
+}
+
+CONCRETE_NUMERIC_UNITS: List[Tuple[str, str]] = [
+    ("seconds", r"секунд\w*|seconds?|sec"),
+    ("minutes", r"минут\w*|minutes?|min"),
+    ("repetitions", r"раз(?:а)?|повтор(?:ов|а)?|times?|repetitions?"),
+    ("cards", r"карточ\w*|cards?"),
+    ("objects", r"предмет\w*|objects?"),
+]
+
+
+def _strip_non_method_numeric_context(text: str) -> str:
+    kept: List[str] = []
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        normalized = _normalize_scan_text(stripped)
+        if not stripped:
+            continue
+        if stripped.startswith("#") or normalized.startswith("источник") or "http://" in normalized or "https://" in normalized:
+            continue
+        if re.match(r"^[👶\s]*(возраст|age)\s*[:：]", normalized, flags=re.IGNORECASE):
+            continue
+        kept.append(stripped)
+    return "\n".join(kept)
+
+
+def _extract_concrete_number_units(text: str) -> set[Tuple[str, str]]:
+    blob = _normalize_scan_text(_strip_non_method_numeric_context(text))
+    if not blob:
+        return set()
+
+    number_pattern = r"\d+|" + "|".join(sorted(map(re.escape, SIMPLE_NUMBER_WORDS), key=len, reverse=True))
+    pairs: set[Tuple[str, str]] = set()
+    for canonical_unit, unit_pattern in CONCRETE_NUMERIC_UNITS:
+        pattern = rf"\b({number_pattern})\b(?:\s+\w+){{0,2}}\s+\b({unit_pattern})\b"
+        for match in re.finditer(pattern, blob, flags=re.IGNORECASE):
+            raw_value = match.group(1)
+            value = SIMPLE_NUMBER_WORDS.get(raw_value, raw_value)
+            pairs.add((value, canonical_unit))
+    return pairs
+
 
 BILINGUAL_TERM_PATTERNS = [
     r"двуязыч\w*",
@@ -392,6 +470,12 @@ def validate_pro_concrete_details(output_text: str, evidence_text: str) -> Tuple
         has_evidence_concept = any(all(term in evidence for term in alias_terms) for alias_terms in evidence_aliases)
         if re.search(pattern, out, flags=re.IGNORECASE) and not has_evidence_concept:
             return False, f"pro_unsupported_concrete_detail:{label}"
+
+    evidence_numeric_details = _extract_concrete_number_units(evidence_text)
+    for value, unit in sorted(_extract_concrete_number_units(output_text)):
+        if (value, unit) not in evidence_numeric_details:
+            return False, f"pro_unsupported_numeric_detail:{value}_{unit}"
+
     return True, "ok"
 
 
@@ -421,12 +505,17 @@ def _has_pro_minimum_evidence(evidence_text: str) -> bool:
     return action_ok and material_ok and criterion_ok
 
 
-def _has_parent_specific_risk(blob: str) -> bool:
-    lines = [line.strip() for line in (blob or "").split("\n") if line.strip()]
+def _has_parent_specific_risk(text_or_lines: str | List[str]) -> bool:
+    if isinstance(text_or_lines, list):
+        lines = text_or_lines
+    else:
+        lines = _normalize_scan_lines(text_or_lines)
     specific_patterns = [
         r"\bмой\s+реб[её]нок.{0,60}мало\s+говор",
         r"\bреб[её]нок.{0,60}мало\s+говор",
         r"\bреб[её]нок.{0,60}перестал\w*\s+говор",
+        r"\bмой\s+реб[её]нок.{0,80}перестал\w*.{0,40}(слов|навык)",
+        r"\bреб[её]нок.{0,80}перестал\w*.{0,40}(слов|навык)",
         r"\bперестал\w*\s+говор",
         r"\b(он|она).{0,40}потерял\w*.{0,40}навык",
         r"\bреб[её]нок.{0,60}потерял\w*.{0,40}навык",
@@ -440,10 +529,12 @@ def _has_parent_specific_risk(blob: str) -> bool:
         r"задержк\w*\s+реч\w*\s+может\s+иметь\s+разн\w*\s+причин",
     ]
     for line in lines:
-        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in general_exclusions):
-            continue
-        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in specific_patterns):
-            return True
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", line) if part.strip()]
+        for sentence in sentences or [line]:
+            if any(re.search(pattern, sentence, flags=re.IGNORECASE) for pattern in general_exclusions):
+                continue
+            if any(re.search(pattern, sentence, flags=re.IGNORECASE) for pattern in specific_patterns):
+                return True
     return False
 
 
@@ -453,7 +544,7 @@ def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
     if blanket:
         return False, "blanket_reassurance"
 
-    if not _has_parent_specific_risk(blob):
+    if not _has_parent_specific_risk(_normalize_scan_lines(text)):
         return True, "ok"
 
     if not _contains_any_fragment(blob, PARENT_SAFETY_ACTIONS):

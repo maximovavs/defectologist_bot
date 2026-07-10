@@ -56,6 +56,43 @@ class RubricQualityTest(unittest.TestCase):
 
         self.assertTrue(ok, reason)
 
+    def test_pro_timer_rejects_unsupported_numeric_seconds(self):
+        evidence = "Use a timer for 10 seconds."
+        output = "Включите таймер на 30 секунд."
+
+        ok, reason = validate_pro_concrete_details(output, evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_unsupported_numeric_detail:30_seconds")
+
+    def test_pro_repetitions_reject_unsupported_numeric_count(self):
+        evidence = "Repeat the word 3 times."
+        output = "Повторите слово 5 раз."
+
+        ok, reason = validate_pro_concrete_details(output, evidence)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_unsupported_numeric_detail:5_repetitions")
+
+    def test_pro_cards_accept_compatible_numeric_count(self):
+        evidence = "Show 6 picture cards."
+        output = "Разложите 6 карточек."
+
+        ok, reason = validate_pro_concrete_details(output, evidence)
+
+        self.assertTrue(ok, reason)
+
+    def test_pro_ignores_age_line_numeric_range(self):
+        evidence = "Use a timer for 30 seconds."
+        output = (
+            "👶 Возраст: 2-3 года\n"
+            "Включите таймер на 30 секунд."
+        )
+
+        ok, reason = validate_pro_concrete_details(output, evidence)
+
+        self.assertTrue(ok, reason)
+
     def test_pro_timer_rejected_without_timer_evidence(self):
         evidence = "Use picture cards for 30 seconds. Observe whether the child selects a card."
         output = "Включите таймер на 30 секунд."
@@ -128,6 +165,50 @@ class RubricQualityTest(unittest.TestCase):
         ok, reason = _validate_parent_safety_output(text)
 
         self.assertTrue(ok, reason)
+
+    def test_parent_safety_myth_then_child_regression_requires_note(self):
+        text = (
+            "🔴 Миф: два языка вызывают задержку речи.\n\n"
+            "Но мой ребёнок перестал использовать знакомые слова."
+        )
+
+        ok, reason = _validate_parent_safety_output(text)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing_parent_safety_note")
+
+    def test_parent_safety_myth_fact_only_passes(self):
+        text = (
+            "🔴 Миф: два языка вызывают задержку речи.\n"
+            "Факт: двуязычие само по себе не вызывает задержку речи."
+        )
+
+        ok, reason = _validate_parent_safety_output(text)
+
+        self.assertTrue(ok, reason)
+
+    def test_parent_safety_myth_then_child_regression_passes_with_note(self):
+        text = (
+            "🔴 Миф: два языка вызывают задержку речи.\n\n"
+            "Но мой ребёнок перестал использовать знакомые слова.\n"
+            "Если навык пропал, стоит обсудить это с педиатром или логопедом "
+            "и проверить слух."
+        )
+
+        ok, reason = _validate_parent_safety_output(text)
+
+        self.assertTrue(ok, reason)
+
+    def test_parent_safety_negated_delay_does_not_hide_later_concern(self):
+        text = (
+            "Факт: двуязычие само по себе не вызывает задержку речи.\n"
+            "Но мой ребёнок перестал использовать знакомые слова."
+        )
+
+        ok, reason = _validate_parent_safety_output(text)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing_parent_safety_note")
 
     def test_parent_safety_child_concern_requires_note(self):
         text = "Мой ребёнок почти 3 лет мало говорит. Ребёнок перестал говорить знакомые слова."

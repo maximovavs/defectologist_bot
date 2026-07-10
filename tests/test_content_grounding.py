@@ -29,6 +29,23 @@ class ContentGroundingTest(unittest.TestCase):
 
         self.assertTrue(ok, reason)
 
+    def test_mechanism_passes_with_controlled_english_phrase_alias(self):
+        ok, reason = validate_evidence_grounding(
+            "Игра активирует речевые зоны.",
+            "The article says this activity activates speech areas during practice.",
+        )
+
+        self.assertTrue(ok, reason)
+
+    def test_mechanism_rejects_isolated_english_words(self):
+        ok, reason = validate_evidence_grounding(
+            "Игра активирует речевые зоны.",
+            "The article mentions active play, speech practice, and classroom areas separately.",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "unsupported_mechanism_claim:активирует речевые зоны")
+
 
 if __name__ == "__main__":
     unittest.main()

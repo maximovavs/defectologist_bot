@@ -211,14 +211,6 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["SA"]
         sources:
-          - "logopediya_documents_rss"
-          - "logopediya_ppt_rss"
-          - "logopedy_articles_latest"
-          - "logoportal_latest"
-          - "kidskey_speech_games"
-          - "parents_language_activities"
-          - "parents_toddler_language_boost"
-          - "verywell_dramatic_play_language"
-          - "verywell_household_objects_play"
+          - "method_piggybank_curated_activities"
         format: "pro_friendly"
         media: ["image_card"]

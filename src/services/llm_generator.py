@@ -462,8 +462,8 @@ MISLEADING_POLITENESS_TITLE_PATTERNS = [
 
 PRO_EVIDENCE_ACTION_RE = re.compile(
     r"\b(покаж|попрос|повтор|назов|выбер|сравн|слуш|прочит|расскаж|провед|выполн|"
-    r"игра|дела|использу|дайте|отмет|show|ask|repeat|name|choose|select|compare|"
-    r"listen|read|tell|play|practice|perform|use|give|mark)\w*",
+    r"игра|дела|использу|дайте|отмет|укаж|сортир|подбер|show|ask|repeat|name|choose|select|compare|"
+    r"listen|read|tell|play|practice|perform|use|give|mark|point|sort|match)\w*",
     re.IGNORECASE,
 )
 
@@ -492,8 +492,8 @@ PRO_EVIDENCE_NO_MATERIALS_RE = re.compile(
 PRO_EVIDENCE_CRITERION_RE = re.compile(
     r"\b(смотр|наблюд|оцени|критери|результат|получа|отмет|провер|observe|watch|"
     r"assess|notice|look\s+for|criterion|result|whether|mark|check|"
-    r"реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима|различа|определя)|"
-    r"child\s+(repeats?|names?|chooses?|selects?|answers?|maintains?|understands?|identifies?|discriminates?))\w*",
+    r"реб[её]нок\s+(повтор|называ|выбира|отвеча|удержива|понима|различа|определя|показыва|указывает|соотносит|сортирует|пересказыва|выполня|использует)|"
+    r"child\s+(repeats?|names?|chooses?|selects?|points?|answers?|matches?|sorts?|retells?|follows?|uses?|maintains?|understands?|identifies?|discriminates?))\w*",
     re.IGNORECASE,
 )
 
@@ -779,6 +779,21 @@ PRO_ACTION_VERBS = [
     "усложните",
     "дайте",
 ]
+
+PRO_FRIENDLY_REPAIR_INSTRUCTION = (
+    "Для pro_friendly обязательно верни структурированный Telegram-пост: "
+    "H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, затем блоки 🎯 Цель:, "
+    "🧰 Материалы:, 🔁 Как провести: с шагами 1., 2., 3., ✅ На что смотреть:, "
+    "💡 Вариант усложнения:. Это должна быть практическая карточка метода, "
+    "не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
+    "В шагах должны быть конкретные действия: покажите, назовите, попросите, повторите, "
+    "выберите, сравните, отметьте или дайте. Rebuild the method card only from EVIDENCE. "
+    "Do not invent materials, numbers, timing, equipment, levels, or software modes. "
+    "Не придумывай таймеры, зеркало, карточки, картинки, уровни, режимы, программы, "
+    "количество повторов или этапы прогрессии. "
+    "If EVIDENCE does not support a full method card, return НЕТ_ДАННЫХ. "
+    "Если данных не хватает — верни НЕТ_ДАННЫХ. Без Markdown и без звездочек."
+)
 
 
 def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
@@ -1919,17 +1934,7 @@ async def generate_post_plain_from_evidence_async(
                 )
 
             if aud == "pros" or rf == "pro_friendly":
-                repair_prompt += (
-                    "Для pro_friendly обязательно верни структурированный Telegram-пост: "
-                    "H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, затем блоки 🎯 Цель:, "
-                    "🧰 Материалы:, 🔁 Как провести: с шагами 1., 2., 3., ✅ На что смотреть:, "
-                    "💡 Вариант усложнения:. Это должна быть практическая карточка метода, "
-                    "не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
-                    "В шагах должны быть конкретные действия: покажите, назовите, попросите, повторите, "
-                    "выберите, сравните, отметьте или дайте. Строй карточку только из EVIDENCE; "
-                    "не придумывай таймеры, зеркало, карточки, картинки, уровни, режимы, программы, количество повторов или этапы прогрессии. "
-                    "Если данных не хватает — верни НЕТ_ДАННЫХ. Без Markdown и без звездочек."
-                )
+                repair_prompt += PRO_FRIENDLY_REPAIR_INSTRUCTION
 
             out2 = postprocess(await groq_chat(repair_prompt, groq_key))
             ok2, reason2 = validate(out2)

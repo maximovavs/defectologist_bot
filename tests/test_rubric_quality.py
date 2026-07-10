@@ -1,6 +1,7 @@
 import unittest
 
 from src.services.llm_generator import (
+    PRO_FRIENDLY_REPAIR_INSTRUCTION,
     _validate_bilingual_output,
     _validate_output,
     _validate_parent_safety_output,
@@ -57,6 +58,27 @@ class RubricQualityTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "pro_insufficient_evidence")
 
+    def test_curated_method_source_fixture_passes_prefilter(self):
+        evidence = (
+            "Play a sound sorting game. Show picture cards with the target sound and another sound. "
+            "Ask the child to choose the picture, name it, and sort it into the matching pile. "
+            "Check whether the child identifies the correct sound and names the picture clearly."
+        )
+
+        ok, reason = validate_pro_evidence_for_generation(evidence)
+
+        self.assertTrue(ok, reason)
+
+    def test_pro_no_props_observable_response_prefilter_passes(self):
+        evidence = (
+            "Play a word game with no special materials. Say a short word and ask the child to repeat it. "
+            "The child repeats the word, answers with a phrase, and uses the word in a short sentence."
+        )
+
+        ok, reason = validate_pro_evidence_for_generation(evidence)
+
+        self.assertTrue(ok, reason)
+
     def test_pro_activity_without_props_passes_with_no_special_materials(self):
         evidence = (
             "Play a word game with no special materials. Ask the child to repeat a short word, "
@@ -101,6 +123,14 @@ class RubricQualityTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "pro_unsupported_concrete_detail:без специальных материалов")
+
+    def test_pro_friendly_repair_instruction_preserves_anti_invention_rules(self):
+        instruction = PRO_FRIENDLY_REPAIR_INSTRUCTION.lower()
+
+        self.assertIn("do not invent materials", instruction)
+        self.assertIn("numbers", instruction)
+        self.assertIn("timing", instruction)
+        self.assertIn("return нет_данных", instruction)
 
     def test_pro_timer_supported_by_english_evidence(self):
         evidence = "Use a timer for 30 seconds. Observe whether the child maintains attention."

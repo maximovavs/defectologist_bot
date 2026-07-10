@@ -144,6 +144,18 @@ sources:
     url: "https://logopedy.ru/portal/logoped-literature/logoped-article.html"
     parser: "logopedy_articles"
 
+  - id: method_piggybank_curated_activities
+    name: "Curated method piggybank — concrete activities"
+    type: static
+    urls:
+      - "https://logoportal.ru/statya-20297.html"
+      - "https://logoportal.ru/statya-20291.html"
+      - "https://logoportal.ru/statya-20253.html"
+      - "https://logoportal.ru/statya-20231.html"
+      - "https://kidskey.org/blog/speech-development-games"
+      - "https://www.parents.com/how-to-encourage-your-childs-language-development-11709296"
+      - "https://www.parents.com/ways-to-help-your-toddler-talk-11981212"
+
   # ---------- ASHA / English sources ----------
 
   - id: asha_multilingual_public

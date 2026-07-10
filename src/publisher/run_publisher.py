@@ -213,6 +213,8 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_missing_observation_criterion",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_unsupported_concrete_detail",
+    "pro_unsupported_numeric_detail",
 }
 
 PRO_VALIDATION_SKIP_PREFIXES = (
@@ -869,6 +871,20 @@ def fetch_static(urls: List[str]) -> List[Dict[str, str]]:
     return [{"title": "", "link": u, "summary": ""} for u in (urls or [])]
 
 
+def _decode_response_text(r: requests.Response) -> str:
+    text = r.text
+    if text.count("�") < 5:
+        return text
+
+    candidates = [text]
+    for encoding in ("cp1251", "windows-1251", "utf-8"):
+        try:
+            candidates.append(r.content.decode(encoding))
+        except UnicodeDecodeError:
+            continue
+    return min(candidates, key=lambda value: (value.count("�"), -len(value)))
+
+
 def _abs(base_url: str, href: str) -> str:
     href = (href or "").strip()
     if not href:
@@ -969,7 +985,7 @@ def fetch_html_site(url: str, parser_name: str) -> List[Dict[str, str]]:
     parser = SITE_PARSERS.get(parser_name)
     if not parser:
         raise ValueError(f"Unknown site parser: {parser_name}")
-    items = parser(url, r.text)
+    items = parser(url, _decode_response_text(r))
     uniq: Dict[str, Dict[str, str]] = {}
     for it in items:
         uniq[it["link"]] = it
@@ -1009,7 +1025,7 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     if "text/html" not in ctype and "application/xhtml" not in ctype:
         return ""
 
-    soup = BeautifulSoup(r.text, "lxml")
+    soup = BeautifulSoup(_decode_response_text(r), "lxml")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 

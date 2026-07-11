@@ -1334,7 +1334,12 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
 # Prompt templates
 # -----------------------
 
-def _common_rules(max_chars: int) -> str:
+def _common_rules(max_chars: int, allow_numbered_steps: bool = False) -> str:
+    numbered_steps_rule = (
+        "Для pro_friendly в блоке 🔁 Как провести: используй ровно три коротких шага: 1., 2., 3.; не добавляй шаг 4.\n"
+        if allow_numbered_steps
+        else "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
+    )
     return (
         "Ты — практикующий Логопед-дефектолог и сильный Telegram-редактор.\n"
         "Пиши по-русски.\n"
@@ -1360,7 +1365,7 @@ def _common_rules(max_chars: int) -> str:
         "Не используй Markdown и кодовые блоки.\n"
         "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
         "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
-        "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
+        + numbered_steps_rule +
         "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
         "Используй формат вроде: #билингвизм #запуск_речи\n"
         "Никогда не пиши больше двух тематических хештегов.\n"
@@ -1406,7 +1411,8 @@ def build_generation_prompt(
     aud = (audience or "parents").strip().lower()
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
-    rules = _common_rules(max_chars)
+    is_pro_format = aud == "pros" or rf == "pro_friendly"
+    rules = _common_rules(max_chars, allow_numbered_steps=is_pro_format)
 
     if aud == "pros":
         template = (
@@ -1834,6 +1840,73 @@ async def generate_image_prompt_async(
     return "", False, f"image_prompt_failed:groq={groq_err}"
 
 
+PRO_FRIENDLY_REPAIR_EXACT_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
+    "pro_empty",
+    "pro_title_too_long",
+    "pro_markdown_or_template_leak",
+    "pro_generic_benefit",
+    "pro_missing_goal",
+    "pro_missing_materials",
+    "pro_missing_steps",
+    "pro_missing_observation_criterion",
+    "pro_missing_method_card_heading",
+    "pro_unsupported_observation_claim",
+    "pro_too_abstract",
+    "pro_old_academic_structure",
+}
+
+PRO_FRIENDLY_REPAIR_PREFIX_REASONS = (
+    "banned_phrase",
+    "unsupported_mechanism_claim",
+    "pro_unsupported_concrete_detail",
+    "pro_unsupported_numeric_detail",
+)
+
+
+def _should_repair_pro_friendly_reason(reason: str) -> bool:
+    reason = (reason or "").strip()
+    return reason in PRO_FRIENDLY_REPAIR_EXACT_REASONS or any(
+        reason.startswith(prefix + ":") for prefix in PRO_FRIENDLY_REPAIR_PREFIX_REASONS
+    )
+
+
+def build_pro_friendly_repair_prompt(base_prompt: str, reason: str) -> str:
+    reason = (reason or "").strip()
+    if not _should_repair_pro_friendly_reason(reason):
+        return ""
+
+    no_data_note = ""
+    if reason == "no_data_in_source":
+        no_data_note = (
+            "Pre-LLM evidence gate уже нашёл в источнике действие и упражнение/материал. "
+            "Не возвращай НЕТ_ДАННЫХ автоматически: построй карточку только из этих найденных действий и материалов, "
+            "не добавляя новых деталей. "
+        )
+
+    return (
+        base_prompt
+        + "\n\nПОВТОРИ pro_friendly method card. Предыдущий вариант не прошёл строгую валидацию.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + no_data_note
+        + "Верни структурированный Telegram-пост: H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, "
+        + "затем блоки 🎯 Цель:, 🧰 Материалы:, 🔁 Как провести: с ровно тремя короткими шагами 1., 2., 3., "
+        + "✅ На что смотреть:, 💡 Вариант усложнения:. "
+        + "Это должна быть практическая карточка метода, а не академический конспект. "
+        + "Не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
+        + "В шагах должны быть конкретные действия специалиста и ребёнка. "
+        + "В ✅ На что смотреть: пиши только непосредственную наблюдаемую реакцию ребёнка из задания. "
+        + "Не придумывай медицинский результат, механизм работы, диагноз, улучшение функций мозга или долгосрочный эффект. "
+        + "Строй карточку только из EVIDENCE; не придумывай таймеры, зеркало, карточки, картинки, уровни, режимы, "
+        + "программы, количество повторов или этапы прогрессии. "
+        + "Если после этого данных всё равно не хватает для действия и упражнения/материала — верни НЕТ_ДАННЫХ. "
+        + "Без Markdown, без звездочек, без placeholders."
+    )
+
+
 # -----------------------
 # Public API
 # -----------------------
@@ -1905,6 +1978,56 @@ async def generate_post_plain_from_evidence_async(
         return "", False, "provider:none"
 
     groq_err = ""
+    repair_prompt = ""
+    is_pro_format = aud == "pros" or rf == "pro_friendly"
+
+    def build_generic_repair_prompt(reason: str) -> str:
+        repair = (
+            prompt
+            + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+            + reason
+            + ". "
+            + "Сделай текст живее, плотнее и конкретнее. "
+            + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
+            + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
+            + "Сразу иди к сути и не делай текст слишком коротким. "
+        )
+
+        if dk == "MO" or rf == "tip_of_day":
+            repair += (
+                "Для Monday обязательно: первая строка — один прикладной совет, "
+                "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
+                "никаких обзоров темы и общих формулировок. "
+                "Сохрани блоки 🧩, 👄 и 💡."
+            )
+
+        if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
+            repair += (
+                "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
+                "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
+                "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
+            )
+
+        if dk == "FR" or rf == "question_week":
+            repair += (
+                "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
+                "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
+                "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
+                "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+                "Запрещено оставлять «...», «…» или пустой блок. "
+                "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
+            )
+
+        if dk == "SU" or rf == "age_norms":
+            repair += (
+                "Для Sunday обязательно: только возрастные ориентиры и milestones, "
+                "без патологической, диагностической и коррекционной лексики, "
+                "с фразой «Каждый ребенок развивается индивидуально»."
+            )
+
+        return repair
 
     if prov in ("auto", "groq"):
         if not groq_key:
@@ -1916,73 +2039,23 @@ async def generate_post_plain_from_evidence_async(
                 return out, True, "ok:groq"
 
             repair_prompt = (
-                prompt
-                + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
-                + reason
-                + ". "
-                + "Сделай текст живее, плотнее и конкретнее. "
-                + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
-                + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
-                + "Сразу иди к сути и не делай текст слишком коротким. "
+                build_pro_friendly_repair_prompt(prompt, reason)
+                if is_pro_format
+                else build_generic_repair_prompt(reason)
             )
+            if repair_prompt:
+                out2 = postprocess(await groq_chat(repair_prompt, groq_key))
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, "ok:groq_retry"
+                groq_err = f"invalid_groq_retry:{reason2}"
+            else:
+                groq_err = f"invalid_groq:{reason}"
 
-            if dk == "MO" or rf == "tip_of_day":
-                repair_prompt += (
-                    "Для Monday обязательно: первая строка — один прикладной совет, "
-                    "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
-                    "никаких обзоров темы и общих формулировок. "
-                    "Сохрани блоки 🧩, 👄 и 💡."
-                )
-
-            if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
-                repair_prompt += (
-                    "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
-                    "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
-                    "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
-                )
-
-            if dk == "FR" or rf == "question_week":
-                repair_prompt += (
-                    "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
-                    "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
-                    "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
-                    "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
-                    "Запрещено оставлять «...», «…» или пустой блок. "
-                    "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
-                    "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
-                    "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
-                )
-
-            if dk == "SU" or rf == "age_norms":
-                repair_prompt += (
-                    "Для Sunday обязательно: только возрастные ориентиры и milestones, "
-                    "без патологической, диагностической и коррекционной лексики, "
-                    "с фразой «Каждый ребенок развивается индивидуально»."
-                )
-
-            if aud == "pros" or rf == "pro_friendly":
-                repair_prompt += (
-                    "Для pro_friendly обязательно верни структурированный Telegram-пост: "
-                    "H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, затем блоки 🎯 Цель:, "
-                    "🧰 Материалы:, 🔁 Как провести: с шагами 1., 2., 3., ✅ На что смотреть:, "
-                    "💡 Вариант усложнения:. Это должна быть практическая карточка метода, "
-                    "не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
-                    "В шагах должны быть конкретные действия: покажите, назовите, попросите, повторите, "
-                    "выберите, сравните, отметьте или дайте. Строй карточку только из EVIDENCE; "
-                    "не придумывай таймеры, зеркало, карточки, картинки, уровни, режимы, программы, количество повторов или этапы прогрессии. "
-                    "Если данных не хватает — верни НЕТ_ДАННЫХ. Без Markdown и без звездочек."
-                )
-
-            out2 = postprocess(await groq_chat(repair_prompt, groq_key))
-            ok2, reason2 = validate(out2)
-            if ok2:
-                return out2, True, "ok:groq_retry"
-
-            groq_err = f"invalid_groq:{reason2}"
             if prov == "groq":
                 return "", False, groq_err
 
-            print(f"[LLM][groq] invalid output, falling back to gemini: {reason2}", flush=True)
+            print(f"[LLM][groq] invalid output, falling back to gemini: {groq_err}", flush=True)
         except Exception as e:
             groq_err = str(e)
             if prov == "groq":
@@ -1997,7 +2070,16 @@ async def generate_post_plain_from_evidence_async(
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
 
-            if (dk == "FR" or rf == "question_week") and (
+            if is_pro_format:
+                gemini_repair_prompt = build_pro_friendly_repair_prompt(prompt, reason)
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif (dk == "FR" or rf == "question_week") and (
                 reason in {"too_short", "no_data_in_source"} or reason.startswith("question_week_")
             ):
                 gemini_repair_prompt = repair_prompt or (

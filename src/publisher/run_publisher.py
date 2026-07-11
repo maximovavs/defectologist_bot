@@ -174,7 +174,15 @@ SOFT_SKIP_REASONS = {
     "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
     "pro_unsupported_numeric_detail",
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
     "pro_insufficient_evidence",
+    "pro_empty",
+    "pro_title_too_long",
+    "pro_markdown_or_template_leak",
+    "pro_generic_benefit",
     "pro_missing_goal",
     "pro_missing_materials",
     "pro_missing_steps",
@@ -182,6 +190,7 @@ SOFT_SKIP_REASONS = {
     "pro_unsupported_observation_claim",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_missing_method_card_heading",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
     "bilingual_false_causality",
@@ -207,7 +216,15 @@ HARD_SKIP_REASONS = {
 }
 
 PRO_VALIDATION_SKIP_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
     "pro_insufficient_evidence",
+    "pro_empty",
+    "pro_title_too_long",
+    "pro_markdown_or_template_leak",
+    "pro_generic_benefit",
     "pro_missing_goal",
     "pro_missing_materials",
     "pro_missing_steps",
@@ -215,9 +232,12 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_unsupported_observation_claim",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_missing_method_card_heading",
 }
 
 PRO_VALIDATION_SKIP_PREFIXES = (
+    "banned_phrase",
+    "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
     "pro_unsupported_numeric_detail",
 )
@@ -363,12 +383,17 @@ def _extract_pro_validation_skip_reason(llm_note: str) -> str:
     note = norm_space(llm_note)
     if not note:
         return ""
-    pieces = re.split(r"\s*\|\s*", note)
-    for piece in pieces:
-        candidate = piece
-        if ":" in candidate:
-            candidate = candidate.split(":", 1)[1]
+
+    candidates = []
+    candidates.extend(re.findall(r"invalid_(?:groq|groq_retry|gemini|gemini_retry):([^|]+)", note))
+    candidates.extend(re.split(r"\s*\|\s*", note))
+
+    for candidate in candidates:
         candidate = candidate.strip()
+        if "=" in candidate:
+            candidate = candidate.split("=", 1)[1].strip()
+        if candidate.startswith("invalid_") and ":" in candidate:
+            candidate = candidate.split(":", 1)[1].strip()
         if candidate in PRO_VALIDATION_SKIP_REASONS:
             return candidate
         if any(candidate.startswith(prefix + ":") for prefix in PRO_VALIDATION_SKIP_PREFIXES):

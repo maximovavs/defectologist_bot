@@ -45,6 +45,34 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
 
         self.assertEqual(reason, "pro_unsupported_observation_claim")
 
+    def test_publisher_extracts_general_generation_reasons(self):
+        for raw, expected in [
+            ("invalid_gemini:no_data_in_source", "no_data_in_source"),
+            ("invalid_gemini:too_short", "too_short"),
+            ("invalid_groq:template_leak", "template_leak"),
+            ("invalid_gemini:pro_generic_benefit", "pro_generic_benefit"),
+            ("invalid_groq:pro_title_too_long", "pro_title_too_long"),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(_extract_pro_validation_skip_reason(raw), expected)
+
+    def test_publisher_extracts_prefixed_generation_reasons(self):
+        for raw, expected in [
+            ("invalid_gemini:banned_phrase:создайте благоприятную среду", "banned_phrase:создайте благоприятную среду"),
+            ("invalid_groq:unsupported_mechanism_claim:активирует мозг", "unsupported_mechanism_claim:активирует мозг"),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(_extract_pro_validation_skip_reason(raw), expected)
+
+    def test_method_piggybank_excludes_unusable_sources(self):
+        excluded = {
+            "logopediya_ppt_rss",
+            "verywell_dramatic_play_language",
+            "verywell_household_objects_play",
+        }
+
+        self.assertTrue(excluded.isdisjoint(_method_piggybank_sources()))
+
     def test_method_piggybank_candidates_are_round_robin_by_source(self):
         candidates = [
             {"source_id": "big", "link": f"https://big.example/{idx}"}

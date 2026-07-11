@@ -1,0 +1,97 @@
+import unittest
+from unittest.mock import patch
+
+from src.services import llm_generator as llm
+
+
+EVIDENCE = (
+    "Play a word game with no special materials. Ask the child to repeat a short word, "
+    "then say another word and ask the child to repeat it. The specialist names the word, "
+    "asks for repetition, and marks whether the child repeats the same word clearly. "
+    "This is a practical speech activity for a specialist and child without additional equipment."
+)
+
+VALID_CARD = (
+    "Игра с коротким словом\n\n"
+    "👩‍⚕️ Аудитория: специалисты\n\n"
+    "🎯 Цель: проверить повторение короткого слова.\n\n"
+    "🧰 Материалы: без специальных материалов\n\n"
+    "🔁 Как провести:\n"
+    "1. Назовите короткое слово.\n"
+    "2. Попросите ребёнка повторить это слово.\n"
+    "3. Отметьте, повторил ли ребёнок целевое слово.\n\n"
+    "✅ На что смотреть: ребёнок повторяет целевое слово ясно.\n\n"
+    "💡 Вариант усложнения: предложите другое короткое слово."
+)
+
+MISSING_GOAL_CARD = VALID_CARD.replace(
+    "🎯 Цель: проверить повторение короткого слова.\n\n",
+    "",
+)
+
+
+async def _generate_with_gemini() -> tuple[str, bool, str]:
+    return await llm.generate_post_plain_from_evidence_async(
+        rubric_title="Суббота — Методическая копилка",
+        rubric_format="pro_friendly",
+        audience="pros",
+        title_suffix="",
+        source_domain="example.org",
+        source_url="https://example.org/source",
+        evidence_text=EVIDENCE,
+        disclaimer="",
+        hashtags=[],
+        provider="gemini",
+        groq_key="",
+        gemini_key="gemini-key",
+        max_chars=1200,
+        day_key="SA",
+    )
+
+
+class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
+    async def test_gemini_pro_invalid_output_gets_one_valid_repair(self):
+        responses = [MISSING_GOAL_CARD, VALID_CARD]
+
+        async def fake_gemini(prompt, api_key):
+            return responses.pop(0)
+
+        with patch.object(llm, "gemini_generate", side_effect=fake_gemini) as gemini_mock:
+            out, ok, note = await _generate_with_gemini()
+
+        self.assertTrue(ok, note)
+        self.assertIn("🎯 Цель:", out)
+        self.assertEqual(note, f"ok:gemini_retry:{llm.GEMINI_MODELS[0]}")
+        self.assertEqual(gemini_mock.call_count, 2)
+
+    async def test_gemini_pro_invalid_repair_returns_final_reason(self):
+        responses = [MISSING_GOAL_CARD, MISSING_GOAL_CARD]
+
+        async def fake_gemini(prompt, api_key):
+            return responses.pop(0)
+
+        with patch.object(llm, "gemini_generate", side_effect=fake_gemini) as gemini_mock:
+            out, ok, note = await _generate_with_gemini()
+
+        self.assertEqual(out, "")
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_gemini_retry:pro_missing_goal")
+        self.assertEqual(gemini_mock.call_count, 2)
+
+    async def test_gemini_pro_no_data_source_reason_gets_repair(self):
+        responses = ["НЕТ_ДАННЫХ", VALID_CARD]
+
+        async def fake_gemini(prompt, api_key):
+            return responses.pop(0)
+
+        with patch.object(llm, "gemini_generate", side_effect=fake_gemini) as gemini_mock:
+            out, ok, note = await _generate_with_gemini()
+
+        self.assertTrue(ok, note)
+        self.assertIn("Игра с коротким словом", out)
+        self.assertEqual(note, f"ok:gemini_retry:{llm.GEMINI_MODELS[0]}")
+        self.assertEqual(gemini_mock.call_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

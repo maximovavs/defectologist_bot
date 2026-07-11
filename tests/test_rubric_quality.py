@@ -148,6 +148,41 @@ class RubricQualityTest(unittest.TestCase):
 
         self.assertIn("Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.", prompt)
 
+    def test_pro_prompt_allows_required_numbered_steps(self):
+        prompt = build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text="Попросите ребёнка выбрать картинку и назвать слово.",
+            disclaimer="",
+            hashtags=[],
+            max_chars=1000,
+        )
+
+        self.assertIn("ровно три коротких шага: 1., 2., 3.", prompt)
+        self.assertNotIn("Не делай длинные нумерованные списки 1., 2., 3., 4.", prompt)
+
+    def test_parent_prompt_keeps_long_numbered_list_warning(self):
+        prompt = build_generation_prompt(
+            day_key="MO",
+            rubric_title="Совет логопеда дня",
+            rubric_format="tip_of_day",
+            audience="parents",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text="Parents can model short phrases during play.",
+            disclaimer="",
+            hashtags=[],
+            max_chars=1000,
+        )
+
+        self.assertIn("Не делай длинные нумерованные списки 1., 2., 3., 4.", prompt)
+
     def test_pro_old_academic_structure_still_fails(self):
         output = (
             "Введение\n\n"

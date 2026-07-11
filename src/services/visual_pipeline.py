@@ -35,14 +35,9 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux").strip() or "flux"
 POLLINATIONS_WIDTH = _env_int("POLLINATIONS_WIDTH", 1280)
 POLLINATIONS_HEIGHT = _env_int("POLLINATIONS_HEIGHT", 720)
 
-# Размер генерации — нативный landscape под финальную обложку.
+# Размер генерации — предпочтительный landscape под финальную обложку.
 POLLINATIONS_GEN_WIDTH = _env_int("POLLINATIONS_GEN_WIDTH", 1280)
 POLLINATIONS_GEN_HEIGHT = _env_int("POLLINATIONS_GEN_HEIGHT", 720)
-VISUAL_USE_BLURRED_BACKGROUND = os.getenv("VISUAL_USE_BLURRED_BACKGROUND", "0").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-)
 
 # Сила блюра для фоновой подложки
 POLLINATIONS_BLUR_RADIUS = _env_int("POLLINATIONS_BLUR_RADIUS", 18)
@@ -55,11 +50,13 @@ HEADERS = {
 # Mild image-quality suffix. Kept intentionally general: it improves prompt stability
 # without forcing a human figure into every cover.
 VISUAL_QUALITY_SUFFIX = (
-    "Native full-bleed 16:9 landscape composition, horizontal scene designed for 1280x720, "
+    "Horizontal cover composition suitable for Telegram, safe composition that can be placed on a 16:9 cover, "
     "clean professional educational editorial illustration, warm modern style, "
     "simple uncluttered composition, one clear interaction, relevant props from the post, soft natural lighting, "
-    "coherent realistic figure rendering when people are present, balanced composition, "
-    "no portrait poster composition, no blurred side panels, no duplicate people, no random letters or numbers, "
+    "natural human proportions, avoid distorted anatomy, no stretched faces, no widened bodies, "
+    "two arms and two legs when visible, anatomically coherent hands, "
+    "coherent realistic figure rendering when people are present, balanced composition, one clear main scene, "
+    "no portrait poster composition, no duplicate people, no random letters or numbers, "
     "no text in image, no elderly or Santa-like character unless explicitly requested, "
     "no headphones unless the post mentions listening or headphones, no holiday imagery unless the post is seasonal."
 )
@@ -184,11 +181,12 @@ def _attach_file_metadata(
     return buffer
 
 
-def _build_blurred_background_cover(img: Image.Image) -> BytesIO:
+def _build_aspect_preserved_cover(img: Image.Image) -> BytesIO:
     base = img.convert("RGB")
     target_size = (POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT)
 
-    # Фон: заполняет весь 16:9 кадр, затем размывается
+    # Фон заполняет весь кадр и может быть cropped/blurred, но не служит
+    # основным изображением. Передний план ниже всегда сохраняет пропорции.
     background = ImageOps.fit(
         base,
         target_size,
@@ -196,7 +194,8 @@ def _build_blurred_background_cover(img: Image.Image) -> BytesIO:
     )
     background = background.filter(ImageFilter.GaussianBlur(POLLINATIONS_BLUR_RADIUS))
 
-    # Передний план: вписываем без искажений
+    # Передний план: вписываем без искажений. Не используем resize(width, height)
+    # для изображения с отличающимся aspect ratio, чтобы не расширять лица/тела.
     foreground = ImageOps.contain(
         base,
         target_size,
@@ -214,19 +213,7 @@ def _build_blurred_background_cover(img: Image.Image) -> BytesIO:
 
 def _normalize_pollinations_image(raw_bytes: bytes) -> BytesIO:
     with Image.open(BytesIO(raw_bytes)) as img:
-        if VISUAL_USE_BLURRED_BACKGROUND:
-            return _build_blurred_background_cover(img)
-
-        base = img.convert("RGB")
-        fitted = ImageOps.fit(
-            base,
-            (POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
-        )
-        buffer = BytesIO()
-        fitted.save(buffer, format="PNG", optimize=True)
-        return _attach_file_metadata(buffer, filename="cover_ai.png", mime_type="image/png")
+        return _build_aspect_preserved_cover(img)
 
 
 def _pollinations_request_once(

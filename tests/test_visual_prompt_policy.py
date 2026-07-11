@@ -13,13 +13,18 @@ from src.services.visual_pipeline import (
 
 
 class VisualPromptPolicyTest(unittest.TestCase):
-    def test_enhanced_prompt_contains_landscape_rules(self):
+    def test_enhanced_prompt_contains_anti_distortion_rules(self):
         prompt = _enhance_image_prompt("parent and child reading together")
+        lower = prompt.lower()
 
-        self.assertIn("full-bleed 16:9 landscape", prompt.lower())
-        self.assertIn("no blurred side panels", prompt.lower())
-        self.assertIn("no headphones", prompt.lower())
-        self.assertIn("no holiday imagery", prompt.lower())
+        self.assertIn("horizontal cover composition suitable for telegram", lower)
+        self.assertIn("natural human proportions", lower)
+        self.assertIn("no stretched faces", lower)
+        self.assertIn("no widened bodies", lower)
+        self.assertNotIn("full-bleed 16:9 landscape", lower)
+        self.assertNotIn("no blurred side panels", lower)
+        self.assertIn("no headphones", lower)
+        self.assertIn("no holiday imagery", lower)
 
     def test_method_prompt_allows_only_present_props(self):
         prompt = build_image_prompt_prompt(
@@ -38,7 +43,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(POLLINATIONS_GEN_WIDTH, 1280)
         self.assertEqual(POLLINATIONS_GEN_HEIGHT, 720)
 
-    def test_normalized_image_is_landscape_without_side_panels(self):
+    def test_normalized_image_is_landscape(self):
         source = Image.new("RGB", (900, 900), "red")
         raw = BytesIO()
         source.save(raw, format="PNG")
@@ -46,6 +51,41 @@ class VisualPromptPolicyTest(unittest.TestCase):
         normalized = _normalize_pollinations_image(raw.getvalue())
         with Image.open(normalized) as image:
             self.assertEqual(image.size, (1280, 720))
+
+    def test_normalized_portrait_image_preserves_foreground_aspect_ratio(self):
+        source = Image.new("RGB", (100, 200), "white")
+        for y in range(200):
+            source.putpixel((0, y), (0, 0, 0))
+            source.putpixel((99, y), (0, 0, 0))
+        raw = BytesIO()
+        source.save(raw, format="PNG")
+
+        normalized = _normalize_pollinations_image(raw.getvalue())
+        with Image.open(normalized) as image:
+            self.assertEqual(image.size, (1280, 720))
+            row = [
+                x
+                for x in range(image.width)
+                if all(channel < 40 for channel in image.getpixel((x, image.height // 2))[:3])
+            ]
+
+        self.assertGreater(len(row), 0)
+        self.assertLess(max(row) - min(row), 390)
+
+    def test_image_prompt_uses_safe_cover_language(self):
+        prompt = build_image_prompt_prompt(
+            title="Игра с карточками",
+            body_text="Специалист показывает карточки и просит ребенка назвать картинку.",
+            audience="pros",
+            rubric_id="method_piggybank",
+        ).lower()
+
+        self.assertIn("horizontal cover composition suitable for telegram", prompt)
+        self.assertIn("natural human proportions", prompt)
+        self.assertIn("no stretched faces", prompt)
+        self.assertIn("no widened bodies", prompt)
+        self.assertNotIn("native full-bleed 16:9 landscape composition", prompt)
+        self.assertNotIn("no blurred side panels", prompt)
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

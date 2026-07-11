@@ -179,6 +179,7 @@ SOFT_SKIP_REASONS = {
     "pro_missing_materials",
     "pro_missing_steps",
     "pro_missing_observation_criterion",
+    "pro_unsupported_observation_claim",
     "pro_too_abstract",
     "pro_old_academic_structure",
     "bilingual_topic_mismatch",
@@ -211,6 +212,7 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_missing_materials",
     "pro_missing_steps",
     "pro_missing_observation_criterion",
+    "pro_unsupported_observation_claim",
     "pro_too_abstract",
     "pro_old_academic_structure",
 }

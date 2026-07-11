@@ -5,6 +5,7 @@ from src.services.llm_generator import (
     _validate_output,
     _validate_parent_safety_output,
     _validate_pro_output,
+    build_generation_prompt,
     validate_pro_evidence_for_generation,
     validate_pro_concrete_details,
 )
@@ -88,6 +89,64 @@ class RubricQualityTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "pro_insufficient_evidence")
+
+    def test_pro_prompt_does_not_require_observation_criterion_in_evidence(self):
+        prompt = build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=(
+                "Разложите картинки со словами на звук С. "
+                "Предложите ребёнку найти слово и соединить изображение со схемой."
+            ),
+            disclaimer="",
+            hashtags=[],
+            max_chars=1000,
+        )
+
+        self.assertNotIn("и наблюдаемого критерия — верни НЕТ_ДАННЫХ", prompt)
+        self.assertNotIn("Если в EVIDENCE нет хотя бы одного действия", prompt)
+
+    def test_pro_prompt_allows_direct_child_observation_from_task(self):
+        prompt = build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text="Предложите ребёнку выбрать изображение и назвать предмет.",
+            disclaimer="",
+            hashtags=[],
+            max_chars=1000,
+        )
+
+        self.assertIn("непосредственной наблюдаемой реакцией ребёнка", prompt)
+        self.assertIn("выбирает ли изображение", prompt)
+        self.assertIn("называет ли предмет", prompt)
+        self.assertIn("Не придумывай медицинский результат", prompt)
+
+    def test_pro_prompt_requires_no_data_without_action_or_activity_material(self):
+        prompt = build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text="Фонематический слух важен для развития речи.",
+            disclaimer="",
+            hashtags=[],
+            max_chars=1000,
+        )
+
+        self.assertIn("Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.", prompt)
 
     def test_pro_old_academic_structure_still_fails(self):
         output = (

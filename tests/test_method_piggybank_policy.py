@@ -40,6 +40,11 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
 
         self.assertEqual(reason, "pro_unsupported_numeric_detail:30_seconds")
 
+    def test_publisher_extracts_unsupported_observation_claim_reason(self):
+        reason = _extract_pro_validation_skip_reason("invalid_gemini:pro_unsupported_observation_claim")
+
+        self.assertEqual(reason, "pro_unsupported_observation_claim")
+
     def test_method_piggybank_candidates_are_round_robin_by_source(self):
         candidates = [
             {"source_id": "big", "link": f"https://big.example/{idx}"}

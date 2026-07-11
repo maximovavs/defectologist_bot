@@ -1734,7 +1734,11 @@ def build_image_prompt_prompt(
         "myth_fact": "one parent and one child; adult calmly models the correct word; child remains engaged in play",
         "bilingual_corner": "parent and child with two books or cards representing two languages; natural family communication; no random floating letters",
         "question_week": "parent observing a child during play or reading; optional small notebook; match the exact action",
-        "method_piggybank": "specialist and child in a professional activity setting; show only props explicitly mentioned in the post body",
+        "method_piggybank": (
+            "prefer 1 adult specialist and 1 child in a professional activity setting; "
+            "at most 2 adults and 1 child if the post clearly requires it; avoid crowded scenes; "
+            "show only props explicitly mentioned in the post body"
+        ),
         "age_norms": "child performing the exact milestone from the post, such as pointing, naming an object, or using a gesture",
         "tip_of_day": "one adult and one child performing the exact home activity or dialogue",
     }.get(rubric, "one adult and one child performing the exact action from the post")
@@ -1751,7 +1755,11 @@ def build_image_prompt_prompt(
         "- use a safe composition that can be placed on a 16:9 cover\n"
         "- preserve natural human proportions; avoid distorted anatomy\n"
         "- two arms and two legs when visible; anatomically coherent hands\n"
-        "- no stretched faces; no widened bodies\n"
+        "- no stretched faces; no widened bodies; no widened torsos\n"
+        "- no elongated arms or enlarged hands\n"
+        "- normal camera perspective; avoid wide-angle lens distortion; avoid panoramic distortion\n"
+        "- keep subjects comfortably centered with breathing room around the main figures\n"
+        "- one clear focal group; do not place people edge-to-edge across the frame\n"
         "- one clear main scene\n"
         "- describe one clear interaction that matches the post topic\n"
         "- use relevant props taken from the post only\n"

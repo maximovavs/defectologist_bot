@@ -21,6 +21,13 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("natural human proportions", lower)
         self.assertIn("no stretched faces", lower)
         self.assertIn("no widened bodies", lower)
+        self.assertIn("no widened torsos", lower)
+        self.assertIn("no elongated arms or enlarged hands", lower)
+        self.assertIn("normal camera perspective", lower)
+        self.assertIn("avoid wide-angle lens distortion", lower)
+        self.assertIn("avoid panoramic distortion", lower)
+        self.assertIn("one clear focal group", lower)
+        self.assertIn("do not place people edge-to-edge across the frame", lower)
         self.assertNotIn("full-bleed 16:9 landscape", lower)
         self.assertNotIn("no blurred side panels", lower)
         self.assertIn("no headphones", lower)
@@ -84,8 +91,53 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("natural human proportions", prompt)
         self.assertIn("no stretched faces", prompt)
         self.assertIn("no widened bodies", prompt)
+        self.assertIn("no widened torsos", prompt)
+        self.assertIn("avoid wide-angle lens distortion", prompt)
+        self.assertIn("avoid panoramic distortion", prompt)
+        self.assertIn("breathing room around the main figures", prompt)
+        self.assertIn("one clear focal group", prompt)
+        self.assertIn("do not place people edge-to-edge across the frame", prompt)
+        self.assertIn("prefer 1 adult specialist and 1 child", prompt)
+        self.assertIn("at most 2 adults and 1 child", prompt)
+        self.assertIn("avoid crowded scenes", prompt)
         self.assertNotIn("native full-bleed 16:9 landscape composition", prompt)
         self.assertNotIn("no blurred side panels", prompt)
+
+    def test_normalized_landscape_image_keeps_sharp_foreground_inset(self):
+        source = Image.new("RGB", (1600, 900), "white")
+        for x in range(1600):
+            for y in range(8):
+                source.putpixel((x, y), (0, 0, 0))
+                source.putpixel((x, 899 - y), (0, 0, 0))
+        for y in range(900):
+            for x in range(8):
+                source.putpixel((x, y), (0, 0, 0))
+                source.putpixel((1599 - x, y), (0, 0, 0))
+        raw = BytesIO()
+        source.save(raw, format="PNG")
+
+        normalized = _normalize_pollinations_image(raw.getvalue())
+        with Image.open(normalized) as image:
+            self.assertEqual(image.size, (1280, 720))
+            center_y = image.height // 2
+            row = [
+                x
+                for x in range(image.width)
+                if all(channel < 40 for channel in image.getpixel((x, center_y))[:3])
+            ]
+            center_x = image.width // 2
+            column = [
+                y
+                for y in range(image.height)
+                if all(channel < 40 for channel in image.getpixel((center_x, y))[:3])
+            ]
+
+        self.assertGreater(len(row), 0)
+        self.assertGreater(len(column), 0)
+        self.assertGreater(min(row), 40)
+        self.assertLess(max(row), 1240)
+        self.assertGreater(min(column), 20)
+        self.assertLess(max(column), 700)
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

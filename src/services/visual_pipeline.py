@@ -41,6 +41,7 @@ POLLINATIONS_GEN_HEIGHT = _env_int("POLLINATIONS_GEN_HEIGHT", 720)
 
 # Сила блюра для фоновой подложки
 POLLINATIONS_BLUR_RADIUS = _env_int("POLLINATIONS_BLUR_RADIUS", 18)
+POLLINATIONS_FOREGROUND_SCALE_PERCENT = 88
 
 HEADERS = {
     "User-Agent": "logoped-channel-bot/visual-pipeline/1.2",
@@ -53,9 +54,12 @@ VISUAL_QUALITY_SUFFIX = (
     "Horizontal cover composition suitable for Telegram, safe composition that can be placed on a 16:9 cover, "
     "clean professional educational editorial illustration, warm modern style, "
     "simple uncluttered composition, one clear interaction, relevant props from the post, soft natural lighting, "
-    "natural human proportions, avoid distorted anatomy, no stretched faces, no widened bodies, "
-    "two arms and two legs when visible, anatomically coherent hands, "
-    "coherent realistic figure rendering when people are present, balanced composition, one clear main scene, "
+    "natural human proportions, avoid distorted anatomy, no stretched faces, no widened bodies, no widened torsos, "
+    "no elongated arms or enlarged hands, two arms and two legs when visible, anatomically coherent hands, "
+    "normal camera perspective, avoid wide-angle lens distortion, avoid panoramic distortion, "
+    "keep subjects comfortably centered, leave breathing room around the main figures, "
+    "coherent realistic figure rendering when people are present, balanced composition, one clear main scene, one clear focal group, "
+    "do not place people edge-to-edge across the frame, "
     "no portrait poster composition, no duplicate people, no random letters or numbers, "
     "no text in image, no elderly or Santa-like character unless explicitly requested, "
     "no headphones unless the post mentions listening or headphones, no holiday imagery unless the post is seasonal."
@@ -194,11 +198,17 @@ def _build_aspect_preserved_cover(img: Image.Image) -> BytesIO:
     )
     background = background.filter(ImageFilter.GaussianBlur(POLLINATIONS_BLUR_RADIUS))
 
-    # Передний план: вписываем без искажений. Не используем resize(width, height)
-    # для изображения с отличающимся aspect ratio, чтобы не расширять лица/тела.
+    foreground_box = (
+        max(1, POLLINATIONS_WIDTH * POLLINATIONS_FOREGROUND_SCALE_PERCENT // 100),
+        max(1, POLLINATIONS_HEIGHT * POLLINATIONS_FOREGROUND_SCALE_PERCENT // 100),
+    )
+
+    # Передний план: вписываем в рамку без искажений. Даже если исходник уже
+    # близок к 16:9, не кладём sharp image edge-to-edge: это снижает ощущение
+    # wide/panoramic stretching у людей и сцены.
     foreground = ImageOps.contain(
         base,
-        target_size,
+        foreground_box,
         method=Image.Resampling.LANCZOS,
     )
 

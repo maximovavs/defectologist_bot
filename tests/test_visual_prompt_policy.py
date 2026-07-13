@@ -1,6 +1,6 @@
 from io import BytesIO
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -9,8 +9,10 @@ from src.services.visual_pipeline import (
     POLLINATIONS_GEN_HEIGHT,
     POLLINATIONS_GEN_WIDTH,
     _enhance_image_prompt,
+    _safe_visual_qa,
     build_post_visual,
     build_visual_retry_prompt,
+    evaluate_visual_quality,
     _normalize_pollinations_image,
 )
 
@@ -178,6 +180,78 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("no crowd", retry.lower())
         self.assertIn("no duplicate or ghosted figures", retry.lower())
 
+    def test_method_retry_prompt_forbids_partial_and_background_people(self):
+        retry = build_visual_retry_prompt(
+            "one specialist demonstrates an articulation exercise with a child",
+            rubric_id="method_piggybank",
+            audience="pros",
+        ).lower()
+
+        self.assertIn("exactly one adult speech specialist", retry)
+        self.assertIn("exactly one child", retry)
+        self.assertIn("no other faces, heads, reflections, silhouettes", retry)
+        self.assertIn("one activity only", retry)
+        self.assertIn("no third person", retry)
+        self.assertIn("no reading scene unless reading is explicitly required", retry)
+
+    def test_people_limit_overrides_gemini_pass(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 3}'}]}}]
+        }
+        with patch("src.services.visual_pipeline.requests.post", return_value=response):
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="method_piggybank",
+                gemini_api_key="test-key",
+                expected_prompt="one specialist and one child perform an articulation exercise",
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "too_many_people")
+        self.assertEqual(result["people_count"], 3)
+
+    def test_people_limit_two_passes_and_unknown_is_fail_open(self):
+        passed = _safe_visual_qa(
+            lambda *_args, **_kwargs: {"status": "pass", "pass": True, "reason": "ok", "people_count": 2},
+            BytesIO(b"image"),
+            rubric_id="method_piggybank",
+            audience="pros",
+        )
+        unknown = _safe_visual_qa(
+            lambda *_args, **_kwargs: {"status": "pass", "pass": True, "reason": "ok", "people_count": "unknown"},
+            BytesIO(b"image"),
+            rubric_id="method_piggybank",
+            audience="pros",
+        )
+
+        self.assertTrue(passed["pass"])
+        self.assertEqual(passed["people_count"], 2)
+        self.assertTrue(unknown["pass"])
+        self.assertEqual(unknown["people_count"], "unknown")
+
+    def test_visual_qa_prompt_contains_counting_and_expected_action_rules(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2}'}]}}]
+        }
+        with patch("src.services.visual_pipeline.requests.post", return_value=response) as post:
+            evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="method_piggybank",
+                audience="pros",
+                gemini_api_key="test-key",
+                expected_prompt="one specialist and one child perform an articulation exercise",
+            )
+
+        qa_text = post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"].lower()
+        self.assertIn("count every visible human face, head, torso, reflection", qa_text)
+        self.assertIn("do not ignore small background figures", qa_text)
+        self.assertIn("expected image prompt/action", qa_text)
+        self.assertIn("articulation exercise", qa_text)
+        self.assertIn("action_mismatch", qa_text)
+
     def test_visual_qa_pass_does_not_retry(self):
         fake_buffer = BytesIO(b"first")
         qa_calls = []
@@ -207,7 +281,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         first = BytesIO(b"first")
         second = BytesIO(b"second")
         qa_results = iter([
-            {"status": "fail", "pass": False, "reason": "duplicate_figures", "people_count": "4"},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 3},
             {"status": "pass", "pass": True, "reason": "ok", "people_count": "2"},
         ])
 
@@ -235,8 +309,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
     def test_visual_qa_failure_after_retry_uses_fallback(self):
         qa_results = iter([
-            {"status": "fail", "pass": False, "reason": "deformed_hands", "people_count": "2"},
-            {"status": "fail", "pass": False, "reason": "duplicate_figures", "people_count": "3"},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 3},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 3},
         ])
 
         with patch(
@@ -258,7 +332,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "fallback")
         self.assertEqual(meta["visual_qa"], "fail")
         self.assertEqual(meta["visual_qa_attempts"], "2")
-        self.assertIn("duplicate_figures", meta["reason"])
+        self.assertIn("too_many_people", meta["reason"])
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

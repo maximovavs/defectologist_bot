@@ -394,6 +394,40 @@ def _visual_people_rule(rubric_id: str) -> str:
     return "Exactly one adult and one child; hard maximum two visible people; no extra observers or background people."
 
 
+def _visual_people_limit(rubric_id: str) -> int:
+    return {
+        "method_piggybank": 2,
+        "tip_of_day": 2,
+        "play_and_speak": 2,
+        "question_week": 2,
+        "myth_fact": 2,
+        "bilingual_corner": 2,
+        "age_norms": 2,
+    }.get((rubric_id or "").strip().lower(), 2)
+
+
+def _coerce_people_count(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _enforce_visual_people_limit(result: Dict[str, object], rubric_id: str) -> Dict[str, object]:
+    people_count = _coerce_people_count(result.get("people_count"))
+    if people_count is not None and people_count > _visual_people_limit(rubric_id):
+        return {
+            **result,
+            "status": "fail",
+            "pass": False,
+            "reason": "too_many_people",
+        }
+    return result
+
+
 def build_visual_retry_prompt(prompt: str, rubric_id: str = "", audience: str = "") -> str:
     base = _enhance_image_prompt(prompt)
     if not base:
@@ -402,10 +436,18 @@ def build_visual_retry_prompt(prompt: str, rubric_id: str = "", audience: str = 
         " Regenerate as a simpler medium-shot Telegram cover. "
         f"{_visual_people_rule(rubric_id)} "
         "Use one clear main subject, one simple uncluttered room, and only props explicitly required by the post. "
-        "No crowd, siblings, extra family members, observers, background people, duplicate figures, ghosted figures, "
+        "No crowd, siblings, extra family members, observers, background people, faces, heads, reflections, silhouettes, "
+        "duplicate figures, ghosted figures, merged people, floating heads, or incomplete human figures, "
         "deformed hands, extra limbs, cropped faces, text, letters, logos, watermarks, or dramatic perspective. "
         f"Audience: {audience or 'parents'}."
     )
+    if (rubric_id or "").strip().lower() == "method_piggybank":
+        strict += (
+            " Exactly one adult speech specialist and exactly one child must be visible, both performing the exact professional exercise. "
+            "No other faces, heads, reflections, silhouettes, or background people are allowed. "
+            "Use a simple therapy room and one activity only. No reading scene unless reading is explicitly required by the source prompt. "
+            "No third person, floating head, or incomplete figure."
+        )
     return f"{base.rstrip(' .')}.{strict}"
 
 
@@ -444,11 +486,14 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         passed = passed.strip().lower() in {"true", "yes", "pass", "passed"}
     else:
         passed = bool(passed)
+    people_count = parsed.get("people_count", "unknown")
+    if not isinstance(people_count, (int, str)) or isinstance(people_count, bool):
+        people_count = "unknown"
     return {
         "status": "pass" if passed else "fail",
         "pass": passed,
         "reason": str(parsed.get("reason") or ("ok" if passed else "visual_quality_rejected")),
-        "people_count": str(parsed.get("people_count", "unknown")),
+        "people_count": people_count,
     }
 
 
@@ -458,6 +503,7 @@ def evaluate_visual_quality(
     audience: str = "",
     gemini_api_key: str = "",
     model: str = GEMINI_VISUAL_QA_MODEL,
+    expected_prompt: str = "",
 ) -> Dict[str, object]:
     """Run lightweight Gemini QA for an AI cover; missing QA credentials are non-blocking."""
     api_key = (gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
@@ -467,12 +513,22 @@ def evaluate_visual_quality(
     qa_prompt = (
         "You are a strict visual QA checker for a Telegram educational cover. "
         "Return JSON only with keys pass (boolean), reason (short string), and people_count (integer or unknown). "
+        "Count every visible human face, head, torso, reflection, background person, and partially visible person. "
+        "A floating head, disconnected torso, silhouette, duplicate, ghosted, merged, or partially formed human figure counts as a person. "
+        "Do not ignore small background figures. "
         "Pass only when the image is a warm soft editorial illustration, child-friendly, uncluttered, medium-shot, "
         "relevant to speech or developmental education, with natural proportions and coherent hands. "
         "Fail for stretched faces, widened torsos, elongated arms, oversized or deformed hands, extra or missing limbs, "
-        "duplicate or ghosted people, cropped main faces, uncanny photorealistic faces, anime or 3D toy style, "
+        "duplicate, ghosted, merged, or partially generated people, cropped main faces, uncanny photorealistic faces, anime or 3D toy style, "
         "fish-eye or panoramic distortion, crowded scenes, unrequired background people, text, letters, logos, or watermarks. "
-        f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {_visual_people_rule(rubric_id)}"
+        "For method_piggybank, fail for any third human figure. "
+        "Use reason action_mismatch when the main visual action or object does not match the expected prompt. "
+        "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, or action_mismatch when applicable. "
+        f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {_visual_people_rule(rubric_id)} "
+        f"Expected image prompt/action: {expected_prompt or 'not provided'}. "
+        "Do not require literal close-up visibility of tongue movements; accept a clear speech or articulation exercise when the action is evident. "
+        "For articulation gymnastics, reject an image whose main scene is only reading, drawing, or ordinary conversation. "
+        "Do not invent props that are absent from the expected prompt."
     )
     image_bytes = image_buffer.getvalue()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent"
@@ -494,7 +550,8 @@ def evaluate_visual_quality(
         )
         if response.status_code >= 400:
             return {"status": "skipped", "pass": True, "reason": f"qa_http_{response.status_code}", "people_count": "unknown"}
-        return _parse_visual_qa_response(_visual_qa_text(response.json()))
+        parsed = _parse_visual_qa_response(_visual_qa_text(response.json()))
+        return _enforce_visual_people_limit(parsed, rubric_id)
     except Exception as exc:
         return {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
 
@@ -504,23 +561,30 @@ def _safe_visual_qa(
     image_buffer: BytesIO,
     rubric_id: str,
     audience: str,
+    expected_prompt: str = "",
 ) -> Dict[str, object]:
     try:
-        result = qa_fn(image_buffer, rubric_id=rubric_id, audience=audience)
+        result = qa_fn(
+            image_buffer,
+            rubric_id=rubric_id,
+            audience=audience,
+            expected_prompt=expected_prompt,
+        )
     except Exception as exc:
         result = {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
     if not isinstance(result, dict):
         return {"status": "skipped", "pass": True, "reason": "invalid_qa_result", "people_count": "unknown"}
-    return {
+    normalized = {
         "status": str(result.get("status") or ("pass" if result.get("pass", True) else "fail")),
         "pass": bool(result.get("pass", True)),
         "reason": str(result.get("reason") or "ok"),
-        "people_count": str(result.get("people_count", "unknown")),
+        "people_count": result.get("people_count", "unknown"),
     }
+    return _enforce_visual_people_limit(normalized, rubric_id)
 
 
 def _visual_qa_passed(result: Dict[str, object]) -> bool:
-    return result.get("status") != "fail" or bool(result.get("pass", False))
+    return bool(result.get("pass", False)) and result.get("status") != "fail"
 
 
 def build_post_visual(
@@ -563,10 +627,16 @@ def build_post_visual(
                 token=pollinations_token,
             )
             qa_fn = visual_qa_fn or evaluate_visual_quality
-            first_qa = _safe_visual_qa(qa_fn, buffer, rubric_id=rubric_id, audience=audience)
+            first_qa = _safe_visual_qa(
+                qa_fn,
+                buffer,
+                rubric_id=rubric_id,
+                audience=audience,
+                expected_prompt=prompt,
+            )
             print(
-                f"[VISUAL_QA] pass={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
-                f"people_count={first_qa.get('people_count', 'unknown')} attempt=1",
+                f"[VISUAL_QA] status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
+                f"people_count={first_qa.get('people_count', 'unknown')} limit={_visual_people_limit(rubric_id)} attempt=1",
                 flush=True,
             )
             first_meta = {
@@ -593,10 +663,16 @@ def build_post_visual(
                     prompt=retry_prompt,
                     token=pollinations_token,
                 )
-                retry_qa = _safe_visual_qa(qa_fn, retry_buffer, rubric_id=rubric_id, audience=audience)
+                retry_qa = _safe_visual_qa(
+                    qa_fn,
+                    retry_buffer,
+                    rubric_id=rubric_id,
+                    audience=audience,
+                    expected_prompt=retry_prompt,
+                )
                 print(
-                    f"[VISUAL_QA] pass={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "
-                    f"people_count={retry_qa.get('people_count', 'unknown')} attempt=2",
+                    f"[VISUAL_QA] status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "
+                    f"people_count={retry_qa.get('people_count', 'unknown')} limit={_visual_people_limit(rubric_id)} attempt=2",
                     flush=True,
                 )
                 retry_meta = {

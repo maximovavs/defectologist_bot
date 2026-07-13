@@ -1,6 +1,7 @@
 import unittest
 
 from src.services.llm_generator import (
+    _has_risky_manual_technique,
     _validate_bilingual_output,
     _validate_output,
     _validate_parent_safety_output,
@@ -13,6 +14,26 @@ from src.services.llm_generator import (
 
 
 class RubricQualityTest(unittest.TestCase):
+    def test_risky_manual_negation_is_immediate_and_clause_local(self):
+        allowed = [
+            "Не вводите шпатель в рот ребёнка.",
+            "Нельзя использовать логопедический зонд самостоятельно.",
+            "Не следует давить на язык.",
+            "Never insert a probe into the child's mouth.",
+        ]
+        blocked = [
+            "Не спешите. Затем введите шпатель в рот ребёнка.",
+            "Не забывайте хвалить ребёнка, после чего прижмите язык ложкой.",
+            "Ребёнок не должен двигаться, пока специалист вводит зонд.",
+        ]
+
+        for text in allowed:
+            with self.subTest(text=text):
+                self.assertFalse(_has_risky_manual_technique(text))
+        for text in blocked:
+            with self.subTest(text=text):
+                self.assertTrue(_has_risky_manual_technique(text))
+
     def test_pro_rejects_risky_intraoral_manual_technique(self):
         output = (
             "Артикуляционная карточка\n"

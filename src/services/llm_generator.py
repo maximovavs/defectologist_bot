@@ -816,18 +816,25 @@ PRO_RISKY_MANUAL_TECHNIQUE_PATTERNS = [
     r"\b(?:intraoral|oral|tongue|palate|gum)\s+massage\b",
 ]
 
+PRO_RISKY_MANUAL_INFLECTION_PATTERNS = [
+    r"\bприжм\w*.{0,45}\bязык\w*",
+    r"\b(?:специалист\w*.{0,30})?ввод\w*\s+зонд\w*",
+]
+
 PRO_RISKY_MANUAL_NEGATION_RE = re.compile(
-    r"(?:не|нельзя|запрещено|не\s+следует|не\s+пытайтесь|не\s+используйте)"
-    r"|(?:do\s+not|don't|never|avoid)(?:\s+\w+){0,5}\s*$",
+    r"\b(?:не|нельзя|запрещено|не\s+следует|не\s+пытайтесь|не\s+используйте|"
+    r"do\s+not|don't|never|avoid)\b"
+    r"(?:\s+\w+){0,5}\s*$",
     re.IGNORECASE,
 )
 
 
 def _has_risky_manual_technique(text: str) -> bool:
     blob = _normalize_scan_text(text)
-    for pattern in PRO_RISKY_MANUAL_TECHNIQUE_PATTERNS:
+    for pattern in (*PRO_RISKY_MANUAL_TECHNIQUE_PATTERNS, *PRO_RISKY_MANUAL_INFLECTION_PATTERNS):
         for match in re.finditer(pattern, blob, flags=re.IGNORECASE):
             context = blob[max(0, match.start() - 70) : match.start()]
+            context = re.split(r"[.!?;\n]", context)[-1]
             if PRO_RISKY_MANUAL_NEGATION_RE.search(context):
                 continue
             return True

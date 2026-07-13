@@ -416,16 +416,45 @@ def _coerce_people_count(value: object) -> int | None:
     return None
 
 
-def _enforce_visual_people_limit(result: Dict[str, object], rubric_id: str) -> Dict[str, object]:
+VISUAL_QA_HARD_REASONS = frozenset(
+    {
+        "too_many_people",
+        "ghosted_figure",
+        "duplicate_figure",
+        "merged_people",
+        "partial_human_figure",
+        "action_mismatch",
+        "stretched_face",
+        "widened_torso",
+        "deformed_hands",
+        "extra_limbs",
+        "missing_limbs",
+        "panoramic_distortion",
+    }
+)
+
+
+def _normalize_visual_qa_reason(value: object) -> str:
+    return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+
+
+def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) -> Dict[str, object]:
+    reason = _normalize_visual_qa_reason(result.get("reason"))
+    normalized = {**result, "reason": reason}
+    if reason in VISUAL_QA_HARD_REASONS:
+        normalized["status"] = "fail"
+        normalized["pass"] = False
+
     people_count = _coerce_people_count(result.get("people_count"))
     if people_count is not None and people_count > _visual_people_limit(rubric_id):
-        return {
-            **result,
-            "status": "fail",
-            "pass": False,
-            "reason": "too_many_people",
-        }
-    return result
+        normalized.update(
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "too_many_people",
+            }
+        )
+    return normalized
 
 
 def build_visual_retry_prompt(prompt: str, rubric_id: str = "", audience: str = "") -> str:
@@ -492,7 +521,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     return {
         "status": "pass" if passed else "fail",
         "pass": passed,
-        "reason": str(parsed.get("reason") or ("ok" if passed else "visual_quality_rejected")),
+        "reason": _normalize_visual_qa_reason(parsed.get("reason") or ("ok" if passed else "visual_quality_rejected")),
         "people_count": people_count,
     }
 
@@ -523,7 +552,8 @@ def evaluate_visual_quality(
         "fish-eye or panoramic distortion, crowded scenes, unrequired background people, text, letters, logos, or watermarks. "
         "For method_piggybank, fail for any third human figure. "
         "Use reason action_mismatch when the main visual action or object does not match the expected prompt. "
-        "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, or action_mismatch when applicable. "
+        "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, action_mismatch, "
+        "stretched_face, widened_torso, deformed_hands, extra_limbs, missing_limbs, or panoramic_distortion when applicable. "
         f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {_visual_people_rule(rubric_id)} "
         f"Expected image prompt/action: {expected_prompt or 'not provided'}. "
         "Do not require literal close-up visibility of tongue movements; accept a clear speech or articulation exercise when the action is evident. "
@@ -551,7 +581,7 @@ def evaluate_visual_quality(
         if response.status_code >= 400:
             return {"status": "skipped", "pass": True, "reason": f"qa_http_{response.status_code}", "people_count": "unknown"}
         parsed = _parse_visual_qa_response(_visual_qa_text(response.json()))
-        return _enforce_visual_people_limit(parsed, rubric_id)
+        return _enforce_visual_qa_hard_failures(parsed, rubric_id)
     except Exception as exc:
         return {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
 
@@ -580,7 +610,7 @@ def _safe_visual_qa(
         "reason": str(result.get("reason") or "ok"),
         "people_count": result.get("people_count", "unknown"),
     }
-    return _enforce_visual_people_limit(normalized, rubric_id)
+    return _enforce_visual_qa_hard_failures(normalized, rubric_id)
 
 
 def _visual_qa_passed(result: Dict[str, object]) -> bool:

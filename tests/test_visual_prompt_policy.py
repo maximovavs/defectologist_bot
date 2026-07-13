@@ -231,6 +231,48 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertTrue(unknown["pass"])
         self.assertEqual(unknown["people_count"], "unknown")
 
+    def test_visual_qa_hard_reasons_override_pass_and_normalize(self):
+        cases = (
+            ("ghosted_figure", "ghosted_figure"),
+            ("action_mismatch", "action_mismatch"),
+            ("duplicate-figure", "duplicate_figure"),
+        )
+
+        for reason, normalized_reason in cases:
+            with self.subTest(reason=reason):
+                result = _safe_visual_qa(
+                    lambda *_args, reason=reason, **_kwargs: {
+                        "status": "pass",
+                        "pass": True,
+                        "reason": reason,
+                        "people_count": 2,
+                    },
+                    BytesIO(b"image"),
+                    rubric_id="method_piggybank",
+                    audience="pros",
+                )
+
+                self.assertEqual(result["status"], "fail")
+                self.assertFalse(result["pass"])
+                self.assertEqual(result["reason"], normalized_reason)
+
+    def test_visual_qa_technical_skipped_result_remains_fail_open(self):
+        result = _safe_visual_qa(
+            lambda *_args, **_kwargs: {
+                "status": "skipped",
+                "pass": True,
+                "reason": "qa timeout",
+                "people_count": "unknown",
+            },
+            BytesIO(b"image"),
+            rubric_id="method_piggybank",
+            audience="pros",
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["reason"], "qa_timeout")
+
     def test_visual_qa_prompt_contains_counting_and_expected_action_rules(self):
         response = Mock(status_code=200)
         response.json.return_value = {
@@ -281,7 +323,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         first = BytesIO(b"first")
         second = BytesIO(b"second")
         qa_results = iter([
-            {"status": "pass", "pass": True, "reason": "ok", "people_count": 3},
+            {"status": "pass", "pass": True, "reason": "ghosted_figure", "people_count": 2},
             {"status": "pass", "pass": True, "reason": "ok", "people_count": "2"},
         ])
 
@@ -309,8 +351,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
     def test_visual_qa_failure_after_retry_uses_fallback(self):
         qa_results = iter([
-            {"status": "pass", "pass": True, "reason": "ok", "people_count": 3},
-            {"status": "pass", "pass": True, "reason": "ok", "people_count": 3},
+            {"status": "pass", "pass": True, "reason": "action_mismatch", "people_count": 2},
+            {"status": "pass", "pass": True, "reason": "duplicate-figure", "people_count": 2},
         ])
 
         with patch(
@@ -332,7 +374,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "fallback")
         self.assertEqual(meta["visual_qa"], "fail")
         self.assertEqual(meta["visual_qa_attempts"], "2")
-        self.assertIn("too_many_people", meta["reason"])
+        self.assertIn("duplicate_figure", meta["reason"])
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

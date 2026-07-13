@@ -24,6 +24,19 @@ VALID_CARD = (
     "💡 Вариант усложнения: предложите другое короткое слово."
 )
 
+GENERAL_NO_DATA_RULES = (
+    "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.",
+    "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ",
+    "Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.",
+)
+
+SAFETY_NO_DATA_RULE = (
+    "Не предлагай рискованные ручные или внутриротовые действия: вводить зонд, шпатель, "
+    "ложку или другой предмет в рот ребёнка, тянуть, давить или смещать язык, выполнять "
+    "самостоятельный массаж языка, нёба или дёсен. Если EVIDENCE содержит только такие "
+    "действия и не даёт безопасной альтернативы, верни НЕТ_ДАННЫХ."
+)
+
 MISSING_GOAL_CARD = VALID_CARD.replace(
     "🎯 Цель: проверить повторение короткого слова.\n\n",
     "",
@@ -82,7 +95,10 @@ class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Evidence already passed automatic pre-validation", prompts[0])
         self.assertIn("EVIDENCE ANCHORS:", prompts[0])
         self.assertIn("Play a word game with no special materials", prompts[0])
-        self.assertNotIn("НЕТ_ДАННЫХ", prompts[0])
+        self.assertIn("внутриротовые действия", prompts[0])
+        self.assertIn(SAFETY_NO_DATA_RULE, prompts[0])
+        for rule in GENERAL_NO_DATA_RULES:
+            self.assertNotIn(rule, prompts[0])
 
     def test_unvalidated_method_prompt_keeps_no_data_guard(self):
         prompt = llm.build_generation_prompt(
@@ -99,7 +115,9 @@ class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
             max_chars=1200,
         )
 
-        self.assertIn("НЕТ_ДАННЫХ", prompt)
+        for rule in GENERAL_NO_DATA_RULES:
+            self.assertIn(rule, prompt)
+        self.assertIn(SAFETY_NO_DATA_RULE, prompt)
 
         prevalidated_prompt = llm.build_generation_prompt(
             day_key="SA",
@@ -115,19 +133,36 @@ class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
             max_chars=1200,
             evidence_prevalidated=True,
         )
-        self.assertNotIn("НЕТ_ДАННЫХ", prevalidated_prompt)
+        for rule in GENERAL_NO_DATA_RULES:
+            self.assertNotIn(rule, prevalidated_prompt)
+        self.assertIn(SAFETY_NO_DATA_RULE, prevalidated_prompt)
         self.assertIn("Evidence already passed automatic pre-validation", prevalidated_prompt)
 
     def test_prevalidated_repair_does_not_reintroduce_no_data_fallback(self):
+        base_prompt = llm.build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            max_chars=1200,
+        )
         repair = llm.build_pro_friendly_repair_prompt(
-            "Base prompt",
+            base_prompt,
             "no_data_in_source",
             evidence_prevalidated=True,
         )
 
         self.assertIn("Evidence already passed pre-validation", repair)
         self.assertIn("exactly three short numbered steps", repair)
-        self.assertNotIn("НЕТ_ДАННЫХ", repair)
+        self.assertIn(SAFETY_NO_DATA_RULE, repair)
+        for rule in GENERAL_NO_DATA_RULES:
+            self.assertNotIn(rule, repair)
 
     async def test_gemini_pro_invalid_output_gets_one_valid_repair(self):
         responses = [MISSING_GOAL_CARD, VALID_CARD]

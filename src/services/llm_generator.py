@@ -590,9 +590,7 @@ def _prepare_generation_prompt(
 ) -> str:
     prepared = prompt
     if evidence_prevalidated:
-        prepared = "\n".join(
-            line for line in prepared.splitlines() if "НЕТ_ДАННЫХ" not in line
-        )
+        prepared = _remove_general_no_data_rules_for_prevalidated_evidence(prepared)
 
     if is_pro_format:
         anchors = _build_evidence_anchors(evidence_text)
@@ -1458,6 +1456,28 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
 # Prompt templates
 # -----------------------
 
+PRO_PREVALIDATED_GENERAL_NO_DATA_RULES = {
+    "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.",
+    "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ",
+    "Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.",
+}
+
+PRO_RISKY_MANUAL_SAFETY_ONLY_NO_DATA_RULE = (
+    "Не предлагай рискованные ручные или внутриротовые действия: вводить зонд, шпатель, "
+    "ложку или другой предмет в рот ребёнка, тянуть, давить или смещать язык, выполнять "
+    "самостоятельный массаж языка, нёба или дёсен. Если EVIDENCE содержит только такие "
+    "действия и не даёт безопасной альтернативы, верни НЕТ_ДАННЫХ."
+)
+
+
+def _remove_general_no_data_rules_for_prevalidated_evidence(prompt: str) -> str:
+    return "\n".join(
+        line
+        for line in (prompt or "").splitlines()
+        if line.strip() not in PRO_PREVALIDATED_GENERAL_NO_DATA_RULES
+    )
+
+
 def _common_rules(max_chars: int, allow_numbered_steps: bool = False) -> str:
     numbered_steps_rule = (
         "Для pro_friendly в блоке 🔁 Как провести: используй ровно три коротких шага: 1., 2., 3.; не добавляй шаг 4.\n"
@@ -1485,7 +1505,7 @@ def _common_rules(max_chars: int, allow_numbered_steps: bool = False) -> str:
         "Твоя задача — вытащить практическую суть: игру, упражнение, прием, последовательность действий, примеры слов, формулировки для родителя.\n"
         "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
         "Не ставь диагнозы и не назначай лечение.\n"
-        "Не предлагай вводить зонды, шпатели, ложки или другие предметы в рот ребёнка, тянуть, давить или смещать язык, а также самостоятельно выполнять внутриротовой массаж. Если безопасной активности нет в EVIDENCE, верни НЕТ_ДАННЫХ.\n"
+        f"{PRO_RISKY_MANUAL_SAFETY_ONLY_NO_DATA_RULE}\n"
         "Если прямо описываешь ребёнка, у которого пропал навык, есть вопросы к пониманию речи, ребёнок перестал говорить или долго нет прогресса, добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.»\n"
         "Не используй Markdown и кодовые блоки.\n"
         "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
@@ -1540,7 +1560,7 @@ def _build_generation_prompt_raw(
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     rules = _common_rules(max_chars, allow_numbered_steps=is_pro_format)
     if evidence_prevalidated:
-        rules = "\n".join(line for line in rules.splitlines() if "НЕТ_ДАННЫХ" not in line)
+        rules = _remove_general_no_data_rules_for_prevalidated_evidence(rules)
 
     if aud == "pros":
         template = (
@@ -1572,7 +1592,6 @@ def _build_generation_prompt_raw(
             + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и редактор профессиональной, но понятной Telegram-рубрики.\n"
             + "Твоя задача — не академический конспект, а короткая практическая карточка метода для занятия.\n"
             + "Строй карточку только из EVIDENCE. Не достраивай недостающие материалы, шаги, таймеры, уровни, режимы, количество повторов или этапы прогрессии.\n"
-            + "Не предлагай рискованные ручные или внутриротовые действия: вводить зонд, шпатель, ложку или другой предмет в рот ребёнка, тянуть, давить или смещать язык, выполнять самостоятельный массаж языка, нёба или дёсен. Если EVIDENCE не даёт безопасной альтернативы, верни НЕТ_ДАННЫХ.\n"
             + "Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.\n"
             + "Если действие и упражнение описаны, но отдельный критерий наблюдения прямо не сформулирован, "
             + "заполни блок «✅ На что смотреть» только непосредственной наблюдаемой реакцией ребёнка, "
@@ -2084,7 +2103,7 @@ def build_pro_friendly_repair_prompt(
         return ""
 
     if evidence_prevalidated:
-        safe_base_prompt = (base_prompt or "").replace("НЕТ_ДАННЫХ", "")
+        safe_base_prompt = _remove_general_no_data_rules_for_prevalidated_evidence(base_prompt or "")
         return (
             safe_base_prompt
             + "\n\nREPAIR: Evidence already passed pre-validation.\n"

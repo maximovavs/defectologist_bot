@@ -553,6 +553,63 @@ def validate_pro_evidence_for_generation(evidence_text: str) -> Tuple[bool, str]
     return True, "ok"
 
 
+def _build_evidence_anchors(evidence_text: str) -> str:
+    fragments = re.split(r"(?<=[.!?])\s+|\n+", (evidence_text or "").strip())
+    selected: Dict[str, str] = {}
+    for raw in fragments:
+        fragment = norm_space(raw).strip(" -•")
+        if not fragment:
+            continue
+        scan = _normalize_scan_text(fragment)
+        if "action" not in selected and PRO_EVIDENCE_ACTION_RE.search(scan):
+            selected["action"] = fragment[:360]
+        if "activity" not in selected and PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE.search(scan):
+            selected["activity"] = fragment[:360]
+        if "observation" not in selected and PRO_EVIDENCE_CRITERION_RE.search(scan):
+            selected["observation"] = fragment[:360]
+        if len(selected) >= 3:
+            break
+
+    labels = (
+        ("action", "action"),
+        ("activity", "exercise or material"),
+        ("observation", "observable child reaction if present"),
+    )
+    lines = [f"- {label}: {selected[key]}" for key, label in labels if key in selected]
+    if not lines:
+        return ""
+    return "EVIDENCE ANCHORS:\n" + "\n".join(lines)
+
+
+def _prepare_generation_prompt(
+    prompt: str,
+    evidence_text: str,
+    *,
+    is_pro_format: bool,
+    evidence_prevalidated: bool,
+) -> str:
+    prepared = prompt
+    if evidence_prevalidated:
+        prepared = "\n".join(
+            line for line in prepared.splitlines() if "НЕТ_ДАННЫХ" not in line
+        )
+
+    if is_pro_format:
+        anchors = _build_evidence_anchors(evidence_text)
+        if anchors:
+            prepared = prepared.replace("\nEVIDENCE:\n", f"\n{anchors}\nEVIDENCE:\n", 1)
+
+    if evidence_prevalidated:
+        note = (
+            "Evidence already passed automatic pre-validation: it contains a concrete action and an exercise or material.\n"
+            "Build one safe practical method card from these verified facts.\n"
+            "Do not add details that are absent from the evidence, and do not reject the card only because the source wording is academic or long."
+        )
+        marker = "\nEVIDENCE:\n"
+        prepared = prepared.replace(marker, f"\n{note}\n{marker.lstrip()}", 1)
+    return prepared
+
+
 def _evidence_supports_no_special_materials(evidence_text: str) -> bool:
     evidence = _normalize_scan_text(evidence_text)
     if PRO_EVIDENCE_NO_MATERIALS_RE.search(evidence):
@@ -1220,6 +1277,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-
 _throttle_lock = asyncio.Lock()
 _next_allowed_ts = 0.0
 _gemini_region_blocked = False
+_gemini_quota_exhausted = False
 
 
 def _unique_nonempty_models(*models: str) -> List[str]:
@@ -1256,6 +1314,13 @@ def _is_quota_error(status: int, text: str) -> bool:
     return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
 
 
+def _is_confirmed_gemini_quota_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status == 429 and any(
+        marker in t for marker in ("too many requests", "rate limit", "quota", "resource_exhausted")
+    )
+
+
 def _is_temporary_error(status: int, text: str) -> bool:
     t = (text or "").lower()
     return status in (500, 502, 503, 504) or "overloaded" in t or "temporarily unavailable" in t
@@ -1278,6 +1343,12 @@ def _is_model_not_available(status: int, text: str) -> bool:
 def _is_gemini_region_block(text: str) -> bool:
     t = (text or "").lower()
     return "user location is not supported" in t or "location is not supported" in t
+
+
+def gemini_text_provider_status(api_key: str = "") -> str:
+    if _gemini_quota_exhausted:
+        return "quota_exhausted"
+    return "available" if (api_key or "").strip() else "unavailable"
 
 
 async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: int = 70) -> requests.Response:
@@ -1331,9 +1402,12 @@ async def groq_chat(prompt: str, api_key: str) -> str:
 
 
 async def gemini_generate(prompt: str, api_key: str) -> str:
-    global _gemini_region_blocked
+    global _gemini_region_blocked, _gemini_quota_exhausted
     if _gemini_region_blocked:
         raise RuntimeError("gemini_disabled_region")
+    if _gemini_quota_exhausted:
+        print("[LLM][gemini] skipped reason=gemini_quota_exhausted_cached", flush=True)
+        raise RuntimeError("gemini_quota_exhausted_cached")
 
     last_err = ""
     for model in GEMINI_MODELS:
@@ -1355,6 +1429,11 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
             if _is_gemini_region_block(txt):
                 _gemini_region_blocked = True
                 raise RuntimeError("gemini_blocked_region")
+
+            if _is_confirmed_gemini_quota_error(resp.status_code, txt):
+                _gemini_quota_exhausted = True
+                print("[LLM][gemini] quota exhausted; disabling Gemini for the rest of this run", flush=True)
+                raise RuntimeError("gemini_quota_exhausted")
 
             if _is_model_not_available(resp.status_code, txt):
                 print(f"[LLM][gemini] skip unavailable model={model} status={resp.status_code}", flush=True)
@@ -1441,7 +1520,7 @@ def _ensure_source_and_link(
     return "\n".join(lines).strip()
 
 
-def build_generation_prompt(
+def _build_generation_prompt_raw(
     day_key: str,
     rubric_title: str,
     rubric_format: str,
@@ -1453,12 +1532,15 @@ def build_generation_prompt(
     disclaimer: str,
     hashtags: List[str],
     max_chars: int,
+    evidence_prevalidated: bool = False,
 ) -> str:
     aud = (audience or "parents").strip().lower()
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     rules = _common_rules(max_chars, allow_numbered_steps=is_pro_format)
+    if evidence_prevalidated:
+        rules = "\n".join(line for line in rules.splitlines() if "НЕТ_ДАННЫХ" not in line)
 
     if aud == "pros":
         template = (
@@ -1692,6 +1774,43 @@ def build_generation_prompt(
     )
 
 
+def build_generation_prompt(
+    day_key: str,
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    max_chars: int,
+    evidence_prevalidated: bool = False,
+) -> str:
+    raw_prompt = _build_generation_prompt_raw(
+        day_key=day_key,
+        rubric_title=rubric_title,
+        rubric_format=rubric_format,
+        audience=audience,
+        title_suffix=title_suffix,
+        source_domain=source_domain,
+        source_url=source_url,
+        evidence_text=evidence_text,
+        disclaimer=disclaimer,
+        hashtags=hashtags,
+        max_chars=max_chars,
+        evidence_prevalidated=evidence_prevalidated,
+    )
+    return _prepare_generation_prompt(
+        raw_prompt,
+        evidence_text,
+        is_pro_format=(audience or "parents").strip().lower() == "pros"
+        or (rubric_format or "").strip().lower() == "pro_friendly",
+        evidence_prevalidated=evidence_prevalidated,
+    )
+
+
 # -----------------------
 # Image prompt helpers
 # -----------------------
@@ -1911,6 +2030,10 @@ async def generate_image_prompt_async(
         try:
             return await _try_gemini()
         except Exception as e:
+            if "gemini_quota_exhausted_cached" in str(e):
+                return "", False, "gemini_quota_exhausted_cached"
+            if "gemini_quota_exhausted" in str(e):
+                return "", False, "gemini_quota_exhausted"
             return "", False, f"gemini_image_prompt_failed:{e} | groq={groq_err}"
 
     return "", False, f"image_prompt_failed:groq={groq_err}"
@@ -1951,10 +2074,26 @@ def _should_repair_pro_friendly_reason(reason: str) -> bool:
     )
 
 
-def build_pro_friendly_repair_prompt(base_prompt: str, reason: str) -> str:
+def build_pro_friendly_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    evidence_prevalidated: bool = False,
+) -> str:
     reason = (reason or "").strip()
     if not _should_repair_pro_friendly_reason(reason):
         return ""
+
+    if evidence_prevalidated:
+        safe_base_prompt = (base_prompt or "").replace("НЕТ_ДАННЫХ", "")
+        return (
+            safe_base_prompt
+            + "\n\nREPAIR: Evidence already passed pre-validation.\n"
+            + f"Validation reason: {reason}.\n"
+            + "Select one concrete action and one explicitly named exercise or material from the evidence anchors and evidence.\n"
+            + "Return a practical pro_friendly method card with exactly three short numbered steps.\n"
+            + "Do not add timers, repetition counts, new objects, progression stages, medical promises, or unsupported observations.\n"
+            + "Use only a safe alternative when the evidence contains a risky manual or intraoral action."
+        )
 
     no_data_note = ""
     if reason == "no_data_in_source":
@@ -2004,6 +2143,7 @@ async def generate_post_plain_from_evidence_async(
     gemini_key: str,
     max_chars: int,
     day_key: Optional[str] = None,
+    evidence_prevalidated: bool = False,
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
@@ -2013,6 +2153,8 @@ async def generate_post_plain_from_evidence_async(
     ev = (evidence_text or "").strip()
     if len(ev) < 260:
         return "", False, "no_evidence_short"
+
+    is_pro_format = aud == "pros" or rf == "pro_friendly"
 
     prompt = build_generation_prompt(
         day_key=dk,
@@ -2026,6 +2168,7 @@ async def generate_post_plain_from_evidence_async(
         disclaimer=disclaimer,
         hashtags=hashtags,
         max_chars=max_chars,
+        evidence_prevalidated=evidence_prevalidated,
     )
 
     def postprocess(s: str) -> str:
@@ -2057,8 +2200,6 @@ async def generate_post_plain_from_evidence_async(
 
     groq_err = ""
     repair_prompt = ""
-    is_pro_format = aud == "pros" or rf == "pro_friendly"
-
     def build_generic_repair_prompt(reason: str) -> str:
         repair = (
             prompt
@@ -2117,7 +2258,11 @@ async def generate_post_plain_from_evidence_async(
                 return out, True, "ok:groq"
 
             repair_prompt = (
-                build_pro_friendly_repair_prompt(prompt, reason)
+                build_pro_friendly_repair_prompt(
+                    prompt,
+                    reason,
+                    evidence_prevalidated=evidence_prevalidated,
+                )
                 if is_pro_format
                 else build_generic_repair_prompt(reason)
             )
@@ -2149,7 +2294,11 @@ async def generate_post_plain_from_evidence_async(
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
 
             if is_pro_format:
-                gemini_repair_prompt = build_pro_friendly_repair_prompt(prompt, reason)
+                gemini_repair_prompt = build_pro_friendly_repair_prompt(
+                    prompt,
+                    reason,
+                    evidence_prevalidated=evidence_prevalidated,
+                )
                 if gemini_repair_prompt:
                     out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
                     ok2, reason2 = validate(out2)
@@ -2183,6 +2332,10 @@ async def generate_post_plain_from_evidence_async(
 
             return "", False, f"invalid_gemini:{reason}"
         except Exception as e:
+            if "gemini_quota_exhausted_cached" in str(e):
+                return "", False, "gemini_quota_exhausted_cached"
+            if "gemini_quota_exhausted" in str(e):
+                return "", False, "gemini_quota_exhausted"
             return "", False, f"gemini_failed:{e} | groq={groq_err}"
 
     return "", False, f"llm_failed:groq={groq_err}"
@@ -2203,6 +2356,7 @@ def generate_post_plain_from_evidence(
     gemini_key: str,
     max_chars: int,
     day_key: Optional[str] = None,
+    evidence_prevalidated: bool = False,
 ) -> Tuple[str, bool, str]:
     try:
         asyncio.get_running_loop()
@@ -2223,6 +2377,7 @@ def generate_post_plain_from_evidence(
                 gemini_key=gemini_key,
                 max_chars=max_chars,
                 day_key=day_key,
+                evidence_prevalidated=evidence_prevalidated,
             )
         )
     raise RuntimeError(

@@ -1,4 +1,5 @@
 from io import BytesIO
+import os
 import unittest
 from unittest.mock import Mock, patch
 
@@ -293,6 +294,20 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("expected image prompt/action", qa_text)
         self.assertIn("articulation exercise", qa_text)
         self.assertIn("action_mismatch", qa_text)
+
+    def test_visual_qa_prefers_separate_key_over_shared_key(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2}'}]}}]
+        }
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "visual-key", "GEMINI_API_KEY": "shared-key"},
+        ), patch("src.services.visual_pipeline.requests.post", return_value=response) as post:
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertTrue(result["pass"])
+        self.assertEqual(post.call_args.kwargs["headers"]["x-goog-api-key"], "visual-key")
 
     def test_visual_qa_pass_does_not_retry(self):
         fake_buffer = BytesIO(b"first")

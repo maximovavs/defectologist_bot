@@ -44,6 +44,7 @@ from dateutil import tz
 
 from src.services.llm_generator import (
     _validate_question_week_output,
+    gemini_text_provider_status,
     generate_image_prompt_async,
     generate_post_plain_from_evidence_async,
     validate_pro_evidence_for_generation,
@@ -72,6 +73,7 @@ TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()
 PROVIDER = os.getenv("REWRITE_PROVIDER", "auto").strip().lower()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_VISUAL_QA_API_KEY = os.getenv("GEMINI_VISUAL_QA_API_KEY", "").strip()
 
 
 def _normalize_selected_rubric(raw: str) -> str:
@@ -175,6 +177,8 @@ SOFT_SKIP_REASONS = {
     "pro_unsupported_concrete_detail",
     "pro_unsupported_numeric_detail",
     "no_data_in_source",
+    "gemini_quota_exhausted",
+    "gemini_quota_exhausted_cached",
     "empty",
     "too_short",
     "template_leak",
@@ -437,6 +441,23 @@ def _build_posted_zero_alert_plain(
     if soft_top:
         parts.extend(["", "Soft skip reasons:"])
         parts.extend([f"• {reason}: {count}" for reason, count in soft_top])
+
+    visual_qa_status = (
+        "separate_key"
+        if GEMINI_VISUAL_QA_API_KEY
+        else "shared_key"
+        if GEMINI_API_KEY
+        else "unavailable"
+    )
+    parts.extend(
+        [
+            "",
+            "Provider availability:",
+            f"• groq: {'available' if GROQ_API_KEY else 'unavailable'}",
+            f"• gemini_text: {gemini_text_provider_status(GEMINI_API_KEY)}",
+            f"• gemini_visual_qa: {visual_qa_status}",
+        ]
+    )
 
     if samples:
         parts.extend(["", "Examples:"])
@@ -1695,6 +1716,7 @@ async def amain() -> None:
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
+                pro_evidence_prevalidated = False
                 if rf == "pro_friendly":
                     pro_evidence_ok, pro_evidence_reason = validate_pro_evidence_for_generation(evidence)
                     if not pro_evidence_ok:
@@ -1711,6 +1733,7 @@ async def amain() -> None:
                             print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                             break
                         continue
+                    pro_evidence_prevalidated = rubric_id == "method_piggybank"
 
                 try:
                     plain_raw, ok, llm_note = await asyncio.wait_for(
@@ -1729,6 +1752,7 @@ async def amain() -> None:
                             gemini_key=GEMINI_API_KEY,
                             max_chars=POST_MAX_CHARS,
                             day_key=effective_day,
+                            evidence_prevalidated=pro_evidence_prevalidated,
                         ),
                         timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
                     )
@@ -1759,7 +1783,15 @@ async def amain() -> None:
 
                 if not ok or not plain_raw:
                     pro_reason = _extract_pro_validation_skip_reason(llm_note) if rf == "pro_friendly" else ""
-                    skip_reason = pro_reason or "llm_invalid_output"
+                    quota_reason = next(
+                        (
+                            reason
+                            for reason in ("gemini_quota_exhausted_cached", "gemini_quota_exhausted")
+                            if reason in (llm_note or "")
+                        ),
+                        "",
+                    )
+                    skip_reason = pro_reason or quota_reason or "llm_invalid_output"
                     kind = note(skip_reason, canon)
                     print(
                         f"[SKIP][{kind}] {llm_note} reason={skip_reason} "
@@ -1954,6 +1986,7 @@ async def amain() -> None:
                         pollinations_token=POLLINATIONS_TOKEN,
                         rubric_id=rubric_id,
                         audience=aud,
+                        visual_qa_api_key=GEMINI_VISUAL_QA_API_KEY,
                     )
                 except Exception as e:
                     kind = note("visual_build_failed", f"{canon} ({e})")

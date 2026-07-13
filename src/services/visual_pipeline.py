@@ -535,7 +535,11 @@ def evaluate_visual_quality(
     expected_prompt: str = "",
 ) -> Dict[str, object]:
     """Run lightweight Gemini QA for an AI cover; missing QA credentials are non-blocking."""
-    api_key = (gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+    api_key = (
+        gemini_api_key
+        or os.getenv("GEMINI_VISUAL_QA_API_KEY", "")
+        or os.getenv("GEMINI_API_KEY", "")
+    ).strip()
     if not api_key:
         return {"status": "skipped", "pass": True, "reason": "gemini_key_missing", "people_count": "unknown"}
 
@@ -592,6 +596,7 @@ def _safe_visual_qa(
     rubric_id: str,
     audience: str,
     expected_prompt: str = "",
+    visual_qa_api_key: str = "",
 ) -> Dict[str, object]:
     try:
         result = qa_fn(
@@ -599,6 +604,7 @@ def _safe_visual_qa(
             rubric_id=rubric_id,
             audience=audience,
             expected_prompt=expected_prompt,
+            gemini_api_key=visual_qa_api_key,
         )
     except Exception as exc:
         result = {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
@@ -626,6 +632,7 @@ def build_post_visual(
     rubric_id: str = "",
     audience: str = "",
     visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
+    visual_qa_api_key: str = "",
 ) -> Tuple[BytesIO, Dict[str, str]]:
     original_prompt = (image_prompt or "").strip()
     prompt = _enhance_image_prompt(original_prompt)
@@ -663,6 +670,7 @@ def build_post_visual(
                 rubric_id=rubric_id,
                 audience=audience,
                 expected_prompt=prompt,
+                visual_qa_api_key=visual_qa_api_key,
             )
             print(
                 f"[VISUAL_QA] status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
@@ -699,6 +707,7 @@ def build_post_visual(
                     rubric_id=rubric_id,
                     audience=audience,
                     expected_prompt=retry_prompt,
+                    visual_qa_api_key=visual_qa_api_key,
                 )
                 print(
                     f"[VISUAL_QA] status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "

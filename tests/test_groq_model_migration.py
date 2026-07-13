@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIMARY_MODEL = "openai/gpt-oss-120b"
@@ -51,6 +53,9 @@ def _import_llm_fresh():
         os.environ.pop(name, None)
     sys.path.insert(0, str(ROOT))
     sys.modules.pop("src.services.llm_generator", None)
+    services_package = sys.modules.get("src.services")
+    if services_package is not None and hasattr(services_package, "llm_generator"):
+        delattr(services_package, "llm_generator")
     from src.services import llm_generator  # type: ignore
 
     return llm_generator
@@ -135,6 +140,49 @@ def test_both_groq_models_fail_without_crashing_generation() -> None:
     assert ok is False
     assert isinstance(note, str)
     assert "groq_failed" in note
+
+
+def test_gemini_quota_error_disables_followup_http_requests() -> None:
+    llm = _import_llm_fresh()
+    calls = 0
+
+    async def quota_response(url: str, headers: dict, payload: dict, timeout: int = 70):
+        nonlocal calls
+        calls += 1
+        return _FakeResponse(429, '{"error":{"message":"quota exhausted"}}')
+
+    llm._post_json = quota_response
+    llm.LLM_MAX_RETRIES = 3
+    llm.LLM_CALL_DELAY_SEC = 0
+    llm._next_allowed_ts = 0.0
+
+    with pytest.raises(RuntimeError, match="gemini_quota_exhausted"):
+        asyncio.run(llm.gemini_generate("prompt", "test-key"))
+    assert calls == 1
+    assert llm.gemini_text_provider_status("test-key") == "quota_exhausted"
+
+    with pytest.raises(RuntimeError, match="gemini_quota_exhausted_cached"):
+        asyncio.run(llm.gemini_generate("prompt two", "test-key"))
+    assert calls == 1
+
+    fresh = _import_llm_fresh()
+    assert fresh.gemini_text_provider_status("test-key") == "available"
+
+
+def test_gemini_temporary_503_does_not_trip_quota_breaker() -> None:
+    llm = _import_llm_fresh()
+
+    async def temporary_response(url: str, headers: dict, payload: dict, timeout: int = 70):
+        return _FakeResponse(503, "temporarily unavailable")
+
+    llm._post_json = temporary_response
+    llm.LLM_MAX_RETRIES = 1
+    llm.LLM_CALL_DELAY_SEC = 0
+    llm._next_allowed_ts = 0.0
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(llm.gemini_generate("prompt", "test-key"))
+    assert llm.gemini_text_provider_status("test-key") == "available"
 
 
 def main() -> None:

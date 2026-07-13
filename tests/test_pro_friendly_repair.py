@@ -50,6 +50,85 @@ async def _generate_with_gemini() -> tuple[str, bool, str]:
 
 
 class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prevalidated_method_prompt_uses_anchors_without_no_data_rules(self):
+        prompts = []
+
+        async def fake_groq(prompt, api_key):
+            prompts.append(prompt)
+            return VALID_CARD
+
+        with patch.object(llm, "groq_chat", side_effect=fake_groq):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Суббота — Методическая копилка",
+                rubric_format="pro_friendly",
+                audience="pros",
+                title_suffix="",
+                source_domain="example.org",
+                source_url="https://example.org/source",
+                evidence_text=EVIDENCE,
+                disclaimer="",
+                hashtags=[],
+                provider="groq",
+                groq_key="groq-key",
+                gemini_key="",
+                max_chars=1200,
+                day_key="SA",
+                evidence_prevalidated=True,
+            )
+
+        self.assertTrue(ok, note)
+        self.assertTrue(out)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Evidence already passed automatic pre-validation", prompts[0])
+        self.assertIn("EVIDENCE ANCHORS:", prompts[0])
+        self.assertIn("Play a word game with no special materials", prompts[0])
+        self.assertNotIn("НЕТ_ДАННЫХ", prompts[0])
+
+    def test_unvalidated_method_prompt_keeps_no_data_guard(self):
+        prompt = llm.build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            max_chars=1200,
+        )
+
+        self.assertIn("НЕТ_ДАННЫХ", prompt)
+
+        prevalidated_prompt = llm.build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            max_chars=1200,
+            evidence_prevalidated=True,
+        )
+        self.assertNotIn("НЕТ_ДАННЫХ", prevalidated_prompt)
+        self.assertIn("Evidence already passed automatic pre-validation", prevalidated_prompt)
+
+    def test_prevalidated_repair_does_not_reintroduce_no_data_fallback(self):
+        repair = llm.build_pro_friendly_repair_prompt(
+            "Base prompt",
+            "no_data_in_source",
+            evidence_prevalidated=True,
+        )
+
+        self.assertIn("Evidence already passed pre-validation", repair)
+        self.assertIn("exactly three short numbered steps", repair)
+        self.assertNotIn("НЕТ_ДАННЫХ", repair)
+
     async def test_gemini_pro_invalid_output_gets_one_valid_repair(self):
         responses = [MISSING_GOAL_CARD, VALID_CARD]
 

@@ -6,12 +6,80 @@ from src.services.llm_generator import (
     _validate_parent_safety_output,
     _validate_pro_output,
     build_generation_prompt,
+    build_pro_friendly_repair_prompt,
     validate_pro_evidence_for_generation,
     validate_pro_concrete_details,
 )
 
 
 class RubricQualityTest(unittest.TestCase):
+    def test_pro_rejects_risky_intraoral_manual_technique(self):
+        output = (
+            "Артикуляционная карточка\n"
+            "👩‍⚕️ Аудитория: специалисты\n"
+            "🎯 Цель: вызвать звук.\n"
+            "🧰 Материалы: логопедический зонд.\n"
+            "🔁 Как провести:\n"
+            "1. Введите зонд под язык.\n"
+            "2. Прижмите язык к нёбу.\n"
+            "3. Отметьте повтор звука.\n"
+            "✅ На что смотреть: ребёнок повторяет звук.\n"
+            "💡 Вариант усложнения: увеличьте число повторов."
+        )
+
+        ok, reason = _validate_pro_output(output, "Use a probe under the tongue with mechanical help.")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_risky_manual_technique")
+
+    def test_pro_rejects_manual_massage_and_pressure_on_oral_tissues(self):
+        output = (
+            "Ручная техника\n"
+            "👩‍⚕️ Аудитория: специалисты\n"
+            "🎯 Цель: поддержать артикуляцию.\n"
+            "🧰 Материалы: без специальных материалов.\n"
+            "🔁 Как провести:\n"
+            "1. Самостоятельно выполните массаж языка.\n"
+            "2. Давите на дёсны и смещайте язык.\n"
+            "3. Отметьте реакцию ребёнка.\n"
+            "✅ На что смотреть: ребёнок повторяет звук.\n"
+            "💡 Вариант усложнения: добавьте ещё один звук."
+        )
+
+        ok, reason = _validate_pro_output(output, "Practice an articulation task and observe the child's response.")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pro_risky_manual_technique")
+
+    def test_pro_safe_actions_are_not_blocked_as_manual_technique(self):
+        evidence = (
+            "Use picture cards. Show a card, name the word, ask the child to repeat and choose the matching card. "
+            "Clap and blow during the game, then observe whether the child repeats the target word."
+        )
+        output = (
+            "Игра с карточками\n"
+            "👩‍⚕️ Аудитория: специалисты\n"
+            "🎯 Цель: повторить слово.\n"
+            "🧰 Материалы: карточки.\n"
+            "🔁 Как провести:\n"
+            "1. Покажите карточку и назовите слово.\n"
+            "2. Попросите ребёнка повторить и выбрать карточку.\n"
+            "3. Хлопните и подуйте вместе с ребёнком.\n"
+            "✅ На что смотреть: ребёнок повторяет слово и выбирает карточку.\n"
+            "💡 Вариант усложнения: предложите другую карточку."
+        )
+
+        ok, reason = _validate_pro_output(output, evidence)
+
+        self.assertTrue(ok, reason)
+
+    def test_pro_risky_repair_prompt_targets_manual_technique(self):
+        repair = build_pro_friendly_repair_prompt("BASE", "pro_risky_manual_technique")
+
+        self.assertIn("рискованные ручные", repair.lower())
+        self.assertIn("внутриротовые", repair.lower())
+        self.assertIn("НЕТ_ДАННЫХ", repair)
+
     def test_pro_rejects_unsupported_concrete_details(self):
         evidence = "Компьютерная игра помогает ребенку знакомиться с буквами."
         output = (

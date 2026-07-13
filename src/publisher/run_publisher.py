@@ -190,6 +190,7 @@ SOFT_SKIP_REASONS = {
     "pro_unsupported_observation_claim",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_risky_manual_technique",
     "pro_missing_method_card_heading",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
@@ -232,6 +233,7 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_unsupported_observation_claim",
     "pro_too_abstract",
     "pro_old_academic_structure",
+    "pro_risky_manual_technique",
     "pro_missing_method_card_heading",
 }
 
@@ -990,13 +992,83 @@ SITE_PARSERS = {
 }
 
 
+MOJIBAKE_MARKERS = (
+    "Р°",
+    "Рµ",
+    "Рё",
+    "Рѕ",
+    "С‚",
+    "СЏ",
+    "Ð",
+    "Ñ",
+    "Ã",
+    "Â",
+    "â",
+)
+
+
+def _decode_candidate_score(text: str) -> tuple[int, int]:
+    replacement_count = text.count("�")
+    mojibake_count = sum(text.count(marker) for marker in MOJIBAKE_MARKERS)
+    return (replacement_count * 10 + mojibake_count * 6, mojibake_count)
+
+
+def _explicit_charset_from_headers(headers: object) -> str:
+    content_type = ""
+    if headers is not None:
+        content_type = str(getattr(headers, "get", lambda *_args: "")("Content-Type", "") or "")
+    match = re.search(r"(?:^|;)\s*charset\s*=\s*['\"]?([^;'\"]+)", content_type, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _decode_response_text(response: requests.Response) -> str:
+    encodings: List[str] = []
+    explicit_charset = _explicit_charset_from_headers(response.headers)
+    if explicit_charset:
+        encodings.append(explicit_charset)
+
+    try:
+        apparent_encoding = response.apparent_encoding
+    except Exception:
+        apparent_encoding = ""
+    if apparent_encoding:
+        encodings.append(apparent_encoding)
+
+    # Do not use requests' implicit ISO-8859-1 choice when no charset is declared.
+    encodings.extend(["utf-8", "windows-1251"])
+
+    candidates: List[tuple[str, str]] = []
+    seen: set[str] = set()
+    for encoding in encodings:
+        normalized = (encoding or "").strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            candidates.append((normalized, response.content.decode(encoding)))
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    if not candidates:
+        return response.text
+
+    explicit_candidate = next(
+        (text for encoding, text in candidates if encoding == explicit_charset.strip().lower()),
+        "",
+    )
+    if explicit_candidate and _decode_candidate_score(explicit_candidate) == (0, 0):
+        return explicit_candidate
+
+    return min(candidates, key=lambda item: _decode_candidate_score(item[1]))[1]
+
+
 def fetch_html_site(url: str, parser_name: str) -> List[Dict[str, str]]:
     r = requests.get(url, headers=HEADERS, timeout=30, verify=_verify_for_url(url))
     r.raise_for_status()
     parser = SITE_PARSERS.get(parser_name)
     if not parser:
         raise ValueError(f"Unknown site parser: {parser_name}")
-    items = parser(url, r.text)
+    items = parser(url, _decode_response_text(r))
     uniq: Dict[str, Dict[str, str]] = {}
     for it in items:
         uniq[it["link"]] = it
@@ -1048,7 +1120,7 @@ def get_canonical(url: str) -> str:
     try:
         r = requests.get(url, headers=HEADERS, timeout=25, verify=_verify_for_url(url))
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "lxml")
+        soup = BeautifulSoup(_decode_response_text(r), "lxml")
         canon = soup.find("link", rel=lambda x: x and "canonical" in x.lower())
         if canon and canon.get("href"):
             href = canon["href"].strip()
@@ -1067,7 +1139,7 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     if "text/html" not in ctype and "application/xhtml" not in ctype:
         return ""
 
-    soup = BeautifulSoup(r.text, "lxml")
+    soup = BeautifulSoup(_decode_response_text(r), "lxml")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 

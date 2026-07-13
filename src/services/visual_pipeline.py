@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
+import json
 from io import BytesIO
 import os
 import re
 import time
-from typing import Dict, Tuple
+from typing import Callable, Dict, Tuple
 from urllib.parse import quote
 
 import requests
@@ -42,25 +44,30 @@ POLLINATIONS_GEN_HEIGHT = _env_int("POLLINATIONS_GEN_HEIGHT", 720)
 # Сила блюра для фоновой подложки
 POLLINATIONS_BLUR_RADIUS = _env_int("POLLINATIONS_BLUR_RADIUS", 18)
 POLLINATIONS_FOREGROUND_SCALE_PERCENT = 88
+POLLINATIONS_NEAR_ASPECT_TOLERANCE = 0.08
+
+GEMINI_VISUAL_QA_TIMEOUT_SECONDS = _env_int("GEMINI_VISUAL_QA_TIMEOUT_SECONDS", 12)
+GEMINI_VISUAL_QA_MODEL = os.getenv("GEMINI_VISUAL_QA_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
 
 HEADERS = {
     "User-Agent": "logoped-channel-bot/visual-pipeline/1.2",
     "Accept": "image/*",
 }
 
-# Mild image-quality suffix. Kept intentionally general: it improves prompt stability
-# without forcing a human figure into every cover.
 VISUAL_QUALITY_SUFFIX = (
     "Horizontal cover composition suitable for Telegram, safe composition that can be placed on a 16:9 cover, "
-    "clean professional educational editorial illustration, warm modern style, "
+    "warm editorial illustration, child-friendly educational scene, soft natural daylight, "
+    "clean uncluttered home or therapy room, soft beige cream and warm pastel palette, gentle contrast, "
     "simple uncluttered composition, one clear interaction, relevant props from the post, soft natural lighting, "
     "natural human proportions, avoid distorted anatomy, no stretched faces, no widened bodies, no widened torsos, "
-    "no elongated arms or enlarged hands, two arms and two legs when visible, anatomically coherent hands, "
+    "no elongated arms or enlarged hands, two arms and two legs when visible, anatomically coherent hands and fingers, "
     "normal camera perspective, avoid wide-angle lens distortion, avoid panoramic distortion, "
-    "keep subjects comfortably centered, leave breathing room around the main figures, "
+    "medium-shot composition, clear main subject, keep subjects comfortably centered, leave breathing room around the main figures, "
     "coherent realistic figure rendering when people are present, balanced composition, one clear main scene, one clear focal group, "
-    "do not place people edge-to-edge across the frame, "
-    "no portrait poster composition, no duplicate people, no random letters or numbers, "
+    "do not place people edge-to-edge across the frame, no background people unless explicitly required, "
+    "no duplicate or ghosted figures, no portrait poster composition, no random letters or numbers, "
+    "no deformed hands, no extra or missing limbs, no cropped main faces, no unnatural width, "
+    "no exaggerated perspective, no fish-eye or ultra-wide view, no cluttered or complex scene, no anime, no 3D toy style, "
     "no text in image, no elderly or Santa-like character unless explicitly requested, "
     "no headphones unless the post mentions listening or headphones, no holiday imagery unless the post is seasonal."
 )
@@ -168,7 +175,7 @@ def _enhance_image_prompt(prompt: str) -> str:
         return ""
 
     lower = cleaned.lower()
-    if "coherent realistic figure rendering" in lower:
+    if "coherent realistic figure rendering" in lower and "warm editorial illustration" in lower:
         return cleaned
 
     return f"{cleaned}. {VISUAL_QUALITY_SUFFIX}"
@@ -188,6 +195,18 @@ def _attach_file_metadata(
 def _build_aspect_preserved_cover(img: Image.Image) -> BytesIO:
     base = img.convert("RGB")
     target_size = (POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT)
+
+    source_aspect = base.width / max(1, base.height)
+    target_aspect = POLLINATIONS_WIDTH / max(1, POLLINATIONS_HEIGHT)
+    aspect_delta = abs(source_aspect - target_aspect) / target_aspect
+
+    # Keep a good near-16:9 image full-frame. Use the blurred backing layer
+    # only when the source needs a preserved-aspect foreground treatment.
+    if aspect_delta <= POLLINATIONS_NEAR_ASPECT_TOLERANCE:
+        full_frame = ImageOps.fit(base, target_size, method=Image.Resampling.LANCZOS)
+        buffer = BytesIO()
+        full_frame.save(buffer, format="PNG", optimize=True)
+        return _attach_file_metadata(buffer, filename="cover_ai.png", mime_type="image/png")
 
     # Фон заполняет весь кадр и может быть cropped/blurred, но не служит
     # основным изображением. Передний план ниже всегда сохраняет пропорции.
@@ -366,12 +385,153 @@ def download_pollinations_image_with_meta(
     )
 
 
+def _visual_people_rule(rubric_id: str) -> str:
+    rubric = (rubric_id or "").strip().lower()
+    if rubric == "method_piggybank":
+        return "Exactly one specialist and one child; hard maximum two visible people; no classroom group."
+    if rubric == "age_norms":
+        return "Prefer one child only; an adult is allowed only when needed to demonstrate the milestone."
+    return "Exactly one adult and one child; hard maximum two visible people; no extra observers or background people."
+
+
+def build_visual_retry_prompt(prompt: str, rubric_id: str = "", audience: str = "") -> str:
+    base = _enhance_image_prompt(prompt)
+    if not base:
+        return ""
+    strict = (
+        " Regenerate as a simpler medium-shot Telegram cover. "
+        f"{_visual_people_rule(rubric_id)} "
+        "Use one clear main subject, one simple uncluttered room, and only props explicitly required by the post. "
+        "No crowd, siblings, extra family members, observers, background people, duplicate figures, ghosted figures, "
+        "deformed hands, extra limbs, cropped faces, text, letters, logos, watermarks, or dramatic perspective. "
+        f"Audience: {audience or 'parents'}."
+    )
+    return f"{base.rstrip(' .')}.{strict}"
+
+
+def _visual_qa_text(payload: Dict[str, object]) -> str:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+    first = candidates[0]
+    if not isinstance(first, dict):
+        return ""
+    content = first.get("content")
+    if not isinstance(content, dict):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    return " ".join(
+        str(part.get("text", ""))
+        for part in parts
+        if isinstance(part, dict) and part.get("text")
+    ).strip()
+
+
+def _parse_visual_qa_response(text: str) -> Dict[str, object]:
+    match = re.search(r"\{.*\}", text or "", flags=re.DOTALL)
+    if not match:
+        return {"status": "skipped", "pass": True, "reason": "invalid_qa_response", "people_count": "unknown"}
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {"status": "skipped", "pass": True, "reason": "invalid_qa_response", "people_count": "unknown"}
+    if not isinstance(parsed, dict) or "pass" not in parsed:
+        return {"status": "skipped", "pass": True, "reason": "invalid_qa_response", "people_count": "unknown"}
+    passed = parsed.get("pass")
+    if isinstance(passed, str):
+        passed = passed.strip().lower() in {"true", "yes", "pass", "passed"}
+    else:
+        passed = bool(passed)
+    return {
+        "status": "pass" if passed else "fail",
+        "pass": passed,
+        "reason": str(parsed.get("reason") or ("ok" if passed else "visual_quality_rejected")),
+        "people_count": str(parsed.get("people_count", "unknown")),
+    }
+
+
+def evaluate_visual_quality(
+    image_buffer: BytesIO,
+    rubric_id: str = "",
+    audience: str = "",
+    gemini_api_key: str = "",
+    model: str = GEMINI_VISUAL_QA_MODEL,
+) -> Dict[str, object]:
+    """Run lightweight Gemini QA for an AI cover; missing QA credentials are non-blocking."""
+    api_key = (gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        return {"status": "skipped", "pass": True, "reason": "gemini_key_missing", "people_count": "unknown"}
+
+    qa_prompt = (
+        "You are a strict visual QA checker for a Telegram educational cover. "
+        "Return JSON only with keys pass (boolean), reason (short string), and people_count (integer or unknown). "
+        "Pass only when the image is a warm soft editorial illustration, child-friendly, uncluttered, medium-shot, "
+        "relevant to speech or developmental education, with natural proportions and coherent hands. "
+        "Fail for stretched faces, widened torsos, elongated arms, oversized or deformed hands, extra or missing limbs, "
+        "duplicate or ghosted people, cropped main faces, uncanny photorealistic faces, anime or 3D toy style, "
+        "fish-eye or panoramic distortion, crowded scenes, unrequired background people, text, letters, logos, or watermarks. "
+        f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {_visual_people_rule(rubric_id)}"
+    )
+    image_bytes = image_buffer.getvalue()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent"
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": qa_prompt},
+                {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}},
+            ]
+        }],
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+    }
+    try:
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            json=payload,
+            timeout=GEMINI_VISUAL_QA_TIMEOUT_SECONDS,
+        )
+        if response.status_code >= 400:
+            return {"status": "skipped", "pass": True, "reason": f"qa_http_{response.status_code}", "people_count": "unknown"}
+        return _parse_visual_qa_response(_visual_qa_text(response.json()))
+    except Exception as exc:
+        return {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
+
+
+def _safe_visual_qa(
+    qa_fn: Callable[..., Dict[str, object]],
+    image_buffer: BytesIO,
+    rubric_id: str,
+    audience: str,
+) -> Dict[str, object]:
+    try:
+        result = qa_fn(image_buffer, rubric_id=rubric_id, audience=audience)
+    except Exception as exc:
+        result = {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
+    if not isinstance(result, dict):
+        return {"status": "skipped", "pass": True, "reason": "invalid_qa_result", "people_count": "unknown"}
+    return {
+        "status": str(result.get("status") or ("pass" if result.get("pass", True) else "fail")),
+        "pass": bool(result.get("pass", True)),
+        "reason": str(result.get("reason") or "ok"),
+        "people_count": str(result.get("people_count", "unknown")),
+    }
+
+
+def _visual_qa_passed(result: Dict[str, object]) -> bool:
+    return result.get("status") != "fail" or bool(result.get("pass", False))
+
+
 def build_post_visual(
     title: str,
     day_key: str,
     image_prompt: str,
     pollinations_token: str = "",
     fallback_title: str = "Логопедия и дефектология",
+    rubric_id: str = "",
+    audience: str = "",
+    visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
 ) -> Tuple[BytesIO, Dict[str, str]]:
     original_prompt = (image_prompt or "").strip()
     prompt = _enhance_image_prompt(original_prompt)
@@ -392,6 +552,8 @@ def build_post_visual(
         "max_retries": str(POLLINATIONS_MAX_RETRIES),
         "title": safe_title,
         "visual_title": safe_title,
+        "visual_qa": "not_run",
+        "visual_qa_attempts": "0",
     }
 
     if prompt:
@@ -400,12 +562,86 @@ def build_post_visual(
                 prompt=prompt,
                 token=pollinations_token,
             )
-            return buffer, {
+            qa_fn = visual_qa_fn or evaluate_visual_quality
+            first_qa = _safe_visual_qa(qa_fn, buffer, rubric_id=rubric_id, audience=audience)
+            print(
+                f"[VISUAL_QA] pass={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
+                f"people_count={first_qa.get('people_count', 'unknown')} attempt=1",
+                flush=True,
+            )
+            first_meta = {
                 **base_meta,
                 **download_meta,
                 "mode": "ai",
                 "reason": f"ok:attempts={download_meta.get('attempts_used', '1')}",
                 "prompt": prompt,
+                "visual_qa": str(first_qa.get("status", "skipped")),
+                "visual_qa_reason": str(first_qa.get("reason", "ok")),
+                "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
+                "visual_qa_attempts": "1",
+            }
+            if _visual_qa_passed(first_qa):
+                return buffer, first_meta
+
+            retry_prompt = build_visual_retry_prompt(prompt, rubric_id=rubric_id, audience=audience)
+            print(
+                f"[VISUAL_RETRY] reason={_short_log_message(first_qa.get('reason'))} attempt=2",
+                flush=True,
+            )
+            try:
+                retry_buffer, retry_download_meta = download_pollinations_image_with_meta(
+                    prompt=retry_prompt,
+                    token=pollinations_token,
+                )
+                retry_qa = _safe_visual_qa(qa_fn, retry_buffer, rubric_id=rubric_id, audience=audience)
+                print(
+                    f"[VISUAL_QA] pass={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "
+                    f"people_count={retry_qa.get('people_count', 'unknown')} attempt=2",
+                    flush=True,
+                )
+                retry_meta = {
+                    **base_meta,
+                    **retry_download_meta,
+                    "mode": "ai",
+                    "reason": f"ok:visual_retry:attempts={retry_download_meta.get('attempts_used', '1')}",
+                    "prompt": retry_prompt,
+                    "visual_retry_used": "True",
+                    "visual_qa": str(retry_qa.get("status", "skipped")),
+                    "visual_qa_reason": str(retry_qa.get("reason", "ok")),
+                    "visual_qa_people_count": str(retry_qa.get("people_count", "unknown")),
+                    "visual_qa_attempts": "2",
+                }
+                if _visual_qa_passed(retry_qa):
+                    return retry_buffer, retry_meta
+                first_qa = retry_qa
+            except Exception as retry_error:
+                first_qa = {
+                    "status": "fail",
+                    "pass": False,
+                    "reason": f"visual_retry_failed:{retry_error.__class__.__name__}",
+                    "people_count": "unknown",
+                }
+
+            fallback = build_fallback_cover_buffer(
+                title=safe_title,
+                day_key=day_key,
+                fallback_title=fallback_title,
+            )
+            reason = _short_log_message(first_qa.get("reason"), max_len=220)
+            return fallback, {
+                **base_meta,
+                "mode": "fallback",
+                "reason": reason,
+                "final_reason": reason,
+                "prompt": retry_prompt,
+                "visual_retry_used": "True",
+                "visual_qa": "fail",
+                "visual_qa_reason": reason,
+                "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
+                "visual_qa_attempts": "2",
+                "attempts_used": str(POLLINATIONS_MAX_RETRIES),
+                "retryable_error": "False",
+                "exception_type": "VisualQualityRejected",
             }
         except Exception as e:
             fallback = build_fallback_cover_buffer(

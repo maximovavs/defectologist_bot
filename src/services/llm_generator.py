@@ -1765,6 +1765,18 @@ def _mentioned_visual_props(body_text: str) -> List[str]:
     return props[:4]
 
 
+VISUAL_HOUSE_STYLE = (
+    "warm editorial illustration, child-friendly educational scene, soft natural daylight, "
+    "clean uncluttered home or therapy room, soft beige cream and warm pastel palette, gentle contrast, "
+    "natural human proportions, no stretched faces, no widened torsos, no elongated arms, no oversized hands, "
+    "anatomically coherent fingers, no wide-angle distortion, no panoramic distortion, medium-shot composition, "
+    "clear main subject, no edge-to-edge crowding, no background people unless explicitly required, "
+    "no duplicate or ghosted figures, no photorealistic uncanny faces, no anime, no 3D toy style, "
+    "no deformed hands, no extra or missing limbs, no cropped main faces, no unnatural width, "
+    "no exaggerated perspective, no fish-eye or ultra-wide view, no cluttered or complex scene"
+)
+
+
 def build_image_prompt_prompt(
     title: str,
     body_text: str,
@@ -1782,13 +1794,20 @@ def build_image_prompt_prompt(
         "bilingual_corner": "parent and child with two books or cards representing two languages; natural family communication; no random floating letters",
         "question_week": "parent observing a child during play or reading; optional small notebook; match the exact action",
         "method_piggybank": (
-            "prefer 1 adult specialist and 1 child in a professional activity setting; "
-            "at most 2 adults and 1 child if the post clearly requires it; avoid crowded scenes; "
-            "show only props explicitly mentioned in the post body"
+            "exactly 1 adult specialist and 1 child in a professional activity setting; hard maximum 2 visible people; "
+            "no classroom group or extra observers; show only props explicitly mentioned in the post body"
         ),
-        "age_norms": "child performing the exact milestone from the post, such as pointing, naming an object, or using a gesture",
-        "tip_of_day": "one adult and one child performing the exact home activity or dialogue",
-    }.get(rubric, "one adult and one child performing the exact action from the post")
+        "age_norms": (
+            "one child only performing the exact milestone from the post, such as pointing, naming an object, or using a gesture; "
+            "an adult may appear only when needed to demonstrate the milestone; no extra people"
+        ),
+        "tip_of_day": "exactly 1 adult and 1 child performing the exact home activity or dialogue; hard maximum 2 visible people",
+        "play_and_speak": "exactly 1 adult and 1 child performing the exact home activity or dialogue; hard maximum 2 visible people",
+        "bilingual_parents": "exactly 1 adult and 1 child communicating naturally; hard maximum 2 visible people",
+        "bilingual_corner": "exactly 1 adult and 1 child with two books or cards representing two languages; hard maximum 2 visible people; no random floating letters",
+        "question_week": "exactly 1 adult and 1 child during the exact play or reading action; hard maximum 2 visible people; no extra observers",
+        "myth_fact": "exactly 1 adult and 1 child; adult calmly models the correct word; hard maximum 2 visible people",
+    }.get(rubric, "exactly 1 adult and 1 child performing the exact action from the post; hard maximum 2 visible people")
 
     props = _mentioned_visual_props(safe_body)
     prop_rule = ", ".join(props) if props else "no extra props unless clearly present in the post body"
@@ -1800,6 +1819,7 @@ def build_image_prompt_prompt(
         "Requirements:\n"
         "- include a horizontal cover composition suitable for Telegram\n"
         "- use a safe composition that can be placed on a 16:9 cover\n"
+        f"- house style: {VISUAL_HOUSE_STYLE}\n"
         "- preserve natural human proportions; avoid distorted anatomy\n"
         "- two arms and two legs when visible; anatomically coherent hands\n"
         "- no stretched faces; no widened bodies; no widened torsos\n"
@@ -1808,6 +1828,7 @@ def build_image_prompt_prompt(
         "- keep subjects comfortably centered with breathing room around the main figures\n"
         "- one clear focal group; do not place people edge-to-edge across the frame\n"
         "- one clear main scene\n"
+        "- never add siblings, extra family members, observers, or background people unless explicitly required\n"
         "- describe one clear interaction that matches the post topic\n"
         "- use relevant props taken from the post only\n"
         "- no portrait poster composition\n"

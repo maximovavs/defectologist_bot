@@ -1952,6 +1952,8 @@ async def amain() -> None:
                         day_key=effective_day,
                         image_prompt=image_prompt,
                         pollinations_token=POLLINATIONS_TOKEN,
+                        rubric_id=rubric_id,
+                        audience=aud,
                     )
                 except Exception as e:
                     kind = note("visual_build_failed", f"{canon} ({e})")

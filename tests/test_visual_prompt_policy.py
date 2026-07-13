@@ -1,5 +1,6 @@
 from io import BytesIO
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -8,6 +9,8 @@ from src.services.visual_pipeline import (
     POLLINATIONS_GEN_HEIGHT,
     POLLINATIONS_GEN_WIDTH,
     _enhance_image_prompt,
+    build_post_visual,
+    build_visual_retry_prompt,
     _normalize_pollinations_image,
 )
 
@@ -32,6 +35,12 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertNotIn("no blurred side panels", lower)
         self.assertIn("no headphones", lower)
         self.assertIn("no holiday imagery", lower)
+        self.assertIn("warm editorial illustration", lower)
+        self.assertIn("soft beige cream and warm pastel palette", lower)
+        self.assertIn("no deformed hands", lower)
+        self.assertIn("no extra or missing limbs", lower)
+        self.assertIn("no anime", lower)
+        self.assertIn("no 3d toy style", lower)
 
     def test_method_prompt_allows_only_present_props(self):
         prompt = build_image_prompt_prompt(
@@ -97,13 +106,14 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("breathing room around the main figures", prompt)
         self.assertIn("one clear focal group", prompt)
         self.assertIn("do not place people edge-to-edge across the frame", prompt)
-        self.assertIn("prefer 1 adult specialist and 1 child", prompt)
-        self.assertIn("at most 2 adults and 1 child", prompt)
-        self.assertIn("avoid crowded scenes", prompt)
+        self.assertIn("exactly 1 adult specialist and 1 child", prompt)
+        self.assertIn("hard maximum 2 visible people", prompt)
+        self.assertIn("no classroom group", prompt)
+        self.assertIn("never add siblings", prompt)
         self.assertNotIn("native full-bleed 16:9 landscape composition", prompt)
         self.assertNotIn("no blurred side panels", prompt)
 
-    def test_normalized_landscape_image_keeps_sharp_foreground_inset(self):
+    def test_normalized_near_16_9_image_uses_full_frame(self):
         source = Image.new("RGB", (1600, 900), "white")
         for x in range(1600):
             for y in range(8):
@@ -134,10 +144,121 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertGreater(len(row), 0)
         self.assertGreater(len(column), 0)
-        self.assertGreater(min(row), 40)
-        self.assertLess(max(row), 1240)
-        self.assertGreater(min(column), 20)
-        self.assertLess(max(column), 700)
+        self.assertLessEqual(min(row), 10)
+        self.assertGreaterEqual(max(row), 1269)
+        self.assertLessEqual(min(column), 10)
+        self.assertGreaterEqual(max(column), 709)
+
+    def test_rubric_people_limits_are_explicit(self):
+        parent_prompt = build_image_prompt_prompt(
+            title="A home speech game",
+            body_text="A parent and child name picture cards.",
+            audience="parents",
+            rubric_id="tip_of_day",
+        ).lower()
+        age_prompt = build_image_prompt_prompt(
+            title="A developmental milestone",
+            body_text="A child points to a familiar object.",
+            audience="parents",
+            rubric_id="age_norms",
+        ).lower()
+
+        self.assertIn("exactly 1 adult and 1 child", parent_prompt)
+        self.assertIn("hard maximum 2 visible people", parent_prompt)
+        self.assertIn("one child only", age_prompt)
+        self.assertIn("no extra people", age_prompt)
+
+    def test_visual_retry_prompt_is_stricter(self):
+        base = _enhance_image_prompt("an adult and child practicing a speech game")
+        retry = build_visual_retry_prompt(base, rubric_id="tip_of_day", audience="parents")
+
+        self.assertGreater(len(retry), len(base))
+        self.assertIn("exactly one adult and one child", retry.lower())
+        self.assertIn("hard maximum two visible people", retry.lower())
+        self.assertIn("no crowd", retry.lower())
+        self.assertIn("no duplicate or ghosted figures", retry.lower())
+
+    def test_visual_qa_pass_does_not_retry(self):
+        fake_buffer = BytesIO(b"first")
+        qa_calls = []
+
+        def qa(buffer, **kwargs):
+            qa_calls.append(buffer)
+            return {"status": "pass", "pass": True, "reason": "ok", "people_count": "2"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(fake_buffer, {"attempts_used": "1", "final_reason": "ok"}),
+        ) as download:
+            _, meta = build_post_visual(
+                title="Speech game",
+                day_key="MO",
+                image_prompt="an adult and child practicing a speech game",
+                visual_qa_fn=qa,
+                rubric_id="tip_of_day",
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(len(qa_calls), 1)
+        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["visual_qa_attempts"], "1")
+
+    def test_visual_qa_failure_retries_once_then_accepts(self):
+        first = BytesIO(b"first")
+        second = BytesIO(b"second")
+        qa_results = iter([
+            {"status": "fail", "pass": False, "reason": "duplicate_figures", "people_count": "4"},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": "2"},
+        ])
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (first, {"attempts_used": "1", "final_reason": "ok"}),
+                (second, {"attempts_used": "1", "final_reason": "ok"}),
+            ],
+        ) as download:
+            _, meta = build_post_visual(
+                title="Speech game",
+                day_key="MO",
+                image_prompt="an adult and child practicing a speech game",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+                rubric_id="tip_of_day",
+            )
+
+        self.assertEqual(download.call_count, 2)
+        retry_prompt = download.call_args_list[1].kwargs["prompt"].lower()
+        self.assertIn("hard maximum two visible people", retry_prompt)
+        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["visual_retry_used"], "True")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+
+    def test_visual_qa_failure_after_retry_uses_fallback(self):
+        qa_results = iter([
+            {"status": "fail", "pass": False, "reason": "deformed_hands", "people_count": "2"},
+            {"status": "fail", "pass": False, "reason": "duplicate_figures", "people_count": "3"},
+        ])
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
+        ) as download:
+            _, meta = build_post_visual(
+                title="Speech game",
+                day_key="MO",
+                image_prompt="an adult and child practicing a speech game",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+                rubric_id="tip_of_day",
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(meta["visual_qa"], "fail")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertIn("duplicate_figures", meta["reason"])
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

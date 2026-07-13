@@ -48,6 +48,7 @@ POLLINATIONS_NEAR_ASPECT_TOLERANCE = 0.08
 
 GEMINI_VISUAL_QA_TIMEOUT_SECONDS = _env_int("GEMINI_VISUAL_QA_TIMEOUT_SECONDS", 12)
 GEMINI_VISUAL_QA_MODEL = os.getenv("GEMINI_VISUAL_QA_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+VISUAL_QA_REQUIRED_RUBRICS_DEFAULT = "method_piggybank"
 
 HEADERS = {
     "User-Agent": "logoped-channel-bot/visual-pipeline/1.2",
@@ -406,6 +407,19 @@ def _visual_people_limit(rubric_id: str) -> int:
     }.get((rubric_id or "").strip().lower(), 2)
 
 
+def _visual_qa_required_rubrics() -> set[str]:
+    raw = os.getenv("VISUAL_QA_REQUIRED_RUBRICS", VISUAL_QA_REQUIRED_RUBRICS_DEFAULT)
+    return {
+        item.strip().lower()
+        for item in re.split(r"[,;\s]+", raw or "")
+        if item.strip()
+    }
+
+
+def _visual_qa_is_required(rubric_id: str) -> bool:
+    return (rubric_id or "").strip().lower() in _visual_qa_required_rubrics()
+
+
 def _coerce_people_count(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -623,6 +637,53 @@ def _visual_qa_passed(result: Dict[str, object]) -> bool:
     return bool(result.get("pass", False)) and result.get("status") != "fail"
 
 
+def _visual_qa_skipped(result: Dict[str, object]) -> bool:
+    return str(result.get("status", "")).strip().lower() == "skipped"
+
+
+def _fallback_for_required_visual_qa(
+    *,
+    safe_title: str,
+    day_key: str,
+    fallback_title: str,
+    base_meta: Dict[str, str],
+    prompt: str,
+    qa_result: Dict[str, object],
+    qa_attempts: str,
+    download_meta: Dict[str, str] | None = None,
+    rubric_id: str = "",
+) -> Tuple[BytesIO, Dict[str, str]]:
+    qa_reason = _short_log_message(qa_result.get("reason"), max_len=220)
+    print(
+        f"[VISUAL_FALLBACK] reason=qa_unavailable_for_required_rubric "
+        f"rubric={(rubric_id or '').strip().lower()} qa_reason={qa_reason}",
+        flush=True,
+    )
+    fallback = build_fallback_cover_buffer(
+        title=safe_title,
+        day_key=day_key,
+        fallback_title=fallback_title,
+    )
+    return fallback, {
+        **base_meta,
+        **(download_meta or {}),
+        "mode": "fallback",
+        "reason": "qa_unavailable_for_required_rubric",
+        "final_reason": "qa_unavailable_for_required_rubric",
+        "fallback_reason": "qa_unavailable_for_required_rubric",
+        "prompt": prompt,
+        "visual_retry_used": "False" if qa_attempts == "1" else "True",
+        "visual_qa": "skipped",
+        "visual_qa_status": "skipped",
+        "visual_qa_reason": qa_reason,
+        "visual_qa_people_count": str(qa_result.get("people_count", "unknown")),
+        "visual_qa_attempts": qa_attempts,
+        "attempts_used": str((download_meta or {}).get("attempts_used", "1")),
+        "retryable_error": "False",
+        "exception_type": "VisualQaRequiredUnavailable",
+    }
+
+
 def build_post_visual(
     title: str,
     day_key: str,
@@ -640,6 +701,7 @@ def build_post_visual(
         _clean_cover_title(title, fallback=fallback_title),
         fallback=fallback_title,
     )
+    visual_qa_required = _visual_qa_is_required(rubric_id)
 
     base_meta = {
         "prompt_len": str(len(prompt)),
@@ -654,7 +716,9 @@ def build_post_visual(
         "title": safe_title,
         "visual_title": safe_title,
         "visual_qa": "not_run",
+        "visual_qa_status": "not_run",
         "visual_qa_attempts": "0",
+        "visual_qa_required": str(visual_qa_required),
     }
 
     if prompt:
@@ -684,10 +748,23 @@ def build_post_visual(
                 "reason": f"ok:attempts={download_meta.get('attempts_used', '1')}",
                 "prompt": prompt,
                 "visual_qa": str(first_qa.get("status", "skipped")),
+                "visual_qa_status": str(first_qa.get("status", "skipped")),
                 "visual_qa_reason": str(first_qa.get("reason", "ok")),
                 "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
                 "visual_qa_attempts": "1",
             }
+            if visual_qa_required and _visual_qa_skipped(first_qa):
+                return _fallback_for_required_visual_qa(
+                    safe_title=safe_title,
+                    day_key=day_key,
+                    fallback_title=fallback_title,
+                    base_meta=base_meta,
+                    prompt=prompt,
+                    qa_result=first_qa,
+                    qa_attempts="1",
+                    download_meta=download_meta,
+                    rubric_id=rubric_id,
+                )
             if _visual_qa_passed(first_qa):
                 return buffer, first_meta
 
@@ -722,10 +799,23 @@ def build_post_visual(
                     "prompt": retry_prompt,
                     "visual_retry_used": "True",
                     "visual_qa": str(retry_qa.get("status", "skipped")),
+                    "visual_qa_status": str(retry_qa.get("status", "skipped")),
                     "visual_qa_reason": str(retry_qa.get("reason", "ok")),
                     "visual_qa_people_count": str(retry_qa.get("people_count", "unknown")),
                     "visual_qa_attempts": "2",
                 }
+                if visual_qa_required and _visual_qa_skipped(retry_qa):
+                    return _fallback_for_required_visual_qa(
+                        safe_title=safe_title,
+                        day_key=day_key,
+                        fallback_title=fallback_title,
+                        base_meta=base_meta,
+                        prompt=retry_prompt,
+                        qa_result=retry_qa,
+                        qa_attempts="2",
+                        download_meta=retry_download_meta,
+                        rubric_id=rubric_id,
+                    )
                 if _visual_qa_passed(retry_qa):
                     return retry_buffer, retry_meta
                 first_qa = retry_qa
@@ -751,6 +841,7 @@ def build_post_visual(
                 "prompt": retry_prompt,
                 "visual_retry_used": "True",
                 "visual_qa": "fail",
+                "visual_qa_status": "fail",
                 "visual_qa_reason": reason,
                 "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
                 "visual_qa_attempts": "2",

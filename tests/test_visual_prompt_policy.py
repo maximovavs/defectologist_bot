@@ -11,6 +11,7 @@ from src.services.visual_pipeline import (
     POLLINATIONS_GEN_WIDTH,
     _enhance_image_prompt,
     _safe_visual_qa,
+    _visual_qa_is_required,
     build_post_visual,
     build_visual_retry_prompt,
     evaluate_visual_quality,
@@ -334,6 +335,103 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "ai")
         self.assertEqual(meta["visual_qa_attempts"], "1")
 
+    def test_method_piggybank_qa_http_429_uses_fallback_without_retry(self):
+        first = BytesIO(b"first")
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(first, {"attempts_used": "1", "final_reason": "ok"}),
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Method card",
+                day_key="SA",
+                image_prompt="speech specialist and child play a drum rhythm balance game",
+                visual_qa_fn=lambda *_args, **_kwargs: {
+                    "status": "skipped",
+                    "pass": True,
+                    "reason": "qa_http_429",
+                    "people_count": "unknown",
+                },
+                rubric_id="method_piggybank",
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertNotEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
+        self.assertEqual(meta["visual_qa_required"], "True")
+        self.assertEqual(meta["visual_qa"], "skipped")
+        self.assertEqual(meta["visual_qa_status"], "skipped")
+        self.assertEqual(meta["visual_qa_reason"], "qa_http_429")
+        self.assertEqual(meta["visual_qa_attempts"], "1")
+
+    def test_method_piggybank_missing_visual_qa_key_uses_fallback(self):
+        with patch.dict(os.environ, {"GEMINI_VISUAL_QA_API_KEY": "", "GEMINI_API_KEY": ""}, clear=False), patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Method card",
+                day_key="SA",
+                image_prompt="speech specialist and child play a drum rhythm balance game",
+                rubric_id="method_piggybank",
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertNotEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(meta["visual_qa_reason"], "gemini_key_missing")
+        self.assertEqual(meta["visual_qa_attempts"], "1")
+
+    def test_method_piggybank_invalid_qa_response_uses_fallback(self):
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+        ) as download:
+            _, meta = build_post_visual(
+                title="Method card",
+                day_key="SA",
+                image_prompt="speech specialist and child play a drum rhythm balance game",
+                visual_qa_fn=lambda *_args, **_kwargs: {
+                    "status": "skipped",
+                    "pass": True,
+                    "reason": "invalid_qa_response",
+                    "people_count": "unknown",
+                },
+                rubric_id="method_piggybank",
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(meta["visual_qa_reason"], "invalid_qa_response")
+        self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
+
+    def test_method_piggybank_visual_qa_pass_uses_ai_image(self):
+        first = BytesIO(b"first")
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(first, {"attempts_used": "1", "final_reason": "ok"}),
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Method card",
+                day_key="SA",
+                image_prompt="speech specialist and child play a drum rhythm balance game",
+                visual_qa_fn=lambda *_args, **_kwargs: {
+                    "status": "pass",
+                    "pass": True,
+                    "reason": "ok",
+                    "people_count": 2,
+                },
+                rubric_id="method_piggybank",
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["visual_qa_required"], "True")
+        self.assertEqual(meta["visual_qa_status"], "pass")
+
     def test_visual_qa_failure_retries_once_then_accepts(self):
         first = BytesIO(b"first")
         second = BytesIO(b"second")
@@ -363,6 +461,67 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "ai")
         self.assertEqual(meta["visual_retry_used"], "True")
         self.assertEqual(meta["visual_qa_attempts"], "2")
+
+    def test_method_piggybank_visual_qa_fail_then_retry_pass_uses_retry_image(self):
+        qa_results = iter([
+            {"status": "fail", "pass": False, "reason": "action_mismatch", "people_count": 2},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 2},
+        ])
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Method card",
+                day_key="SA",
+                image_prompt="speech specialist and child play a drum rhythm balance game",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+                rubric_id="method_piggybank",
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"second")
+        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["visual_retry_used"], "True")
+        self.assertEqual(meta["visual_qa_status"], "pass")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+
+    def test_parent_rubric_skipped_visual_qa_remains_fail_open(self):
+        first = BytesIO(b"first")
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(first, {"attempts_used": "1", "final_reason": "ok"}),
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Speech game",
+                day_key="MO",
+                image_prompt="an adult and child practicing a speech game",
+                visual_qa_fn=lambda *_args, **_kwargs: {
+                    "status": "skipped",
+                    "pass": True,
+                    "reason": "qa_http_429",
+                    "people_count": "unknown",
+                },
+                rubric_id="tip_of_day",
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["visual_qa_required"], "False")
+        self.assertEqual(meta["visual_qa_status"], "skipped")
+
+    def test_visual_qa_required_rubrics_env_parses_multiple_ids(self):
+        with patch.dict(os.environ, {"VISUAL_QA_REQUIRED_RUBRICS": "method_piggybank, tip_of_day age_norms"}):
+            self.assertTrue(_visual_qa_is_required("method_piggybank"))
+            self.assertTrue(_visual_qa_is_required("tip_of_day"))
+            self.assertTrue(_visual_qa_is_required("age_norms"))
+            self.assertFalse(_visual_qa_is_required("play_and_speak"))
 
     def test_visual_qa_failure_after_retry_uses_fallback(self):
         qa_results = iter([

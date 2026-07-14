@@ -216,13 +216,27 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
     def test_people_limit_two_passes_and_unknown_is_fail_open(self):
         passed = _safe_visual_qa(
-            lambda *_args, **_kwargs: {"status": "pass", "pass": True, "reason": "ok", "people_count": 2},
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+            },
             BytesIO(b"image"),
             rubric_id="method_piggybank",
             audience="pros",
         )
         unknown = _safe_visual_qa(
-            lambda *_args, **_kwargs: {"status": "pass", "pass": True, "reason": "ok", "people_count": "unknown"},
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": "unknown",
+                "adult_count": 1,
+                "child_count": 1,
+            },
             BytesIO(b"image"),
             rubric_id="method_piggybank",
             audience="pros",
@@ -232,6 +246,93 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(passed["people_count"], 2)
         self.assertTrue(unknown["pass"])
         self.assertEqual(unknown["people_count"], "unknown")
+
+    def test_parent_rubric_unknown_character_counts_fail(self):
+        result = _safe_visual_qa(
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": "unknown",
+                "child_count": "unknown",
+            },
+            BytesIO(b"image"),
+            rubric_id="tip_of_day",
+            audience="parents",
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "character_counts_unknown")
+
+    def test_parent_rubric_missing_character_counts_fail(self):
+        result = _safe_visual_qa(
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+            },
+            BytesIO(b"image"),
+            rubric_id="play_and_speak",
+            audience="parents",
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "character_counts_unknown")
+
+    def test_method_rubric_unknown_character_counts_fail(self):
+        result = _safe_visual_qa(
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": "unknown",
+                "child_count": "unknown",
+            },
+            BytesIO(b"image"),
+            rubric_id="method_piggybank",
+            audience="pros",
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "character_counts_unknown")
+
+    def test_all_role_sensitive_rubrics_reject_non_numeric_character_counts(self):
+        rubrics = (
+            "method_piggybank",
+            "tip_of_day",
+            "play_and_speak",
+            "question_week",
+            "myth_fact",
+            "bilingual_corner",
+            "bilingual_parents",
+            "age_norms",
+        )
+
+        for rubric_id in rubrics:
+            with self.subTest(rubric_id=rubric_id):
+                result = _safe_visual_qa(
+                    lambda *_args, **_kwargs: {
+                        "status": "pass",
+                        "pass": True,
+                        "reason": "ok",
+                        "people_count": 2,
+                        "adult_count": "one",
+                        "child_count": 1,
+                    },
+                    BytesIO(b"image"),
+                    rubric_id=rubric_id,
+                    audience="pros" if rubric_id == "method_piggybank" else "parents",
+                )
+
+                self.assertEqual(result["status"], "fail")
+                self.assertFalse(result["pass"])
+                self.assertEqual(result["reason"], "character_counts_unknown")
 
     def test_visual_qa_hard_reasons_override_pass_and_normalize(self):
         cases = (
@@ -517,6 +618,79 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("show the exact activity from the post", retry_prompt)
         self.assertEqual(meta["mode"], "ai")
         self.assertEqual(meta["visual_retry_used"], "True")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+
+    def test_unknown_character_counts_retry_once_then_accepts(self):
+        qa_results = iter([
+            {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": "unknown",
+                "child_count": "unknown",
+            },
+            {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+            },
+        ])
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Speech game",
+                day_key="MO",
+                image_prompt="an adult and child practicing a speech game",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+                rubric_id="tip_of_day",
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"second")
+        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["visual_retry_used"], "True")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+
+    def test_unknown_character_counts_after_retry_uses_fallback(self):
+        unknown_counts = {
+            "status": "pass",
+            "pass": True,
+            "reason": "ok",
+            "people_count": 2,
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Speech game",
+                day_key="MO",
+                image_prompt="an adult and child practicing a speech game",
+                visual_qa_fn=lambda *_args, **_kwargs: dict(unknown_counts),
+                rubric_id="tip_of_day",
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertNotIn(buffer.getvalue(), {b"first", b"second"})
+        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(meta["visual_qa"], "fail")
+        self.assertEqual(meta["visual_qa_reason"], "character_counts_unknown")
         self.assertEqual(meta["visual_qa_attempts"], "2")
 
     def test_method_piggybank_visual_qa_fail_then_retry_pass_uses_retry_image(self):

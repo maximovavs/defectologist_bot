@@ -400,6 +400,14 @@ PARENT_VISUAL_RUBRICS = frozenset(
     }
 )
 
+CHARACTER_ROLE_VISUAL_RUBRICS = frozenset(
+    {
+        *PARENT_VISUAL_RUBRICS,
+        "method_piggybank",
+        "age_norms",
+    }
+)
+
 
 def _visual_people_rule(rubric_id: str) -> str:
     rubric = (rubric_id or "").strip().lower()
@@ -468,6 +476,7 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "missing_required_child",
         "too_many_adults",
         "wrong_character_roles",
+        "character_counts_unknown",
         "deformed_hands",
         "extra_limbs",
         "missing_limbs",
@@ -482,6 +491,7 @@ def _normalize_visual_qa_reason(value: object) -> str:
 
 def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) -> Dict[str, object]:
     rubric = (rubric_id or "").strip().lower()
+    qa_status = str(result.get("status", "")).strip().lower()
     reason = _normalize_visual_qa_reason(result.get("reason"))
     normalized = {**result, "reason": reason}
     if reason in VISUAL_QA_HARD_REASONS:
@@ -504,7 +514,20 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
     if child_count is not None:
         normalized["child_count"] = child_count
 
-    if normalized.get("reason") != "too_many_people":
+    if (
+        qa_status == "pass"
+        and rubric in CHARACTER_ROLE_VISUAL_RUBRICS
+        and (adult_count is None or child_count is None)
+    ):
+        normalized.update(
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "character_counts_unknown",
+            }
+        )
+
+    if normalized.get("reason") not in {"too_many_people", "character_counts_unknown"}:
         requires_exact_adult_child = rubric == "method_piggybank" or rubric in PARENT_VISUAL_RUBRICS
         if requires_exact_adult_child and child_count == 0:
             normalized.update({"status": "fail", "pass": False, "reason": "missing_required_child"})

@@ -48,7 +48,10 @@ POLLINATIONS_NEAR_ASPECT_TOLERANCE = 0.08
 
 GEMINI_VISUAL_QA_TIMEOUT_SECONDS = _env_int("GEMINI_VISUAL_QA_TIMEOUT_SECONDS", 12)
 GEMINI_VISUAL_QA_MODEL = os.getenv("GEMINI_VISUAL_QA_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
-VISUAL_QA_REQUIRED_RUBRICS_DEFAULT = "method_piggybank"
+VISUAL_QA_REQUIRED_RUBRICS_DEFAULT = (
+    "method_piggybank,tip_of_day,play_and_speak,question_week,myth_fact,"
+    "bilingual_corner,bilingual_parents,age_norms"
+)
 
 HEADERS = {
     "User-Agent": "logoped-channel-bot/visual-pipeline/1.2",
@@ -386,12 +389,26 @@ def download_pollinations_image_with_meta(
     )
 
 
+PARENT_VISUAL_RUBRICS = frozenset(
+    {
+        "tip_of_day",
+        "play_and_speak",
+        "question_week",
+        "myth_fact",
+        "bilingual_corner",
+        "bilingual_parents",
+    }
+)
+
+
 def _visual_people_rule(rubric_id: str) -> str:
     rubric = (rubric_id or "").strip().lower()
     if rubric == "method_piggybank":
-        return "Exactly one specialist and one child; hard maximum two visible people; no classroom group."
+        return "Exactly one adult speech specialist and exactly one child; hard maximum two visible people; no classroom group."
     if rubric == "age_norms":
-        return "Prefer one child only; an adult is allowed only when needed to demonstrate the milestone."
+        return "One child preferred; maximum one adult and one child; hard maximum two visible people."
+    if rubric in PARENT_VISUAL_RUBRICS:
+        return "Exactly one adult parent and exactly one toddler or young child; hard maximum two visible people; no second adult."
     return "Exactly one adult and one child; hard maximum two visible people; no extra observers or background people."
 
 
@@ -403,6 +420,7 @@ def _visual_people_limit(rubric_id: str) -> int:
         "question_week": 2,
         "myth_fact": 2,
         "bilingual_corner": 2,
+        "bilingual_parents": 2,
         "age_norms": 2,
     }.get((rubric_id or "").strip().lower(), 2)
 
@@ -430,6 +448,10 @@ def _coerce_people_count(value: object) -> int | None:
     return None
 
 
+def _visual_count_value(result: Dict[str, object], key: str) -> int | None:
+    return _coerce_people_count(result.get(key))
+
+
 VISUAL_QA_HARD_REASONS = frozenset(
     {
         "too_many_people",
@@ -438,8 +460,14 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "merged_people",
         "partial_human_figure",
         "action_mismatch",
+        "adult_only_scene",
         "stretched_face",
+        "stretched_body",
         "widened_torso",
+        "horizontal_stretch",
+        "missing_required_child",
+        "too_many_adults",
+        "wrong_character_roles",
         "deformed_hands",
         "extra_limbs",
         "missing_limbs",
@@ -453,6 +481,7 @@ def _normalize_visual_qa_reason(value: object) -> str:
 
 
 def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) -> Dict[str, object]:
+    rubric = (rubric_id or "").strip().lower()
     reason = _normalize_visual_qa_reason(result.get("reason"))
     normalized = {**result, "reason": reason}
     if reason in VISUAL_QA_HARD_REASONS:
@@ -468,6 +497,30 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
                 "reason": "too_many_people",
             }
         )
+    adult_count = _visual_count_value(result, "adult_count")
+    child_count = _visual_count_value(result, "child_count")
+    if adult_count is not None:
+        normalized["adult_count"] = adult_count
+    if child_count is not None:
+        normalized["child_count"] = child_count
+
+    if normalized.get("reason") != "too_many_people":
+        requires_exact_adult_child = rubric == "method_piggybank" or rubric in PARENT_VISUAL_RUBRICS
+        if requires_exact_adult_child and child_count == 0:
+            normalized.update({"status": "fail", "pass": False, "reason": "missing_required_child"})
+        elif requires_exact_adult_child and adult_count is not None and adult_count > 1:
+            normalized.update({"status": "fail", "pass": False, "reason": "too_many_adults"})
+        elif requires_exact_adult_child and (
+            (adult_count is not None and adult_count != 1) or (child_count is not None and child_count != 1)
+        ):
+            normalized.update({"status": "fail", "pass": False, "reason": "wrong_character_roles"})
+        elif rubric == "age_norms":
+            if child_count == 0 and adult_count is not None and adult_count > 0:
+                normalized.update({"status": "fail", "pass": False, "reason": "adult_only_scene"})
+            elif adult_count is not None and adult_count > 1:
+                normalized.update({"status": "fail", "pass": False, "reason": "too_many_adults"})
+            elif child_count is not None and child_count > 1:
+                normalized.update({"status": "fail", "pass": False, "reason": "wrong_character_roles"})
     return normalized
 
 
@@ -490,6 +543,13 @@ def build_visual_retry_prompt(prompt: str, rubric_id: str = "", audience: str = 
             "No other faces, heads, reflections, silhouettes, or background people are allowed. "
             "Use a simple therapy room and one activity only. No reading scene unless reading is explicitly required by the source prompt. "
             "No third person, floating head, or incomplete figure."
+        )
+    elif (rubric_id or "").strip().lower() in PARENT_VISUAL_RUBRICS:
+        strict += (
+            " Exactly one adult parent and exactly one toddler or young child must be visible. "
+            "No second adult, no background people, no crowd, and no extra faces. "
+            "Use natural body width, normal face and shoulder proportions, and no horizontal stretching. "
+            "Show the exact activity from the post."
         )
     return f"{base.rstrip(' .')}.{strict}"
 
@@ -517,13 +577,34 @@ def _visual_qa_text(payload: Dict[str, object]) -> str:
 def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     match = re.search(r"\{.*\}", text or "", flags=re.DOTALL)
     if not match:
-        return {"status": "skipped", "pass": True, "reason": "invalid_qa_response", "people_count": "unknown"}
+        return {
+            "status": "skipped",
+            "pass": True,
+            "reason": "invalid_qa_response",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
     try:
         parsed = json.loads(match.group(0))
     except json.JSONDecodeError:
-        return {"status": "skipped", "pass": True, "reason": "invalid_qa_response", "people_count": "unknown"}
+        return {
+            "status": "skipped",
+            "pass": True,
+            "reason": "invalid_qa_response",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
     if not isinstance(parsed, dict) or "pass" not in parsed:
-        return {"status": "skipped", "pass": True, "reason": "invalid_qa_response", "people_count": "unknown"}
+        return {
+            "status": "skipped",
+            "pass": True,
+            "reason": "invalid_qa_response",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
     passed = parsed.get("pass")
     if isinstance(passed, str):
         passed = passed.strip().lower() in {"true", "yes", "pass", "passed"}
@@ -532,11 +613,19 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     people_count = parsed.get("people_count", "unknown")
     if not isinstance(people_count, (int, str)) or isinstance(people_count, bool):
         people_count = "unknown"
+    adult_count = parsed.get("adult_count", "unknown")
+    if not isinstance(adult_count, (int, str)) or isinstance(adult_count, bool):
+        adult_count = "unknown"
+    child_count = parsed.get("child_count", "unknown")
+    if not isinstance(child_count, (int, str)) or isinstance(child_count, bool):
+        child_count = "unknown"
     return {
         "status": "pass" if passed else "fail",
         "pass": passed,
         "reason": _normalize_visual_qa_reason(parsed.get("reason") or ("ok" if passed else "visual_quality_rejected")),
         "people_count": people_count,
+        "adult_count": adult_count,
+        "child_count": child_count,
     }
 
 
@@ -555,23 +644,39 @@ def evaluate_visual_quality(
         or os.getenv("GEMINI_API_KEY", "")
     ).strip()
     if not api_key:
-        return {"status": "skipped", "pass": True, "reason": "gemini_key_missing", "people_count": "unknown"}
+        return {
+            "status": "skipped",
+            "pass": True,
+            "reason": "gemini_key_missing",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
 
     qa_prompt = (
         "You are a strict visual QA checker for a Telegram educational cover. "
-        "Return JSON only with keys pass (boolean), reason (short string), and people_count (integer or unknown). "
-        "Count every visible human face, head, torso, reflection, background person, and partially visible person. "
+        "Return JSON only with keys pass (boolean), reason (short string), people_count (integer or unknown), "
+        "adult_count (integer or unknown), and child_count (integer or unknown). "
+        "Count adults, children, and all visible people separately. Count every visible human face, head, torso, "
+        "reflection, background person, and partially visible person. "
         "A floating head, disconnected torso, silhouette, duplicate, ghosted, merged, or partially formed human figure counts as a person. "
         "Do not ignore small background figures. "
         "Pass only when the image is a warm soft editorial illustration, child-friendly, uncluttered, medium-shot, "
         "relevant to speech or developmental education, with natural proportions and coherent hands. "
         "Fail for stretched faces, widened torsos, elongated arms, oversized or deformed hands, extra or missing limbs, "
-        "duplicate, ghosted, merged, or partially generated people, cropped main faces, uncanny photorealistic faces, anime or 3D toy style, "
-        "fish-eye or panoramic distortion, crowded scenes, unrequired background people, text, letters, logos, or watermarks. "
-        "For method_piggybank, fail for any third human figure. "
+        "stretched bodies, horizontal stretching, duplicate, ghosted, merged, or partially generated people, cropped main faces, "
+        "uncanny photorealistic faces, anime or 3D toy style, fish-eye or panoramic distortion, crowded scenes, "
+        "unrequired background people, text, letters, logos, or watermarks. "
+        "For parent rubrics tip_of_day, play_and_speak, question_week, myth_fact, bilingual_corner, and bilingual_parents, "
+        "pass only with exactly 1 adult parent and exactly 1 toddler or young child, hard maximum 2 people. "
+        "For method_piggybank, pass only with exactly 1 adult specialist and exactly 1 child. "
+        "For age_norms, prefer 1 child and allow maximum 1 adult plus 1 child. "
         "Use reason action_mismatch when the main visual action or object does not match the expected prompt. "
+        "Use reason missing_required_child when a required child is absent, too_many_adults when more than one adult is visible, "
+        "wrong_character_roles when the character composition does not match the rubric, and adult_only_scene when only adults are visible. "
         "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, action_mismatch, "
-        "stretched_face, widened_torso, deformed_hands, extra_limbs, missing_limbs, or panoramic_distortion when applicable. "
+        "adult_only_scene, missing_required_child, too_many_adults, wrong_character_roles, stretched_face, widened_torso, "
+        "stretched_body, horizontal_stretch, deformed_hands, extra_limbs, missing_limbs, or panoramic_distortion when applicable. "
         f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {_visual_people_rule(rubric_id)} "
         f"Expected image prompt/action: {expected_prompt or 'not provided'}. "
         "Do not require literal close-up visibility of tongue movements; accept a clear speech or articulation exercise when the action is evident. "
@@ -597,11 +702,25 @@ def evaluate_visual_quality(
             timeout=GEMINI_VISUAL_QA_TIMEOUT_SECONDS,
         )
         if response.status_code >= 400:
-            return {"status": "skipped", "pass": True, "reason": f"qa_http_{response.status_code}", "people_count": "unknown"}
+            return {
+                "status": "skipped",
+                "pass": True,
+                "reason": f"qa_http_{response.status_code}",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+            }
         parsed = _parse_visual_qa_response(_visual_qa_text(response.json()))
         return _enforce_visual_qa_hard_failures(parsed, rubric_id)
     except Exception as exc:
-        return {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
+        return {
+            "status": "skipped",
+            "pass": True,
+            "reason": f"qa_unavailable:{exc.__class__.__name__}",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
 
 
 def _safe_visual_qa(
@@ -621,14 +740,30 @@ def _safe_visual_qa(
             gemini_api_key=visual_qa_api_key,
         )
     except Exception as exc:
-        result = {"status": "skipped", "pass": True, "reason": f"qa_unavailable:{exc.__class__.__name__}", "people_count": "unknown"}
+        result = {
+            "status": "skipped",
+            "pass": True,
+            "reason": f"qa_unavailable:{exc.__class__.__name__}",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
     if not isinstance(result, dict):
-        return {"status": "skipped", "pass": True, "reason": "invalid_qa_result", "people_count": "unknown"}
+        return {
+            "status": "skipped",
+            "pass": True,
+            "reason": "invalid_qa_result",
+            "people_count": "unknown",
+            "adult_count": "unknown",
+            "child_count": "unknown",
+        }
     normalized = {
         "status": str(result.get("status") or ("pass" if result.get("pass", True) else "fail")),
         "pass": bool(result.get("pass", True)),
         "reason": str(result.get("reason") or "ok"),
         "people_count": result.get("people_count", "unknown"),
+        "adult_count": result.get("adult_count", "unknown"),
+        "child_count": result.get("child_count", "unknown"),
     }
     return _enforce_visual_qa_hard_failures(normalized, rubric_id)
 
@@ -677,6 +812,8 @@ def _fallback_for_required_visual_qa(
         "visual_qa_status": "skipped",
         "visual_qa_reason": qa_reason,
         "visual_qa_people_count": str(qa_result.get("people_count", "unknown")),
+        "visual_qa_adult_count": str(qa_result.get("adult_count", "unknown")),
+        "visual_qa_child_count": str(qa_result.get("child_count", "unknown")),
         "visual_qa_attempts": qa_attempts,
         "attempts_used": str((download_meta or {}).get("attempts_used", "1")),
         "retryable_error": "False",
@@ -738,7 +875,10 @@ def build_post_visual(
             )
             print(
                 f"[VISUAL_QA] status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
-                f"people_count={first_qa.get('people_count', 'unknown')} limit={_visual_people_limit(rubric_id)} attempt=1",
+                f"people_count={first_qa.get('people_count', 'unknown')} "
+                f"adult_count={first_qa.get('adult_count', 'unknown')} "
+                f"child_count={first_qa.get('child_count', 'unknown')} "
+                f"attempt=1 limit={_visual_people_limit(rubric_id)}",
                 flush=True,
             )
             first_meta = {
@@ -751,6 +891,8 @@ def build_post_visual(
                 "visual_qa_status": str(first_qa.get("status", "skipped")),
                 "visual_qa_reason": str(first_qa.get("reason", "ok")),
                 "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
+                "visual_qa_adult_count": str(first_qa.get("adult_count", "unknown")),
+                "visual_qa_child_count": str(first_qa.get("child_count", "unknown")),
                 "visual_qa_attempts": "1",
             }
             if visual_qa_required and _visual_qa_skipped(first_qa):
@@ -788,7 +930,10 @@ def build_post_visual(
                 )
                 print(
                     f"[VISUAL_QA] status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "
-                    f"people_count={retry_qa.get('people_count', 'unknown')} limit={_visual_people_limit(rubric_id)} attempt=2",
+                    f"people_count={retry_qa.get('people_count', 'unknown')} "
+                    f"adult_count={retry_qa.get('adult_count', 'unknown')} "
+                    f"child_count={retry_qa.get('child_count', 'unknown')} "
+                    f"attempt=2 limit={_visual_people_limit(rubric_id)}",
                     flush=True,
                 )
                 retry_meta = {
@@ -802,6 +947,8 @@ def build_post_visual(
                     "visual_qa_status": str(retry_qa.get("status", "skipped")),
                     "visual_qa_reason": str(retry_qa.get("reason", "ok")),
                     "visual_qa_people_count": str(retry_qa.get("people_count", "unknown")),
+                    "visual_qa_adult_count": str(retry_qa.get("adult_count", "unknown")),
+                    "visual_qa_child_count": str(retry_qa.get("child_count", "unknown")),
                     "visual_qa_attempts": "2",
                 }
                 if visual_qa_required and _visual_qa_skipped(retry_qa):
@@ -844,6 +991,8 @@ def build_post_visual(
                 "visual_qa_status": "fail",
                 "visual_qa_reason": reason,
                 "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
+                "visual_qa_adult_count": str(first_qa.get("adult_count", "unknown")),
+                "visual_qa_child_count": str(first_qa.get("child_count", "unknown")),
                 "visual_qa_attempts": "2",
                 "attempts_used": str(POLLINATIONS_MAX_RETRIES),
                 "retryable_error": "False",

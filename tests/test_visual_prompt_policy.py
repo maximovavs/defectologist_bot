@@ -177,7 +177,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         retry = build_visual_retry_prompt(base, rubric_id="tip_of_day", audience="parents")
 
         self.assertGreater(len(retry), len(base))
-        self.assertIn("exactly one adult and one child", retry.lower())
+        self.assertIn("exactly one adult parent and exactly one toddler or young child", retry.lower())
         self.assertIn("hard maximum two visible people", retry.lower())
         self.assertIn("no crowd", retry.lower())
         self.assertIn("no duplicate or ghosted figures", retry.lower())
@@ -199,7 +199,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
     def test_people_limit_overrides_gemini_pass(self):
         response = Mock(status_code=200)
         response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 3}'}]}}]
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 3, "adult_count": 2, "child_count": 1}'}]}}]
         }
         with patch("src.services.visual_pipeline.requests.post", return_value=response):
             result = evaluate_visual_quality(
@@ -238,6 +238,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
             ("ghosted_figure", "ghosted_figure"),
             ("action_mismatch", "action_mismatch"),
             ("duplicate-figure", "duplicate_figure"),
+            ("widened_torso", "widened_torso"),
+            ("horizontal_stretch", "horizontal_stretch"),
         )
 
         for reason, normalized_reason in cases:
@@ -248,6 +250,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
                         "pass": True,
                         "reason": reason,
                         "people_count": 2,
+                        "adult_count": 1,
+                        "child_count": 1,
                     },
                     BytesIO(b"image"),
                     rubric_id="method_piggybank",
@@ -257,6 +261,46 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 self.assertEqual(result["status"], "fail")
                 self.assertFalse(result["pass"])
                 self.assertEqual(result["reason"], normalized_reason)
+
+    def test_parent_rubric_adult_only_scene_fails_missing_required_child(self):
+        result = _safe_visual_qa(
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": 2,
+                "child_count": 0,
+            },
+            BytesIO(b"image"),
+            rubric_id="tip_of_day",
+            audience="parents",
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "missing_required_child")
+        self.assertEqual(result["adult_count"], 2)
+        self.assertEqual(result["child_count"], 0)
+
+    def test_parent_rubric_one_adult_one_child_passes(self):
+        result = _safe_visual_qa(
+            lambda *_args, **_kwargs: {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+            },
+            BytesIO(b"image"),
+            rubric_id="tip_of_day",
+            audience="parents",
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["reason"], "ok")
 
     def test_visual_qa_technical_skipped_result_remains_fail_open(self):
         result = _safe_visual_qa(
@@ -278,7 +322,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
     def test_visual_qa_prompt_contains_counting_and_expected_action_rules(self):
         response = Mock(status_code=200)
         response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2}'}]}}]
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1}'}]}}]
         }
         with patch("src.services.visual_pipeline.requests.post", return_value=response) as post:
             evaluate_visual_quality(
@@ -291,6 +335,12 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         qa_text = post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"].lower()
         self.assertIn("count every visible human face, head, torso, reflection", qa_text)
+        self.assertIn("adult_count", qa_text)
+        self.assertIn("child_count", qa_text)
+        self.assertIn("count adults, children, and all visible people separately", qa_text)
+        self.assertIn("exactly 1 adult parent and exactly 1 toddler or young child", qa_text)
+        self.assertIn("exactly 1 adult specialist and exactly 1 child", qa_text)
+        self.assertIn("missing_required_child", qa_text)
         self.assertIn("do not ignore small background figures", qa_text)
         self.assertIn("expected image prompt/action", qa_text)
         self.assertIn("articulation exercise", qa_text)
@@ -299,7 +349,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
     def test_visual_qa_prefers_separate_key_over_shared_key(self):
         response = Mock(status_code=200)
         response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2}'}]}}]
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1}'}]}}]
         }
         with patch.dict(
             os.environ,
@@ -316,7 +366,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         def qa(buffer, **kwargs):
             qa_calls.append(buffer)
-            return {"status": "pass", "pass": True, "reason": "ok", "people_count": "2"}
+            return {"status": "pass", "pass": True, "reason": "ok", "people_count": "2", "adult_count": 1, "child_count": 1}
 
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
@@ -422,6 +472,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
                     "pass": True,
                     "reason": "ok",
                     "people_count": 2,
+                    "adult_count": 1,
+                    "child_count": 1,
                 },
                 rubric_id="method_piggybank",
             )
@@ -436,8 +488,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
         first = BytesIO(b"first")
         second = BytesIO(b"second")
         qa_results = iter([
-            {"status": "pass", "pass": True, "reason": "ghosted_figure", "people_count": 2},
-            {"status": "pass", "pass": True, "reason": "ok", "people_count": "2"},
+            {"status": "pass", "pass": True, "reason": "ghosted_figure", "people_count": 2, "adult_count": 1, "child_count": 1},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": "2", "adult_count": 1, "child_count": 1},
         ])
 
         with patch(
@@ -458,14 +510,19 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(download.call_count, 2)
         retry_prompt = download.call_args_list[1].kwargs["prompt"].lower()
         self.assertIn("hard maximum two visible people", retry_prompt)
+        self.assertIn("exactly one adult parent and exactly one toddler or young child", retry_prompt)
+        self.assertIn("no second adult", retry_prompt)
+        self.assertIn("natural body width", retry_prompt)
+        self.assertIn("no horizontal stretching", retry_prompt)
+        self.assertIn("show the exact activity from the post", retry_prompt)
         self.assertEqual(meta["mode"], "ai")
         self.assertEqual(meta["visual_retry_used"], "True")
         self.assertEqual(meta["visual_qa_attempts"], "2")
 
     def test_method_piggybank_visual_qa_fail_then_retry_pass_uses_retry_image(self):
         qa_results = iter([
-            {"status": "fail", "pass": False, "reason": "action_mismatch", "people_count": 2},
-            {"status": "pass", "pass": True, "reason": "ok", "people_count": 2},
+            {"status": "fail", "pass": False, "reason": "action_mismatch", "people_count": 2, "adult_count": 1, "child_count": 1},
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1},
         ])
 
         with patch(
@@ -490,7 +547,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["visual_qa_status"], "pass")
         self.assertEqual(meta["visual_qa_attempts"], "2")
 
-    def test_parent_rubric_skipped_visual_qa_remains_fail_open(self):
+    def test_parent_rubric_skipped_visual_qa_uses_fallback_without_retry(self):
         first = BytesIO(b"first")
 
         with patch(
@@ -511,9 +568,10 @@ class VisualPromptPolicyTest(unittest.TestCase):
             )
 
         self.assertEqual(download.call_count, 1)
-        self.assertEqual(buffer.getvalue(), b"first")
-        self.assertEqual(meta["mode"], "ai")
-        self.assertEqual(meta["visual_qa_required"], "False")
+        self.assertNotEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
+        self.assertEqual(meta["visual_qa_required"], "True")
         self.assertEqual(meta["visual_qa_status"], "skipped")
 
     def test_visual_qa_required_rubrics_env_parses_multiple_ids(self):
@@ -525,8 +583,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
     def test_visual_qa_failure_after_retry_uses_fallback(self):
         qa_results = iter([
-            {"status": "pass", "pass": True, "reason": "action_mismatch", "people_count": 2},
-            {"status": "pass", "pass": True, "reason": "duplicate-figure", "people_count": 2},
+            {"status": "pass", "pass": True, "reason": "action_mismatch", "people_count": 2, "adult_count": 1, "child_count": 1},
+            {"status": "pass", "pass": True, "reason": "duplicate-figure", "people_count": 2, "adult_count": 1, "child_count": 1},
         ])
 
         with patch(

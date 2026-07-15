@@ -2040,33 +2040,75 @@ def _action_requires_adult(action: str, body_text: str) -> bool:
     )
 
 
+def _visual_actor_terms(rubric_id: str) -> tuple[str, str]:
+    rubric = (rubric_id or "").strip().lower()
+    if rubric in PARENT_VISUAL_RUBRICS:
+        return "the parent", "the child"
+    if rubric == "method_piggybank":
+        return "the speech specialist", "the child"
+    if rubric == "age_norms":
+        return "the child", "the child"
+    return "the adult", "the child"
+
+
 def _deterministic_visual_action(body_text: str, rubric_id: str, props: List[str]) -> str:
     text = f"{_extract_first_visual_step(body_text)} {body_text}".lower().replace("ё", "е")
-    rubric = (rubric_id or "").strip().lower()
+    actor, child = _visual_actor_terms(rubric_id)
+    single_child = actor == child
+    prop_set = set(props)
     if "вежлив" in text and "просьб" in text:
-        child = "toddler" if "toddler" in _extract_visual_age_descriptor(body_text) else "child"
-        return f"the parent models a polite request while the {child} points to a toy beside a cup of water"
-    if "drum" in props and "metronome" in props:
-        return "the speech specialist taps a drum in time with a metronome while the child copies the rhythm"
-    if "drum" in props:
-        return "the speech specialist taps a simple drum rhythm while the child copies the beat"
-    if "tambourine" in props:
-        return "the adult taps a tambourine rhythm while the child copies the beat"
-    if "picture cards" in props:
-        return "the adult shows one picture card while the child points to and names the matching picture"
-    if "toy car" in props:
-        return "the parent rolls a toy car while the child names the action"
-    if "ball" in props:
-        return "the parent rolls a ball while the child repeats one target word"
-    if "mirror" in props:
-        return "the child copies one visible speech movement while looking in a mirror"
-    if "book" in props:
-        return "the parent points to one picture in a book while the child names it"
-    if rubric == "method_piggybank":
-        return "the speech specialist demonstrates the first described exercise while the child copies the action"
-    if rubric == "age_norms":
+        request_targets: List[str] = []
+        if "toy" in prop_set:
+            request_targets.append("a toy")
+        if {"cup", "water"}.issubset(prop_set):
+            request_targets.append("a cup of water")
+        elif "cup" in prop_set:
+            request_targets.append("a cup")
+        elif "water" in prop_set:
+            request_targets.append("water")
+        target = " beside ".join(request_targets)
+        if single_child:
+            if target:
+                return f"the child makes a polite request while pointing to {target} and waits for a response"
+            return "the child makes a polite request and waits for a response"
+        if target:
+            return f"{actor} models a polite request while {child} points to {target} and repeats the request"
+        return f"{actor} models a polite request while {child} repeats the request and waits for a response"
+    if "drum" in prop_set and "metronome" in prop_set:
+        if single_child:
+            return "the child taps a drum in time with a metronome and follows the rhythm"
+        return f"{actor} taps a drum in time with a metronome while {child} copies the rhythm"
+    if "drum" in prop_set:
+        if single_child:
+            return "the child taps a drum and follows the rhythm"
+        return f"{actor} taps a drum while {child} copies the rhythm"
+    if "tambourine" in prop_set:
+        if single_child:
+            return "the child taps a tambourine and follows the rhythm"
+        return f"{actor} taps a tambourine while {child} copies the rhythm"
+    if "picture cards" in prop_set:
+        if single_child:
+            return "the child selects and names one picture card"
+        return f"{actor} shows one picture card while {child} points to and names the card"
+    if "toy car" in prop_set:
+        if single_child:
+            return "the child rolls a toy car and names the action"
+        return f"{actor} rolls a toy car while {child} names the action"
+    if "ball" in prop_set:
+        if single_child:
+            return "the child rolls a ball and repeats one target word"
+        return f"{actor} rolls a ball while {child} repeats one target word"
+    if "mirror" in prop_set:
+        if single_child:
+            return "the child copies one visible speech movement while looking in a mirror"
+        return f"{actor} demonstrates one speech movement while {child} copies it in a mirror"
+    if "book" in prop_set:
+        if single_child:
+            return "the child points to one page in a book and names what is shown"
+        return f"{actor} points to one page in a book while {child} names what is shown"
+    if single_child:
         return "the child performs the first clearly described developmental action"
-    return "the parent demonstrates the first described activity while the child responds"
+    return f"{actor} demonstrates the first described activity while {child} responds"
 
 
 def _parse_visual_brief_json(raw: str) -> Tuple[Dict[str, object] | None, str]:
@@ -2235,9 +2277,13 @@ async def generate_image_prompt_async(
         if ok:
             return compiled, True, f"ok:{provider_name}"
 
+        repair_hint = {
+            "action_role_mismatch": "Use only the actor named in Code-defined roles.",
+            "action_unsupported_visual_prop": "Remove every object from action unless it is listed in Allowed props and props.",
+        }.get(reason, "")
         repair_prompt = (
             f"{prompt}\nThe previous response was invalid ({reason}). "
-            "Repair it once. Return only valid JSON with action, setting, and props."
+            f"{repair_hint} Repair it once. Return only valid JSON with action, setting, and props."
         )
         repaired_raw = await generate(repair_prompt)  # type: ignore[misc]
         repaired, repaired_ok, repaired_reason = await _compile_raw(str(repaired_raw))

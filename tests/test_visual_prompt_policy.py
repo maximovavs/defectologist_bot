@@ -10,10 +10,12 @@ from PIL import Image
 
 from src.services.llm_generator import (
     _compile_image_prompt_from_payload,
+    _deterministic_visual_action,
     _deterministic_visual_prompt,
     _extract_visual_age_descriptor,
     _mentioned_visual_props,
     _validate_image_prompt,
+    _visual_actor_terms,
     build_image_prompt_prompt,
 )
 from src.services.visual_pipeline import (
@@ -176,6 +178,145 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertEqual(_mentioned_visual_props(body), [])
 
+    def test_polite_request_without_props_does_not_invent_objects(self):
+        body = "Как играть: родитель моделирует вежливую просьбу, ребёнок повторяет и ждёт ответа."
+        props = _mentioned_visual_props(body)
+
+        action = _deterministic_visual_action(body, "tip_of_day", props)
+
+        self.assertEqual(props, [])
+        self.assertEqual(
+            action,
+            "the parent models a polite request while the child repeats the request and waits for a response",
+        )
+        self.assertNotIn("toy", action)
+        self.assertNotIn("cup", action)
+        self.assertNotIn("water", action)
+
+    def test_polite_request_uses_only_explicit_toy_cup_and_water(self):
+        body = (
+            "Как играть: родитель моделирует вежливую просьбу, ребёнок указывает на игрушку "
+            "рядом с чашкой воды."
+        )
+        props = _mentioned_visual_props(body)
+
+        action = _deterministic_visual_action(body, "tip_of_day", props)
+
+        self.assertEqual(props, ["toy", "cup", "water"])
+        self.assertIn("a toy beside a cup of water", action)
+        self.assertTrue(set(("toy", "cup", "water")).issubset(set(props)))
+
+    def test_parent_drum_action_uses_parent_actor(self):
+        body = "Как играть: родитель ударяет в барабан, ребёнок повторяет ритм."
+        action = _deterministic_visual_action(body, "play_and_speak", _mentioned_visual_props(body))
+
+        self.assertEqual(action, "the parent taps a drum while the child copies the rhythm")
+        self.assertNotIn("speech specialist", action)
+        self.assertEqual(_visual_actor_terms("play_and_speak"), ("the parent", "the child"))
+
+    def test_method_toy_car_action_uses_specialist_actor(self):
+        body = "Материалы: машинка. Как провести: специалист катит машинку, ребёнок называет действие."
+        action = _deterministic_visual_action(body, "method_piggybank", _mentioned_visual_props(body))
+
+        self.assertEqual(action, "the speech specialist rolls a toy car while the child names the action")
+        self.assertNotIn("parent", action)
+        self.assertEqual(_visual_actor_terms("method_piggybank"), ("the speech specialist", "the child"))
+
+    def test_parent_prompt_rejects_specialist_action(self):
+        prompt, brief, reason = _compile_image_prompt_from_payload(
+            {
+                "action": "the speech specialist models a polite request while the child repeats it",
+                "setting": "simple home play area",
+                "props": [],
+            },
+            body_text="Как играть: родитель показывает просьбу, ребёнок повторяет.",
+            audience="parents",
+            rubric_id="tip_of_day",
+        )
+
+        self.assertEqual(prompt, "")
+        self.assertIsNone(brief)
+        self.assertEqual(reason, "action_role_mismatch")
+
+    def test_method_prompt_rejects_parent_action(self):
+        prompt, brief, reason = _compile_image_prompt_from_payload(
+            {
+                "action": "the parent demonstrates the exercise while the child copies the movement",
+                "setting": "speech therapy room",
+                "props": [],
+            },
+            body_text="Как провести: специалист показывает упражнение, ребёнок повторяет.",
+            audience="pros",
+            rubric_id="method_piggybank",
+        )
+
+        self.assertEqual(prompt, "")
+        self.assertIsNone(brief)
+        self.assertEqual(reason, "action_role_mismatch")
+
+    def test_action_prop_must_be_declared_in_brief_props(self):
+        prompt, brief, reason = _compile_image_prompt_from_payload(
+            {
+                "action": "the parent points to a cup while the child repeats one word",
+                "setting": "simple home play area",
+                "props": [],
+            },
+            body_text="Как играть: родитель произносит слово, ребёнок повторяет.",
+            audience="parents",
+            rubric_id="tip_of_day",
+        )
+
+        self.assertEqual(prompt, "")
+        self.assertIsNone(brief)
+        self.assertEqual(reason, "action_unsupported_visual_prop")
+
+    def test_ordinary_verbs_are_not_misread_as_visual_props(self):
+        prompt, brief, reason = _compile_image_prompt_from_payload(
+            {
+                "action": "the parent mirrors one word and blocks a distracting sound while the child repeats it",
+                "setting": "simple home play area",
+                "props": [],
+            },
+            body_text="Как играть: родитель произносит слово, ребёнок повторяет.",
+            audience="parents",
+            rubric_id="tip_of_day",
+        )
+
+        self.assertEqual(reason, "ok")
+        self.assertTrue(prompt)
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.props, ())
+
+    def test_action_and_props_explicitly_present_in_post_pass(self):
+        prompt, brief, reason = _compile_image_prompt_from_payload(
+            {
+                "action": "the parent points to a cup of water while the child repeats the request",
+                "setting": "simple home play area",
+                "props": ["cup", "water"],
+            },
+            body_text="Материалы: чашка воды. Как играть: ребёнок просит чашку воды.",
+            audience="parents",
+            rubric_id="tip_of_day",
+        )
+
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.props, ("cup", "water"))
+        self.assertLessEqual(len(prompt), 900)
+
+    def test_new_deterministic_prompts_remain_within_compiler_limit(self):
+        cases = (
+            ("tip_of_day", "Как играть: родитель ударяет в барабан, ребёнок повторяет ритм."),
+            ("method_piggybank", "Материалы: машинка. Специалист катит машинку, ребёнок называет действие."),
+            ("tip_of_day", "Родитель моделирует вежливую просьбу, ребёнок повторяет и ждёт ответа."),
+        )
+
+        for rubric_id, body in cases:
+            with self.subTest(rubric_id=rubric_id):
+                prompt = _deterministic_visual_prompt(body, "pros" if rubric_id == "method_piggybank" else "parents", rubric_id)
+                self.assertTrue(prompt)
+                self.assertLessEqual(len(prompt), 900)
+
     def test_compiled_prompt_is_concise_and_style_is_not_duplicated(self):
         prompt = _deterministic_visual_prompt(
             "Возраст: 5 лет. Как играть: родитель показывает карточку, ребёнок называет картинку.",
@@ -240,6 +381,79 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(groq.await_count, 2)
         self.assertIn("deterministic_fallback", note)
         self.assertIn("Action: the parent rolls a ball", prompt)
+
+    def test_unsupported_action_prop_gets_one_targeted_json_repair(self):
+        body = "Как играть: родитель произносит просьбу, ребёнок повторяет."
+        first_json = json.dumps(
+            {
+                "action": "the parent points to a cup while the child repeats the request",
+                "setting": "simple home play area",
+                "props": [],
+            }
+        )
+        repaired_json = json.dumps(
+            {
+                "action": "the parent models a polite request while the child repeats it",
+                "setting": "simple home play area",
+                "props": [],
+            }
+        )
+        groq = AsyncMock(side_effect=[first_json, repaired_json])
+        llm_generator = importlib.import_module("src.services.llm_generator")
+
+        with patch.object(llm_generator, "groq_chat", groq):
+            prompt, ok, note = asyncio.run(
+                llm_generator.generate_image_prompt_async(
+                    title="Вежливая просьба",
+                    body_text=body,
+                    audience="parents",
+                    provider="groq",
+                    groq_key="test-key",
+                    gemini_key="",
+                    rubric_id="tip_of_day",
+                )
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertEqual(groq.await_count, 2)
+        repair_prompt = groq.await_args_list[1].args[0]
+        self.assertIn("action_unsupported_visual_prop", repair_prompt)
+        self.assertIn("Remove every object from action", repair_prompt)
+        self.assertNotIn("cup", _parse_compiled_visual_prompt(prompt, "tip_of_day").action)
+
+    def test_repeated_unsupported_action_prop_falls_back_without_object(self):
+        body = "Как играть: родитель моделирует вежливую просьбу, ребёнок повторяет и ждёт ответа."
+        unsupported_json = json.dumps(
+            {
+                "action": "the parent points to a cup while the child repeats the request",
+                "setting": "simple home play area",
+                "props": [],
+            }
+        )
+        groq = AsyncMock(side_effect=[unsupported_json, unsupported_json])
+        llm_generator = importlib.import_module("src.services.llm_generator")
+
+        with patch.object(llm_generator, "groq_chat", groq):
+            prompt, ok, note = asyncio.run(
+                llm_generator.generate_image_prompt_async(
+                    title="Вежливая просьба",
+                    body_text=body,
+                    audience="parents",
+                    provider="groq",
+                    groq_key="test-key",
+                    gemini_key="",
+                    rubric_id="tip_of_day",
+                )
+            )
+
+        parsed = _parse_compiled_visual_prompt(prompt, "tip_of_day")
+        self.assertTrue(ok)
+        self.assertIn("deterministic_fallback", note)
+        self.assertEqual(groq.await_count, 2)
+        self.assertIsNotNone(parsed)
+        self.assertNotIn("cup", parsed.action)
+        self.assertEqual(parsed.props, ())
 
     def test_default_generation_dimensions_are_landscape(self):
         self.assertEqual(POLLINATIONS_GEN_WIDTH, 1280)

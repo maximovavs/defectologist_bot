@@ -525,6 +525,37 @@ def _parse_compiled_visual_prompt(prompt: str, rubric_id: str = "") -> VisualBri
     )
 
 
+def _known_visual_props_in_action(action: str) -> set[str]:
+    text = (action or "").lower()
+    patterns = (
+        ("picture cards", r"\bpicture\s+cards?\b"),
+        ("toy car", r"\btoy\s+cars?\b"),
+        ("light indicator", r"\blight\s+indicators?\b"),
+        ("book", r"\b(?:(?:a|the|one)\s+books?|page\s+in\s+(?:a|the)\s+book)\b"),
+        ("picture", r"\b(?:a|the|one|matching)\s+pictures?\b(?!\s+cards?\b)"),
+        ("toy", r"\btoys?\b(?!\s+cars?\b)"),
+        ("ball", r"\bballs?\b"),
+        ("mirror", r"\b(?:a|the)\s+mirrors?\b"),
+        ("tablet", r"\btablets?\b"),
+        ("computer", r"\bcomputers?\b"),
+        ("headphones", r"\bheadphones?\b"),
+        ("notebook", r"\bnotebooks?\b"),
+        ("cup", r"\bcups?\b"),
+        ("water", r"\bwater\b"),
+        ("drum", r"\bdrums?\b"),
+        ("tambourine", r"\btambourines?\b"),
+        ("metronome", r"\bmetronomes?\b"),
+        ("pencil", r"\bpencils?\b"),
+        ("paper", r"\bpaper\b"),
+        (
+            "blocks",
+            r"\b(?:(?:toy|wooden|building|colored)\s+blocks|(?:stacks?|sorts?|arranges?)\s+(?:the\s+)?blocks)\b",
+        ),
+        ("puzzle", r"\bpuzzles?\b"),
+    )
+    return {label for label, pattern in patterns if re.search(pattern, text)}
+
+
 def _validate_compiled_visual_prompt(
     prompt: str,
     rubric_id: str,
@@ -574,12 +605,24 @@ def _validate_compiled_visual_prompt(
         return False, "contradictory_roles"
 
     action_lower = brief.action.lower()
+    if rubric in PARENT_VISUAL_RUBRICS and re.search(
+        r"\b(?:speech specialist|speech therapist|therapist|teacher|second adult|mother\s+and\s+(?:the\s+)?father)\b",
+        action_lower,
+    ):
+        return False, "action_role_mismatch"
+    if rubric == "method_piggybank" and re.search(
+        r"\b(?:parent|mother|father|family)\b",
+        action_lower,
+    ):
+        return False, "action_role_mismatch"
     if re.search(r"\b(?:written text|random letters|logo|watermark)\b", action_lower):
         return False, "visual_text_instruction"
     if re.search(r"\b(?:oral probe|speech probe|spatula|tongue depressor|intraoral tool|spoon)\b", prompt_lower):
         return False, "risky_oral_tool"
     if len(brief.props) > 3:
         return False, "too_many_props"
+    if not _known_visual_props_in_action(brief.action).issubset(set(brief.props)):
+        return False, "action_unsupported_visual_prop"
     if allowed_props is not None:
         allowed = {str(prop).strip().lower() for prop in allowed_props if str(prop).strip()}
         if not set(brief.props).issubset(allowed):

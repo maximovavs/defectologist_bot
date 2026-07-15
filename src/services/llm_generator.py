@@ -31,6 +31,7 @@ Patch 5.4.8 — compact pro_friendly structure to prevent truncation
 """
 
 import asyncio
+import json
 import os
 import random
 import re
@@ -38,6 +39,15 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import requests
+
+from src.services.visual_pipeline import (
+    PARENT_VISUAL_RUBRICS,
+    VisualBrief,
+    _compile_visual_prompt,
+    _parse_compiled_visual_prompt,
+    _validate_compiled_visual_prompt,
+    build_visual_role_rule,
+)
 
 
 # -----------------------
@@ -1841,10 +1851,7 @@ def _clean_image_prompt(text: str) -> str:
     s = s.replace("\n", " ")
     s = re.sub(r"^(prompt|image prompt)\s*:\s*", "", s, flags=re.IGNORECASE)
     s = s.strip(" \"'“”")
-    s = norm_space(s)
-    if len(s) > 220:
-        s = s[:220].rstrip(" ,.;:-")
-    return s
+    return norm_space(s)
 
 
 def _validate_image_prompt(prompt: str, body_text: str = "", rubric_id: str = "") -> Tuple[bool, str]:
@@ -1853,7 +1860,7 @@ def _validate_image_prompt(prompt: str, body_text: str = "", rubric_id: str = ""
         return False, "empty"
     if len(p) < 12:
         return False, "too_short"
-    if len(p) > 240:
+    if len(p) > 900:
         return False, "too_long"
     if re.search(r"[А-Яа-яЁё]", p):
         return False, "non_english"
@@ -1880,39 +1887,286 @@ def _validate_image_prompt(prompt: str, body_text: str = "", rubric_id: str = ""
     letter_props = re.search(r"\b(letter|alphabet|abc)\s+(?:cards?|blocks?|tiles?)\b", prompt_blob)
     if (random_letters or letter_props) and not letter_context:
         return False, "visual_prompt_topic_mismatch"
-    return True, "ok"
+    if "Action:" not in p and "; allowed props:" not in p:
+        return True, "ok"
+    return _validate_compiled_visual_prompt(
+        p,
+        rubric_id,
+        allowed_props=_mentioned_visual_props(body_text),
+    )
 
 
 def _mentioned_visual_props(body_text: str) -> List[str]:
-    blob = _normalize_scan_text(body_text)
-    prop_map = [
-        ("book", ["книга", "книжка", "читать"]),
-        ("picture cards", ["карточ", "картин"]),
-        ("toy", ["игруш"]),
-        ("ball", ["мяч"]),
-        ("mirror", ["зеркал"]),
-        ("tablet", ["планшет"]),
-        ("computer", ["компьютер"]),
-        ("headphones", ["наушник"]),
-        ("notebook", ["блокнот", "тетрад"]),
-    ]
+    blob = _sanitize_visual_post_body(body_text).lower().replace("ё", "е")
+    candidates: List[Tuple[int, str]] = []
+
+    def add(label: str, *patterns: str) -> None:
+        positions = [match.start() for pattern in patterns if (match := re.search(pattern, blob, flags=re.IGNORECASE))]
+        if positions:
+            candidates.append((min(positions), label))
+
+    has_cards = bool(re.search(r"\b(?:карточ\w*|picture\s+cards?)\b", blob))
+    add("book", r"\bкниг\w*\b", r"\bкниж\w*\b", r"\bbooks?\b")
+    if has_cards:
+        add("picture cards", r"\bкарточ\w*\b", r"\bpicture\s+cards?\b")
+    else:
+        add("picture", r"\bкартинк\w*\b", r"\bизображени\w*\b", r"\bpictures?\b")
+    add("toy car", r"\bмашинк\w*\b", r"\btoy\s+cars?\b")
+    if re.search(r"\bигруш\w*\b(?!\s+машин\w*)|\btoys?\b(?!\s+cars?\b)", blob):
+        add("toy", r"\bигруш\w*\b", r"\btoys?\b")
+    add("ball", r"\bмяч\w*\b", r"\bballs?\b")
+    add("mirror", r"\bзеркал\w*\b", r"\bmirrors?\b")
+    add("tablet", r"\bпланшет\w*\b", r"\btablets?\b")
+    add("computer", r"\bкомпьютер\w*\b", r"\bcomputers?\b")
+    add("headphones", r"\bнаушник\w*\b", r"\bheadphones?\b")
+    add("notebook", r"\bблокнот\w*\b", r"\bтетрад\w*\b", r"\bnotebooks?\b")
+    add("cup", r"\bчашк\w*\b", r"\bстакан\w*\b", r"\bcups?\b")
+    add("water", r"\bвод(?:а|ы|е|у|ой|ою)\b", r"\bwater\b")
+    add("drum", r"\bбарабан\w*\b", r"\bdrums?\b")
+    add("tambourine", r"\bбубен\w*\b", r"\btambourines?\b")
+    add("metronome", r"\bметроном\w*\b", r"\bmetronomes?\b")
+    add("light indicator", r"\bсветов\w*\s+индикатор\w*\b", r"\blight\s+indicators?\b")
+    add("pencil", r"\bкарандаш\w*\b", r"\bpencils?\b")
+    add("paper", r"\bбумаг\w*\b", r"\bлист(?:ок|а|ы|е|у|ом)?\b", r"\bpaper\b")
+    add("blocks", r"\bкубик\w*\b", r"\bблок\w*\b", r"\bblocks?\b")
+    add("puzzle", r"\bпазл\w*\b", r"\bpuzzles?\b")
+
     props: List[str] = []
-    for label, markers in prop_map:
-        if any(marker in blob for marker in markers) and label not in props:
+    for _, label in sorted(candidates, key=lambda item: item[0]):
+        if label not in props:
             props.append(label)
-    return props[:4]
+        if len(props) == 3:
+            break
+    return props
 
 
-VISUAL_HOUSE_STYLE = (
-    "warm editorial illustration, child-friendly educational scene, soft natural daylight, "
-    "clean uncluttered home or therapy room, soft beige cream and warm pastel palette, gentle contrast, "
-    "natural human proportions, no stretched faces, no widened torsos, no elongated arms, no oversized hands, "
-    "anatomically coherent fingers, no wide-angle distortion, no panoramic distortion, medium-shot composition, "
-    "clear main subject, no edge-to-edge crowding, no background people unless explicitly required, "
-    "no duplicate or ghosted figures, no photorealistic uncanny faces, no anime, no 3D toy style, "
-    "no deformed hands, no extra or missing limbs, no cropped main faces, no unnatural width, "
-    "no exaggerated perspective, no fish-eye or ultra-wide view, no cluttered or complex scene"
-)
+def _sanitize_visual_post_body(body_text: str) -> str:
+    lines = (body_text or "").replace("\r\n", "\n").split("\n")
+    kept: List[str] = []
+    skip_benefit = False
+    action_heading = re.compile(r"^(?:как играть|как провести|что попробовать|ход игры|упражнение)\b", re.IGNORECASE)
+    benefit_heading = re.compile(r"^(?:польза|почему это полезно|зачем это нужно)\b", re.IGNORECASE)
+    for raw_line in lines:
+        line = norm_space(raw_line)
+        if not line or line.startswith("#"):
+            continue
+        lower = line.lower()
+        if lower.startswith(("источник:", "source:", "ссылка:", "url:")) or "http://" in lower or "https://" in lower:
+            continue
+        heading_text = re.sub(r"^[^\wА-Яа-яЁё]+", "", line).strip()
+        if benefit_heading.match(heading_text):
+            skip_benefit = True
+            continue
+        if action_heading.match(heading_text):
+            skip_benefit = False
+        if skip_benefit:
+            continue
+        kept.append(line)
+        if len(kept) >= 16:
+            break
+    return "\n".join(kept)[:1800]
+
+
+def _extract_visual_age_descriptor(body_text: str) -> str:
+    text = (body_text or "").lower().replace("ё", "е")
+    month_range = re.search(r"(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(?:мес\.?|месяц\w*)", text)
+    if month_range:
+        low, high = int(month_range.group(1)), int(month_range.group(2))
+        midpoint = (low + high) / 2
+        if high < 36:
+            years = max(1, min(2, round(midpoint / 12)))
+            return f"{years}-year-old toddler"
+        return "toddler"
+
+    month = re.search(r"(\d{1,2})\s*(?:мес\.?|месяц\w*)", text)
+    if month and int(month.group(1)) < 36:
+        years = max(1, min(2, round(int(month.group(1)) / 12)))
+        return f"{years}-year-old toddler"
+    if re.search(r"до\s*3\s*(?:лет|года)", text):
+        return "toddler"
+
+    year_range = re.search(r"(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(?:лет|года|год)", text)
+    if year_range:
+        low, high = int(year_range.group(1)), int(year_range.group(2))
+        if high < 3:
+            return "toddler"
+        if low >= 7:
+            return "school-age child"
+        return "preschool child"
+
+    year = re.search(r"(\d{1,2})\s*(?:лет|года|год)\b", text)
+    if year:
+        value = int(year.group(1))
+        if value < 3:
+            return "toddler"
+        if value < 7:
+            return "preschool child"
+        return "school-age child"
+    return "young child"
+
+
+def _extract_first_visual_step(body_text: str) -> str:
+    lines = _sanitize_visual_post_body(body_text).split("\n")
+    headings = re.compile(r"^(?:как играть|как провести|что попробовать|ход игры|упражнение)\b", re.IGNORECASE)
+    action_words = re.compile(
+        r"\b(?:покаж\w*|предлож\w*|попрос\w*|полож\w*|возьм\w*|назов\w*|повтор\w*|"
+        r"удар\w*|хлоп\w*|выбер\w*|соедин\w*|укаж\w*|постав\w*|произнес\w*|прочит\w*|кат\w*)\b",
+        re.IGNORECASE,
+    )
+    for index, raw_line in enumerate(lines):
+        line = re.sub(r"^[^\wА-Яа-яЁё]+", "", raw_line).strip()
+        if headings.match(line):
+            inline = line.split(":", 1)[1].strip() if ":" in line else ""
+            if inline:
+                return inline
+            for candidate in lines[index + 1:index + 4]:
+                candidate = re.sub(r"^\s*(?:\d+[.)]|[-•–—])\s*", "", candidate).strip()
+                if candidate:
+                    return candidate
+    for raw_line in lines:
+        if action_words.search(raw_line):
+            return re.sub(r"^\s*(?:\d+[.)]|[-•–—])\s*", "", raw_line).strip()
+    return lines[0] if lines else ""
+
+
+def _action_requires_adult(action: str, body_text: str) -> bool:
+    text = f"{action} {_extract_first_visual_step(body_text)}".lower().replace("ё", "е")
+    return bool(
+        re.search(
+            r"\b(?:parent|adult|specialist|therapist|родител\w*|взросл\w*|специалист\w*|"
+            r"покаж\w*|предлож\w*|попрос\w*|дает|дайте|моделир\w*)\b",
+            text,
+        )
+    )
+
+
+def _deterministic_visual_action(body_text: str, rubric_id: str, props: List[str]) -> str:
+    text = f"{_extract_first_visual_step(body_text)} {body_text}".lower().replace("ё", "е")
+    rubric = (rubric_id or "").strip().lower()
+    if "вежлив" in text and "просьб" in text:
+        child = "toddler" if "toddler" in _extract_visual_age_descriptor(body_text) else "child"
+        return f"the parent models a polite request while the {child} points to a toy beside a cup of water"
+    if "drum" in props and "metronome" in props:
+        return "the speech specialist taps a drum in time with a metronome while the child copies the rhythm"
+    if "drum" in props:
+        return "the speech specialist taps a simple drum rhythm while the child copies the beat"
+    if "tambourine" in props:
+        return "the adult taps a tambourine rhythm while the child copies the beat"
+    if "picture cards" in props:
+        return "the adult shows one picture card while the child points to and names the matching picture"
+    if "toy car" in props:
+        return "the parent rolls a toy car while the child names the action"
+    if "ball" in props:
+        return "the parent rolls a ball while the child repeats one target word"
+    if "mirror" in props:
+        return "the child copies one visible speech movement while looking in a mirror"
+    if "book" in props:
+        return "the parent points to one picture in a book while the child names it"
+    if rubric == "method_piggybank":
+        return "the speech specialist demonstrates the first described exercise while the child copies the action"
+    if rubric == "age_norms":
+        return "the child performs the first clearly described developmental action"
+    return "the parent demonstrates the first described activity while the child responds"
+
+
+def _parse_visual_brief_json(raw: str) -> Tuple[Dict[str, object] | None, str]:
+    text = (raw or "").strip()
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None, "invalid_json"
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+    if not isinstance(payload, dict):
+        return None, "invalid_json"
+    action = norm_space(str(payload.get("action", "")))
+    setting = norm_space(str(payload.get("setting", "")))
+    props = payload.get("props", [])
+    if len(action) < 8 or re.search(r"[А-Яа-яЁё]", action):
+        return None, "invalid_action"
+    if not setting or re.search(r"[А-Яа-яЁё]", setting):
+        return None, "invalid_setting"
+    if not isinstance(props, list) or any(not isinstance(prop, str) for prop in props):
+        return None, "invalid_props"
+    return {"action": action, "setting": setting, "props": props}, "ok"
+
+
+def _normalize_visual_setting(setting: str, rubric_id: str) -> str:
+    rubric = (rubric_id or "").strip().lower()
+    if rubric == "method_piggybank":
+        return "simple uncluttered speech therapy room"
+    value = norm_space(setting).lower()
+    if any(token in value for token in ("home", "living room", "play area", "table")):
+        return "simple uncluttered home play area"
+    return "simple uncluttered play area"
+
+
+def _compile_image_prompt_from_payload(
+    payload: Dict[str, object],
+    *,
+    body_text: str,
+    audience: str,
+    rubric_id: str,
+) -> Tuple[str, VisualBrief | None, str]:
+    del audience
+    action = norm_space(str(payload.get("action", "")))
+    if len(action) < 8 or re.search(r"[А-Яа-яЁё]", action):
+        return "", None, "invalid_action"
+
+    allowed_props = _mentioned_visual_props(body_text)
+    requested_props = payload.get("props", [])
+    selected_props: List[str] = []
+    if isinstance(requested_props, list):
+        for raw_prop in requested_props:
+            value = norm_space(str(raw_prop)).lower()
+            for allowed in allowed_props:
+                if allowed == value or allowed in value or value in allowed:
+                    if allowed not in selected_props:
+                        selected_props.append(allowed)
+            if len(selected_props) >= 3:
+                break
+
+    rubric = (rubric_id or "").strip().lower()
+    age_descriptor = _extract_visual_age_descriptor(body_text)
+    adult_required = rubric == "age_norms" and _action_requires_adult(action, body_text)
+    brief = VisualBrief(
+        rubric_id=rubric,
+        role_rule=build_visual_role_rule(
+            rubric,
+            age_descriptor=age_descriptor,
+            adult_required=adult_required,
+        ),
+        age_descriptor=age_descriptor,
+        setting=_normalize_visual_setting(str(payload.get("setting", "")), rubric),
+        action=action,
+        props=tuple(selected_props[:3]),
+    )
+    prompt = _compile_visual_prompt(brief)
+    ok, reason = _validate_image_prompt(prompt, body_text=body_text, rubric_id=rubric)
+    if not ok:
+        return "", None, reason
+    return prompt, brief, "ok"
+
+
+def _deterministic_visual_prompt(body_text: str, audience: str, rubric_id: str) -> str:
+    props = _mentioned_visual_props(body_text)
+    payload: Dict[str, object] = {
+        "action": _deterministic_visual_action(body_text, rubric_id, props),
+        "setting": (
+            "simple speech therapy room"
+            if (rubric_id or "").strip().lower() == "method_piggybank"
+            else "simple home play area"
+        ),
+        "props": props,
+    }
+    prompt, _, _ = _compile_image_prompt_from_payload(
+        payload,
+        body_text=body_text,
+        audience=audience,
+        rubric_id=rubric_id,
+    )
+    return prompt
 
 
 def build_image_prompt_prompt(
@@ -1922,73 +2176,29 @@ def build_image_prompt_prompt(
     rubric_id: str = "",
 ) -> str:
     safe_title = norm_space(title)
-    safe_body = body_text.replace("\r\n", "\n").strip()
-    safe_body = "\n".join([x.strip() for x in safe_body.split("\n") if x.strip()][:8])
-    safe_body = safe_body[:900]
+    safe_body = _sanitize_visual_post_body(body_text)
     rubric = (rubric_id or "").strip().lower()
-
-    scene_guidance = {
-        "myth_fact": "one parent and one child; adult calmly models the correct word; child remains engaged in play",
-        "bilingual_corner": "parent and child with two books or cards representing two languages; natural family communication; no random floating letters",
-        "question_week": "parent observing a child during play or reading; optional small notebook; match the exact action",
-        "method_piggybank": (
-            "exactly 1 adult specialist and 1 child in a professional activity setting; hard maximum 2 visible people; "
-            "no classroom group or extra observers; show only props explicitly mentioned in the post body"
-        ),
-        "age_norms": (
-            "one child only performing the exact milestone from the post, such as pointing, naming an object, or using a gesture; "
-            "an adult may appear only when needed to demonstrate the milestone; no extra people"
-        ),
-        "tip_of_day": "exactly 1 adult and 1 child performing the exact home activity or dialogue; hard maximum 2 visible people",
-        "play_and_speak": "exactly 1 adult and 1 child performing the exact home activity or dialogue; hard maximum 2 visible people",
-        "bilingual_parents": "exactly 1 adult and 1 child communicating naturally; hard maximum 2 visible people",
-        "bilingual_corner": "exactly 1 adult and 1 child with two books or cards representing two languages; hard maximum 2 visible people; no random floating letters",
-        "question_week": "exactly 1 adult and 1 child during the exact play or reading action; hard maximum 2 visible people; no extra observers",
-        "myth_fact": "exactly 1 adult and 1 child; adult calmly models the correct word; hard maximum 2 visible people",
-    }.get(rubric, "exactly 1 adult and 1 child performing the exact action from the post; hard maximum 2 visible people")
-
+    age_descriptor = _extract_visual_age_descriptor(safe_body)
+    role_rule = build_visual_role_rule(rubric, age_descriptor=age_descriptor)
     props = _mentioned_visual_props(safe_body)
-    prop_rule = ", ".join(props) if props else "no extra props unless clearly present in the post body"
+    first_step = _extract_first_visual_step(safe_body)
+    prop_rule = ", ".join(props) if props else "none"
 
     return (
-        "You are an art director for Telegram educational covers.\n"
-        "Read the Russian post title and short post body.\n"
-        "Return exactly one short English image prompt for a friendly illustration.\n"
-        "Requirements:\n"
-        "- include a horizontal cover composition suitable for Telegram\n"
-        "- use a safe composition that can be placed on a 16:9 cover\n"
-        f"- house style: {VISUAL_HOUSE_STYLE}\n"
-        "- preserve natural human proportions; avoid distorted anatomy\n"
-        "- two arms and two legs when visible; anatomically coherent hands\n"
-        "- no stretched faces; no widened bodies; no widened torsos\n"
-        "- no elongated arms or enlarged hands\n"
-        "- normal camera perspective; avoid wide-angle lens distortion; avoid panoramic distortion\n"
-        "- keep subjects comfortably centered with breathing room around the main figures\n"
-        "- one clear focal group; do not place people edge-to-edge across the frame\n"
-        "- one clear main scene\n"
-        "- never add siblings, extra family members, observers, or background people unless explicitly required\n"
-        "- describe one clear interaction that matches the post topic\n"
-        "- use relevant props taken from the post only\n"
-        "- no portrait poster composition\n"
-        "- no duplicate people\n"
-        "- no random letters or numbers\n"
-        "- no quotes\n"
-        "- no numbering\n"
-        "- no explanations\n"
-        "- no text in image\n"
-        "- no letters\n"
-        "- no words\n"
-        "- no logo\n"
-        "- no watermark\n\n"
-        "- no elderly or Santa-like character unless explicitly requested\n"
-        "- no headphones unless the post mentions listening or headphones\n"
-        "- no holiday imagery unless the post is seasonal\n"
+        "Extract one visually distinct action from this educational post. Return JSON only, with exactly these keys:\n"
+        '{"action":"one visible action in English","setting":"one simple setting in English","props":["explicit prop"]}\n'
+        "The action must describe one observable interaction from the first concrete step. "
+        "Do not write an image prompt. Do not choose the number, roles, ages, art style, camera, or negative constraints.\n"
+        "Use only props from Allowed props; return at most three. Do not infer typical therapy equipment. "
+        "Never include probes, spatulas, tongue depressors, spoons used intraorally, or other oral tools.\n"
         f"Audience: {audience or 'parents'}\n"
         f"Rubric: {rubric or 'unknown'}\n"
-        f"Scene guidance: {scene_guidance}\n"
+        f"Code-defined roles (context only, do not repeat): {role_rule}\n"
+        f"Detected age: {age_descriptor}\n"
         f"Allowed props: {prop_rule}\n"
+        f"First concrete step: {first_step or 'not found'}\n"
         f"Title: {safe_title}\n"
-        f"Post body:\n{safe_body}\n"
+        f"Post facts:\n{safe_body}\n"
     )
 
 
@@ -2004,58 +2214,92 @@ async def generate_image_prompt_async(
     prov = (provider or "auto").strip().lower()
     prompt = build_image_prompt_prompt(title=title, body_text=body_text, audience=audience, rubric_id=rubric_id)
 
+    async def _compile_raw(raw: str) -> Tuple[str, bool, str]:
+        payload, parse_reason = _parse_visual_brief_json(raw)
+        if payload is None:
+            return "", False, parse_reason
+        compiled, _, compile_reason = _compile_image_prompt_from_payload(
+            payload,
+            body_text=body_text,
+            audience=audience,
+            rubric_id=rubric_id,
+        )
+        return compiled, bool(compiled), compile_reason
+
+    async def _try_with_repair(
+        generate: Callable[[str], object],
+        provider_name: str,
+    ) -> Tuple[str, bool, str]:
+        raw = await generate(prompt)  # type: ignore[misc]
+        compiled, ok, reason = await _compile_raw(str(raw))
+        if ok:
+            return compiled, True, f"ok:{provider_name}"
+
+        repair_prompt = (
+            f"{prompt}\nThe previous response was invalid ({reason}). "
+            "Repair it once. Return only valid JSON with action, setting, and props."
+        )
+        repaired_raw = await generate(repair_prompt)  # type: ignore[misc]
+        repaired, repaired_ok, repaired_reason = await _compile_raw(str(repaired_raw))
+        if repaired_ok:
+            return repaired, True, f"ok:{provider_name}_retry"
+        return "", False, f"invalid_{provider_name}_image_brief:{repaired_reason}"
+
     async def _try_groq() -> Tuple[str, bool, str]:
         if not groq_key:
             return "", False, "GROQ_API_KEY_missing"
-        raw = await groq_chat(prompt, groq_key)
-        cleaned = _clean_image_prompt(raw)
-        ok, reason = _validate_image_prompt(cleaned, body_text=body_text, rubric_id=rubric_id)
-        if ok:
-            return cleaned, True, "ok:groq"
-        repair_prompt = prompt + "\nReturn only one English prompt line. Nothing else."
-        if reason == "visual_prompt_topic_mismatch":
-            repair_prompt += " Remove unrelated Santa, holiday, elderly, headphones, headset, random letters, or random numbers unless they are explicitly present in the post body."
-        raw2 = await groq_chat(repair_prompt, groq_key)
-        cleaned2 = _clean_image_prompt(raw2)
-        ok2, reason2 = _validate_image_prompt(cleaned2, body_text=body_text, rubric_id=rubric_id)
-        if ok2:
-            return cleaned2, True, "ok:groq_retry"
-        return "", False, f"invalid_groq_image_prompt:{reason2}"
+
+        async def generate(value: str) -> str:
+            return await groq_chat(value, groq_key)
+
+        return await _try_with_repair(generate, "groq")
 
     async def _try_gemini() -> Tuple[str, bool, str]:
         if not gemini_key:
             return "", False, "GEMINI_API_KEY_missing"
-        raw = await gemini_generate(prompt, gemini_key)
-        cleaned = _clean_image_prompt(raw)
-        ok, reason = _validate_image_prompt(cleaned, body_text=body_text, rubric_id=rubric_id)
-        if ok:
-            return cleaned, True, f"ok:gemini:{GEMINI_MODELS[0]}"
-        return "", False, f"invalid_gemini_image_prompt:{reason}"
+
+        async def generate(value: str) -> str:
+            return await gemini_generate(value, gemini_key)
+
+        return await _try_with_repair(generate, "gemini")
+
+    def fallback(note: str) -> Tuple[str, bool, str]:
+        compiled = _deterministic_visual_prompt(body_text, audience, rubric_id)
+        if compiled:
+            return compiled, True, f"ok:deterministic_fallback:{note}"
+        return "", False, f"image_prompt_failed:{note}"
 
     if prov == "none":
         return "", False, "provider:none"
 
     groq_err = ""
-    repair_prompt = ""
     if prov in ("auto", "groq"):
         try:
-            return await _try_groq()
+            result = await _try_groq()
+            if result[1]:
+                return result
+            groq_err = result[2]
+            if prov == "groq":
+                return fallback(groq_err)
         except Exception as e:
             groq_err = str(e)
             if prov == "groq":
-                return "", False, f"groq_image_prompt_failed:{groq_err}"
+                return fallback(f"groq_image_prompt_failed:{groq_err}")
 
     if prov in ("auto", "gemini"):
         try:
-            return await _try_gemini()
+            result = await _try_gemini()
+            if result[1]:
+                return result
+            return fallback(f"{result[2]}|groq={groq_err}")
         except Exception as e:
             if "gemini_quota_exhausted_cached" in str(e):
-                return "", False, "gemini_quota_exhausted_cached"
+                return fallback("gemini_quota_exhausted_cached")
             if "gemini_quota_exhausted" in str(e):
-                return "", False, "gemini_quota_exhausted"
-            return "", False, f"gemini_image_prompt_failed:{e} | groq={groq_err}"
+                return fallback("gemini_quota_exhausted")
+            return fallback(f"gemini_image_prompt_failed:{e}|groq={groq_err}")
 
-    return "", False, f"image_prompt_failed:groq={groq_err}"
+    return fallback(f"groq={groq_err}")
 
 
 PRO_FRIENDLY_REPAIR_EXACT_REASONS = {

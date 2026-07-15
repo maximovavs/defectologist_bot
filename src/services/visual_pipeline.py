@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import json
 from io import BytesIO
 import os
 import re
 import time
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Iterable, Tuple
 from urllib.parse import quote
 
 import requests
@@ -58,23 +59,25 @@ HEADERS = {
     "Accept": "image/*",
 }
 
-VISUAL_QUALITY_SUFFIX = (
-    "Horizontal cover composition suitable for Telegram, safe composition that can be placed on a 16:9 cover, "
-    "warm editorial illustration, child-friendly educational scene, soft natural daylight, "
-    "clean uncluttered home or therapy room, soft beige cream and warm pastel palette, gentle contrast, "
-    "simple uncluttered composition, one clear interaction, relevant props from the post, soft natural lighting, "
-    "natural human proportions, avoid distorted anatomy, no stretched faces, no widened bodies, no widened torsos, "
-    "no elongated arms or enlarged hands, two arms and two legs when visible, anatomically coherent hands and fingers, "
-    "normal camera perspective, avoid wide-angle lens distortion, avoid panoramic distortion, "
-    "medium-shot composition, clear main subject, keep subjects comfortably centered, leave breathing room around the main figures, "
-    "coherent realistic figure rendering when people are present, balanced composition, one clear main scene, one clear focal group, "
-    "do not place people edge-to-edge across the frame, no background people unless explicitly required, "
-    "no duplicate or ghosted figures, no portrait poster composition, no random letters or numbers, "
-    "no deformed hands, no extra or missing limbs, no cropped main faces, no unnatural width, "
-    "no exaggerated perspective, no fish-eye or ultra-wide view, no cluttered or complex scene, no anime, no 3D toy style, "
-    "no text in image, no elderly or Santa-like character unless explicitly requested, "
-    "no headphones unless the post mentions listening or headphones, no holiday imagery unless the post is seasonal."
+VISUAL_STYLE_TAIL = (
+    "Warm soft editorial illustration, natural daylight, beige and warm pastel palette, natural human proportions, "
+    "simple naturally posed hands away from the camera. "
+    "No text, letters, logos, watermarks, duplicated figures, wide-angle distortion, stretched anatomy, or clutter."
 )
+
+VISUAL_CAMERA_TEMPLATE = (
+    "eye-level {shot}, normal 50mm perspective, subjects centered with breathing room, clearly separated without overlap"
+)
+
+
+@dataclass(frozen=True)
+class VisualBrief:
+    rubric_id: str
+    role_rule: str
+    age_descriptor: str
+    setting: str
+    action: str
+    props: tuple[str, ...]
 
 
 class PollinationsImageError(RuntimeError):
@@ -178,11 +181,10 @@ def _enhance_image_prompt(prompt: str) -> str:
     if not cleaned:
         return ""
 
-    lower = cleaned.lower()
-    if "coherent realistic figure rendering" in lower and "warm editorial illustration" in lower:
+    if VISUAL_STYLE_TAIL.lower() in cleaned.lower():
         return cleaned
 
-    return f"{cleaned}. {VISUAL_QUALITY_SUFFIX}"
+    return f"{cleaned.rstrip(' .')}. {VISUAL_STYLE_TAIL}"
 
 
 def _attach_file_metadata(
@@ -409,15 +411,196 @@ CHARACTER_ROLE_VISUAL_RUBRICS = frozenset(
 )
 
 
-def _visual_people_rule(rubric_id: str) -> str:
+def build_visual_role_rule(
+    rubric_id: str,
+    age_descriptor: str = "",
+    *,
+    adult_required: bool = False,
+) -> str:
     rubric = (rubric_id or "").strip().lower()
+    age = " ".join((age_descriptor or "").split()).strip()
+
     if rubric == "method_piggybank":
-        return "Exactly one adult speech specialist and exactly one child; hard maximum two visible people; no classroom group."
+        return "Exactly one adult speech specialist and exactly one clearly younger child, no other people."
     if rubric == "age_norms":
-        return "One child preferred; maximum one adult and one child; hard maximum two visible people."
+        child = age or "young child"
+        if adult_required:
+            return f"Exactly one adult parent and exactly one {child}, no other people."
+        return f"Exactly one {child}, no adults and no other people."
     if rubric in PARENT_VISUAL_RUBRICS:
-        return "Exactly one adult parent and exactly one toddler or young child; hard maximum two visible people; no second adult."
-    return "Exactly one adult and one child; hard maximum two visible people; no extra observers or background people."
+        if age:
+            return (
+                f"Exactly one adult parent and exactly one {age}, visibly different in age and height, "
+                "no other people."
+            )
+        return "Exactly one adult parent and exactly one clearly younger child, no other people."
+    return "Exactly one adult and exactly one clearly younger child, no other people."
+
+
+def _clean_visual_brief_fragment(value: object, max_len: int) -> str:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split()).strip()
+    text = text.strip(" \t\"'.,;:-")
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_len:
+        text = text[:max_len].rsplit(" ", 1)[0].strip() or text[:max_len].strip()
+    return text
+
+
+def _clean_visual_props(props: Iterable[object]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for value in props:
+        prop = _clean_visual_brief_fragment(value, 32).lower()
+        if not prop or prop in cleaned:
+            continue
+        cleaned.append(prop)
+        if len(cleaned) >= 3:
+            break
+    return tuple(cleaned)
+
+
+def _compile_visual_prompt(brief: VisualBrief) -> str:
+    role_rule = _clean_visual_brief_fragment(brief.role_rule, 220)
+    action = _clean_visual_brief_fragment(brief.action, 280)
+    setting = _clean_visual_brief_fragment(brief.setting, 120) or "simple uncluttered play area"
+    props = _clean_visual_props(brief.props)
+    if not role_rule or not action:
+        return ""
+
+    role_sentence = f"{role_rule.rstrip('.')}."
+    props_text = ", ".join(props) if props else "none"
+    role_lower = role_rule.lower()
+    has_child_subject = any(
+        descriptor in role_lower
+        for descriptor in ("child", "toddler")
+    )
+    shot = "medium two-shot" if "adult" in role_lower and has_child_subject else "medium shot"
+    camera = VISUAL_CAMERA_TEMPLATE.format(shot=shot)
+    prompt = (
+        f"{role_sentence} "
+        f"Action: {action}; allowed props: {props_text}. "
+        f"{setting.capitalize()}, {camera}. "
+        f"{VISUAL_STYLE_TAIL}"
+    )
+    if len(prompt) <= 900:
+        return prompt
+
+    shorter_action = _clean_visual_brief_fragment(action, 180)
+    return (
+        f"{role_sentence} "
+        f"Action: {shorter_action}; allowed props: {props_text}. "
+        f"{setting.capitalize()}, {camera}. "
+        f"{VISUAL_STYLE_TAIL}"
+    )[:900].rstrip()
+
+
+def _parse_compiled_visual_prompt(prompt: str, rubric_id: str = "") -> VisualBrief | None:
+    cleaned = " ".join((prompt or "").split()).strip()
+    marker = "Warm soft editorial illustration"
+    pattern = re.compile(
+        rf"^(?P<role>.+?\.)\s+Action:\s*(?P<action>.+?);\s*allowed props:\s*"
+        rf"(?P<props>.+?)\.\s+(?P<setting>.+?)\.\s+{re.escape(marker)}",
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(cleaned)
+    if not match:
+        return None
+
+    props_raw = match.group("props").strip()
+    props = () if props_raw.lower() == "none" else _clean_visual_props(props_raw.split(","))
+    role_rule = match.group("role").strip()
+    age_match = re.search(
+        r"(?:and exactly one|^exactly one)\s+(.+?(?:toddler|preschool child|school-age child|young child|clearly younger child|child))",
+        role_rule,
+        flags=re.IGNORECASE,
+    )
+    age_descriptor = age_match.group(1).strip() if age_match else ""
+    setting = match.group("setting").split(", eye-level", 1)[0].strip()
+    return VisualBrief(
+        rubric_id=(rubric_id or "").strip().lower(),
+        role_rule=role_rule,
+        age_descriptor=age_descriptor,
+        setting=setting,
+        action=match.group("action").strip(),
+        props=props,
+    )
+
+
+def _validate_compiled_visual_prompt(
+    prompt: str,
+    rubric_id: str,
+    *,
+    allowed_props: Iterable[str] | None = None,
+) -> tuple[bool, str]:
+    cleaned = " ".join((prompt or "").split()).strip()
+    if not cleaned:
+        return False, "empty"
+    if len(cleaned) > 900:
+        return False, "too_long"
+
+    brief = _parse_compiled_visual_prompt(cleaned, rubric_id=rubric_id)
+    if brief is None:
+        return False, "invalid_visual_brief"
+    if not cleaned.startswith(brief.role_rule):
+        return False, "role_rule_not_first"
+    if len(brief.action) < 8:
+        return False, "missing_action"
+
+    rubric = (rubric_id or "").strip().lower()
+    role = brief.role_rule.lower()
+    if rubric in PARENT_VISUAL_RUBRICS:
+        if not role.startswith("exactly one adult parent and exactly one "):
+            return False, "invalid_parent_roles"
+        if not re.search(r"(?:toddler|preschool child|school-age child|young child|clearly younger child)", role):
+            return False, "invalid_parent_child_descriptor"
+    elif rubric == "method_piggybank":
+        if "exactly one adult speech specialist" not in role or "exactly one clearly younger child" not in role:
+            return False, "invalid_method_roles"
+    elif rubric == "age_norms":
+        valid_child_only = role.startswith("exactly one ") and "no adults" in role
+        valid_with_adult = role.startswith("exactly one adult parent and exactly one ")
+        if not (valid_child_only or valid_with_adult):
+            return False, "invalid_age_norm_roles"
+
+    prompt_lower = cleaned.lower()
+    contradictions = (
+        "two adults",
+        "two women",
+        "family group",
+        "classroom group",
+        "siblings",
+        "background people",
+    )
+    if any(phrase in prompt_lower for phrase in contradictions):
+        return False, "contradictory_roles"
+
+    action_lower = brief.action.lower()
+    if re.search(r"\b(?:written text|random letters|logo|watermark)\b", action_lower):
+        return False, "visual_text_instruction"
+    if re.search(r"\b(?:oral probe|speech probe|spatula|tongue depressor|intraoral tool|spoon)\b", prompt_lower):
+        return False, "risky_oral_tool"
+    if len(brief.props) > 3:
+        return False, "too_many_props"
+    if allowed_props is not None:
+        allowed = {str(prop).strip().lower() for prop in allowed_props if str(prop).strip()}
+        if not set(brief.props).issubset(allowed):
+            return False, "unsupported_visual_prop"
+    return True, "ok"
+
+
+def _build_visual_qa_expected_brief(prompt: str, rubric_id: str) -> str:
+    brief = _parse_compiled_visual_prompt(prompt, rubric_id=rubric_id)
+    if brief is None:
+        return f"Expected roles: {_visual_people_rule(rubric_id)}\nExpected action: {prompt[:240]}\nAllowed props: none"
+    props = ", ".join(brief.props) if brief.props else "none"
+    return (
+        f"Expected roles: {brief.role_rule}\n"
+        f"Expected action: {brief.action}\n"
+        f"Allowed props: {props}"
+    )
+
+
+def _visual_people_rule(rubric_id: str) -> str:
+    return build_visual_role_rule(rubric_id)
 
 
 def _visual_people_limit(rubric_id: str) -> int:
@@ -547,34 +730,78 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
     return normalized
 
 
-def build_visual_retry_prompt(prompt: str, rubric_id: str = "", audience: str = "") -> str:
-    base = _enhance_image_prompt(prompt)
-    if not base:
-        return ""
-    strict = (
-        " Regenerate as a simpler medium-shot Telegram cover. "
-        f"{_visual_people_rule(rubric_id)} "
-        "Use one clear main subject, one simple uncluttered room, and only props explicitly required by the post. "
-        "No crowd, siblings, extra family members, observers, background people, faces, heads, reflections, silhouettes, "
-        "duplicate figures, ghosted figures, merged people, floating heads, or incomplete human figures, "
-        "deformed hands, extra limbs, cropped faces, text, letters, logos, watermarks, or dramatic perspective. "
-        f"Audience: {audience or 'parents'}."
+def build_visual_retry_prompt(
+    prompt: str,
+    rubric_id: str = "",
+    audience: str = "",
+    qa_reason: str = "",
+    adult_count: object = "unknown",
+    child_count: object = "unknown",
+    expected_action: str = "",
+) -> str:
+    del audience, adult_count, child_count
+    brief = _parse_compiled_visual_prompt(prompt, rubric_id=rubric_id)
+    if brief is None:
+        raw_action = expected_action or prompt
+        if VISUAL_STYLE_TAIL.lower() in raw_action.lower():
+            raw_action = re.split(re.escape(VISUAL_STYLE_TAIL), raw_action, maxsplit=1, flags=re.IGNORECASE)[0]
+        action = _clean_visual_brief_fragment(raw_action, 280)
+        brief = VisualBrief(
+            rubric_id=(rubric_id or "").strip().lower(),
+            role_rule=build_visual_role_rule(rubric_id),
+            age_descriptor="",
+            setting=(
+                "simple uncluttered speech therapy room"
+                if (rubric_id or "").strip().lower() == "method_piggybank"
+                else "simple uncluttered home play area"
+            ),
+            action=action,
+            props=(),
+        )
+
+    reason = _normalize_visual_qa_reason(qa_reason)
+    action = _clean_visual_brief_fragment(expected_action or brief.action, 260)
+    correction = ""
+    if reason == "missing_required_child":
+        correction = "Show one unmistakably young child with clearly childlike height and proportions"
+    elif reason in {"too_many_adults", "adult_only_scene"}:
+        subject = "specialist" if (rubric_id or "").strip().lower() == "method_piggybank" else "parent"
+        correction = f"Remove every additional adult so only one adult {subject} is visible"
+    elif reason == "wrong_character_roles":
+        correction = "Make the adult and child visibly different in age, height, face and body proportions"
+    elif reason == "character_counts_unknown":
+        correction = "Show both unobstructed figures separately with visible heads and upper bodies"
+    elif reason in {"horizontal_stretch", "stretched_body", "widened_torso"}:
+        correction = "Keep normal body width and a non-panoramic composition"
+    elif reason == "deformed_hands":
+        correction = "Keep hands simple and naturally posed, away from the camera and outside the main focal point"
+    elif reason in {
+        "too_many_people",
+        "duplicate_figure",
+        "ghosted_figure",
+        "partial_human_figure",
+    }:
+        correction = (
+            "Show exactly the required subjects against an empty setting without reflections, portraits, silhouettes "
+            "or human-shaped decorations"
+        )
+
+    if reason == "action_mismatch":
+        retry_action = action
+    elif correction:
+        retry_action = f"{action}, and {correction[0].lower() + correction[1:]}"
+    else:
+        retry_action = action
+
+    retry_brief = VisualBrief(
+        rubric_id=brief.rubric_id,
+        role_rule=brief.role_rule,
+        age_descriptor=brief.age_descriptor,
+        setting=brief.setting,
+        action=retry_action,
+        props=brief.props[:3],
     )
-    if (rubric_id or "").strip().lower() == "method_piggybank":
-        strict += (
-            " Exactly one adult speech specialist and exactly one child must be visible, both performing the exact professional exercise. "
-            "No other faces, heads, reflections, silhouettes, or background people are allowed. "
-            "Use a simple therapy room and one activity only. No reading scene unless reading is explicitly required by the source prompt. "
-            "No third person, floating head, or incomplete figure."
-        )
-    elif (rubric_id or "").strip().lower() in PARENT_VISUAL_RUBRICS:
-        strict += (
-            " Exactly one adult parent and exactly one toddler or young child must be visible. "
-            "No second adult, no background people, no crowd, and no extra faces. "
-            "Use natural body width, normal face and shoulder proportions, and no horizontal stretching. "
-            "Show the exact activity from the post."
-        )
-    return f"{base.rstrip(' .')}.{strict}"
+    return _compile_visual_prompt(retry_brief)
 
 
 def _visual_qa_text(payload: Dict[str, object]) -> str:
@@ -676,6 +903,8 @@ def evaluate_visual_quality(
             "child_count": "unknown",
         }
 
+    expected_roles_match = re.search(r"Expected roles:\s*([^\n]+)", expected_prompt or "", flags=re.IGNORECASE)
+    expected_roles = expected_roles_match.group(1).strip() if expected_roles_match else _visual_people_rule(rubric_id)
     qa_prompt = (
         "You are a strict visual QA checker for a Telegram educational cover. "
         "Return JSON only with keys pass (boolean), reason (short string), people_count (integer or unknown), "
@@ -691,17 +920,18 @@ def evaluate_visual_quality(
         "uncanny photorealistic faces, anime or 3D toy style, fish-eye or panoramic distortion, crowded scenes, "
         "unrequired background people, text, letters, logos, or watermarks. "
         "For parent rubrics tip_of_day, play_and_speak, question_week, myth_fact, bilingual_corner, and bilingual_parents, "
-        "pass only with exactly 1 adult parent and exactly 1 toddler or young child, hard maximum 2 people. "
-        "For method_piggybank, pass only with exactly 1 adult specialist and exactly 1 child. "
-        "For age_norms, prefer 1 child and allow maximum 1 adult plus 1 child. "
+        "pass only with exactly one adult parent and exactly one clearly younger child, hard maximum 2 people. "
+        "For method_piggybank, pass only with exactly one adult speech specialist and exactly one clearly younger child. "
+        "For age_norms, require exactly one child and no adult unless Expected roles explicitly require one adult parent. "
         "Use reason action_mismatch when the main visual action or object does not match the expected prompt. "
         "Use reason missing_required_child when a required child is absent, too_many_adults when more than one adult is visible, "
         "wrong_character_roles when the character composition does not match the rubric, and adult_only_scene when only adults are visible. "
         "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, action_mismatch, "
         "adult_only_scene, missing_required_child, too_many_adults, wrong_character_roles, stretched_face, widened_torso, "
         "stretched_body, horizontal_stretch, deformed_hands, extra_limbs, missing_limbs, or panoramic_distortion when applicable. "
-        f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {_visual_people_rule(rubric_id)} "
-        f"Expected image prompt/action: {expected_prompt or 'not provided'}. "
+        f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {expected_roles} "
+        f"Expected visual brief: {expected_prompt or 'not provided'}. "
+        "Compare the image separately with Expected roles, Expected action, and Allowed props. "
         "Do not require literal close-up visibility of tongue movements; accept a clear speech or articulation exercise when the action is evident. "
         "For articulation gymnastics, reject an image whose main scene is only reading, drawing, or ordinary conversation. "
         "Do not invent props that are absent from the expected prompt."
@@ -856,7 +1086,44 @@ def build_post_visual(
     visual_qa_api_key: str = "",
 ) -> Tuple[BytesIO, Dict[str, str]]:
     original_prompt = (image_prompt or "").strip()
-    prompt = _enhance_image_prompt(original_prompt)
+    prompt = ""
+    visual_brief: VisualBrief | None = None
+    if original_prompt:
+        visual_brief = _parse_compiled_visual_prompt(original_prompt, rubric_id=rubric_id)
+        if visual_brief is None:
+            visual_brief = VisualBrief(
+                rubric_id=(rubric_id or "").strip().lower(),
+                role_rule=build_visual_role_rule(rubric_id),
+                age_descriptor="",
+                setting=(
+                    "simple uncluttered speech therapy room"
+                    if (rubric_id or "").strip().lower() == "method_piggybank"
+                    else "simple uncluttered home play area"
+                ),
+                action=_clean_visual_brief_fragment(original_prompt, 280),
+                props=(),
+            )
+        prompt = _compile_visual_prompt(visual_brief)
+        valid_prompt, _ = _validate_compiled_visual_prompt(prompt, rubric_id)
+        if not valid_prompt:
+            fallback_action = (
+                "the speech specialist guides the child through one clear speech exercise"
+                if (rubric_id or "").strip().lower() == "method_piggybank"
+                else (
+                    "the child performs one clear developmental action"
+                    if (rubric_id or "").strip().lower() == "age_norms"
+                    else "the adult guides the child through one clear speech activity"
+                )
+            )
+            visual_brief = VisualBrief(
+                rubric_id=(rubric_id or "").strip().lower(),
+                role_rule=build_visual_role_rule(rubric_id),
+                age_descriptor="",
+                setting=visual_brief.setting,
+                action=fallback_action,
+                props=(),
+            )
+            prompt = _compile_visual_prompt(visual_brief)
     safe_title = sanitize_cover_title(
         _clean_cover_title(title, fallback=fallback_title),
         fallback=fallback_title,
@@ -879,21 +1146,36 @@ def build_post_visual(
         "visual_qa_status": "not_run",
         "visual_qa_attempts": "0",
         "visual_qa_required": str(visual_qa_required),
+        "visual_brief_roles": visual_brief.role_rule if visual_brief else "",
+        "visual_brief_age": visual_brief.age_descriptor if visual_brief else "",
+        "visual_brief_action": visual_brief.action if visual_brief else "",
+        "visual_brief_props": ", ".join(visual_brief.props) if visual_brief else "",
+        "compiled_prompt_len": str(len(prompt)),
+        "visual_retry_target_reason": "",
     }
 
     if prompt:
+        print(
+            f"[VISUAL_BRIEF] roles={_short_log_message(base_meta['visual_brief_roles'])} "
+            f"age={_short_log_message(base_meta['visual_brief_age'])} "
+            f"action={_short_log_message(base_meta['visual_brief_action'])} "
+            f"props={_short_log_message(base_meta['visual_brief_props'])} "
+            f"compiled_prompt_len={len(prompt)}",
+            flush=True,
+        )
         try:
             buffer, download_meta = download_pollinations_image_with_meta(
                 prompt=prompt,
                 token=pollinations_token,
             )
             qa_fn = visual_qa_fn or evaluate_visual_quality
+            expected_brief = _build_visual_qa_expected_brief(prompt, rubric_id)
             first_qa = _safe_visual_qa(
                 qa_fn,
                 buffer,
                 rubric_id=rubric_id,
                 audience=audience,
-                expected_prompt=prompt,
+                expected_prompt=expected_brief,
                 visual_qa_api_key=visual_qa_api_key,
             )
             print(
@@ -933,7 +1215,17 @@ def build_post_visual(
             if _visual_qa_passed(first_qa):
                 return buffer, first_meta
 
-            retry_prompt = build_visual_retry_prompt(prompt, rubric_id=rubric_id, audience=audience)
+            retry_reason = str(first_qa.get("reason", "visual_quality_rejected"))
+            retry_prompt = build_visual_retry_prompt(
+                prompt,
+                rubric_id=rubric_id,
+                audience=audience,
+                qa_reason=retry_reason,
+                adult_count=first_qa.get("adult_count", "unknown"),
+                child_count=first_qa.get("child_count", "unknown"),
+                expected_action=visual_brief.action if visual_brief else "",
+            )
+            retry_visual_brief = _parse_compiled_visual_prompt(retry_prompt, rubric_id=rubric_id)
             print(
                 f"[VISUAL_RETRY] reason={_short_log_message(first_qa.get('reason'))} attempt=2",
                 flush=True,
@@ -948,7 +1240,7 @@ def build_post_visual(
                     retry_buffer,
                     rubric_id=rubric_id,
                     audience=audience,
-                    expected_prompt=retry_prompt,
+                    expected_prompt=_build_visual_qa_expected_brief(retry_prompt, rubric_id),
                     visual_qa_api_key=visual_qa_api_key,
                 )
                 print(
@@ -973,6 +1265,16 @@ def build_post_visual(
                     "visual_qa_adult_count": str(retry_qa.get("adult_count", "unknown")),
                     "visual_qa_child_count": str(retry_qa.get("child_count", "unknown")),
                     "visual_qa_attempts": "2",
+                    "visual_retry_target_reason": retry_reason,
+                    "visual_brief_roles": retry_visual_brief.role_rule if retry_visual_brief else base_meta["visual_brief_roles"],
+                    "visual_brief_age": retry_visual_brief.age_descriptor if retry_visual_brief else base_meta["visual_brief_age"],
+                    "visual_brief_action": retry_visual_brief.action if retry_visual_brief else base_meta["visual_brief_action"],
+                    "visual_brief_props": (
+                        ", ".join(retry_visual_brief.props)
+                        if retry_visual_brief
+                        else base_meta["visual_brief_props"]
+                    ),
+                    "compiled_prompt_len": str(len(retry_prompt)),
                 }
                 if visual_qa_required and _visual_qa_skipped(retry_qa):
                     return _fallback_for_required_visual_qa(
@@ -1017,6 +1319,16 @@ def build_post_visual(
                 "visual_qa_adult_count": str(first_qa.get("adult_count", "unknown")),
                 "visual_qa_child_count": str(first_qa.get("child_count", "unknown")),
                 "visual_qa_attempts": "2",
+                "visual_retry_target_reason": retry_reason,
+                "visual_brief_roles": retry_visual_brief.role_rule if retry_visual_brief else base_meta["visual_brief_roles"],
+                "visual_brief_age": retry_visual_brief.age_descriptor if retry_visual_brief else base_meta["visual_brief_age"],
+                "visual_brief_action": retry_visual_brief.action if retry_visual_brief else base_meta["visual_brief_action"],
+                "visual_brief_props": (
+                    ", ".join(retry_visual_brief.props)
+                    if retry_visual_brief
+                    else base_meta["visual_brief_props"]
+                ),
+                "compiled_prompt_len": str(len(retry_prompt)),
                 "attempts_used": str(POLLINATIONS_MAX_RETRIES),
                 "retryable_error": "False",
                 "exception_type": "VisualQualityRejected",

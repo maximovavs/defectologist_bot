@@ -20,6 +20,7 @@ import asyncio
 from io import BytesIO
 import hashlib
 import html as _html
+import json
 import os
 import random
 import re
@@ -50,6 +51,7 @@ from src.services.llm_generator import (
     validate_pro_evidence_for_generation,
 )
 from src.services.publication_store import PublicationStore
+from src.services.poll_builder import PollSpec, build_poll_spec
 from src.services.visual_pipeline import build_post_visual
 
 
@@ -68,6 +70,13 @@ TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip().lower()
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
+POST_POLLS_ENABLED = os.getenv("POST_POLLS_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+POLL_OPEN_PERIOD_SECONDS = int(os.getenv("POLL_OPEN_PERIOD_SECONDS", "86400"))
+POLL_DISABLE_NOTIFICATION = os.getenv("POLL_DISABLE_NOTIFICATION", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip()
 
 PROVIDER = os.getenv("REWRITE_PROVIDER", "auto").strip().lower()
@@ -1272,7 +1281,15 @@ def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]
     return payload or {}
 
 
-def send_message(chat_id: str, html_text: str) -> None:
+def _extract_telegram_message_id(payload: Dict[str, Any]) -> int:
+    result = payload.get("result") if isinstance(payload, dict) else None
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+        raise RuntimeError("telegram_api_error:successful response has no valid result.message_id")
+    return message_id
+
+
+def send_message(chat_id: str, html_text: str) -> int:
     if not chat_id:
         raise RuntimeError("chat_id is missing")
 
@@ -1286,15 +1303,15 @@ def send_message(chat_id: str, html_text: str) -> None:
         try:
             data = dict(base_data)
             data["parse_mode"] = TELEGRAM_PARSE_MODE
-            tg_request("sendMessage", data=data)
-            return
+            payload = tg_request("sendMessage", data=data)
+            return _extract_telegram_message_id(payload)
         except Exception as e:
             if not _is_probably_parse_mode_error(e):
                 raise
             _log_telegram_html_fallback("send_message", html_text, e)
 
     fallback_text = _strip_html_tags_for_telegram(html_text)
-    tg_request(
+    payload = tg_request(
         "sendMessage",
         data={
             "chat_id": chat_id,
@@ -1302,6 +1319,7 @@ def send_message(chat_id: str, html_text: str) -> None:
             "disable_web_page_preview": "true",
         },
     )
+    return _extract_telegram_message_id(payload)
 
 
 def send_plain_message(chat_id: str, text: str) -> None:
@@ -1323,7 +1341,7 @@ def _photo_file_tuple(photo_buffer: BytesIO) -> tuple[str, bytes, str]:
     return (filename, photo_buffer.getvalue(), mime_type)
 
 
-def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, html_full_post: str) -> None:
+def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, html_full_post: str) -> int:
     plain_bytes = len((plain_post or "").encode("utf-8"))
     file_tuple = _photo_file_tuple(photo_buffer)
 
@@ -1335,16 +1353,115 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
             }
             if TELEGRAM_PARSE_MODE:
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
-            tg_request("sendPhoto", data=data, files={"photo": file_tuple})
-            return
+            payload = tg_request("sendPhoto", data=data, files={"photo": file_tuple})
         except Exception as e:
             if _is_probably_parse_mode_error(e):
                 _log_telegram_html_fallback("send_photo_caption", html_full_post, e)
             else:
                 print(f"[WARN] send_photo_with_caption_failed err={e}", flush=True)
+        else:
+            return _extract_telegram_message_id(payload)
 
     tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
-    send_message(chat_id, html_full_post)
+    return send_message(chat_id, html_full_post)
+
+
+def send_post_poll(
+    chat_id: str,
+    poll: PollSpec,
+    reply_to_message_id: int,
+) -> int:
+    if not chat_id:
+        raise RuntimeError("chat_id is missing")
+    if isinstance(reply_to_message_id, bool) or not isinstance(reply_to_message_id, int) or reply_to_message_id <= 0:
+        raise RuntimeError("reply_to_message_id must be a positive integer")
+
+    data = {
+        "chat_id": chat_id,
+        "question": poll.question,
+        "options": json.dumps(
+            [{"text": option} for option in poll.options],
+            ensure_ascii=False,
+        ),
+        "is_anonymous": "true",
+        "type": "regular",
+        "allows_multiple_answers": "false",
+        "allows_revoting": "true",
+        "open_period": str(POLL_OPEN_PERIOD_SECONDS),
+        "disable_notification": "true" if POLL_DISABLE_NOTIFICATION else "false",
+        "reply_parameters": json.dumps(
+            {
+                "message_id": reply_to_message_id,
+                "allow_sending_without_reply": True,
+            }
+        ),
+    }
+    payload = tg_request("sendPoll", data=data)
+    return _extract_telegram_message_id(payload)
+
+
+def _write_dry_run_poll(output_dir: Path, file_stem: str, poll: PollSpec) -> Path:
+    payload = {
+        "question": poll.question,
+        "options": list(poll.options),
+        "is_anonymous": True,
+        "type": "regular",
+        "open_period": POLL_OPEN_PERIOD_SECONDS,
+    }
+    path = output_dir / f"{file_stem}.poll.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _handle_post_poll(
+    *,
+    rubric_id: str,
+    plain_post: str,
+    canonical_url: str,
+    date_key: str,
+    chat_id: str = "",
+    post_message_id: Optional[int] = None,
+    dry_run: bool = False,
+    dry_run_dir: Optional[Path] = None,
+    dry_run_stem: str = "",
+    enabled: Optional[bool] = None,
+) -> int | Path | None:
+    poll_enabled = POST_POLLS_ENABLED if enabled is None else enabled
+    if not poll_enabled:
+        return None
+
+    try:
+        poll = build_poll_spec(rubric_id, plain_post, canonical_url, date_key)
+    except Exception as e:
+        print(
+            f"[POLL][WARN] poll_build_failed rubric={rubric_id} url={canonical_url} err={e}",
+            flush=True,
+        )
+        return None
+    if poll is None:
+        print(f"[POLL][SKIP] rubric={rubric_id} reason=no_template", flush=True)
+        return None
+
+    if dry_run:
+        if dry_run_dir is None or not dry_run_stem:
+            raise RuntimeError("dry-run poll output path is missing")
+        return _write_dry_run_poll(dry_run_dir, dry_run_stem, poll)
+
+    try:
+        poll_message_id = send_post_poll(chat_id, poll, int(post_message_id or 0))
+    except Exception as e:
+        print(
+            f"[POLL][WARN] poll_send_failed rubric={rubric_id} url={canonical_url} err={e}",
+            flush=True,
+        )
+        return None
+
+    print(
+        f"[POLL][SENT] rubric={rubric_id} post_message_id={post_message_id} "
+        f"poll_message_id={poll_message_id}",
+        flush=True,
+    )
+    return poll_message_id
 
 
 def send_semantic_alert(
@@ -2042,21 +2159,31 @@ async def amain() -> None:
                 )
 
                 html_full = render_plain_to_telegram_html(plain)
+                post_message_id: Optional[int] = None
+                target_chat_id = ""
+                dry_run_out: Optional[Path] = None
+                dry_run_stem = f"{posted+1:02d}_{aud}_{rubric_id}"
 
                 if DRY_RUN:
                     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     out = STATE_DIR / "dry_run" / ts
                     out.mkdir(parents=True, exist_ok=True)
+                    dry_run_out = out
                     filename = getattr(visual_buffer, "name", f"{posted+1:02d}_{aud}_{rubric_id}.png")
                     ext = Path(filename).suffix or ".png"
-                    (out / f"{posted+1:02d}_{aud}_{rubric_id}{ext}").write_bytes(visual_buffer.getvalue())
-                    (out / f"{posted+1:02d}_{aud}_{rubric_id}.txt").write_text(plain, encoding="utf-8")
+                    (out / f"{dry_run_stem}{ext}").write_bytes(visual_buffer.getvalue())
+                    (out / f"{dry_run_stem}.txt").write_text(plain, encoding="utf-8")
                 else:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:
                         raise RuntimeError("Resolved target chat id is empty")
                     try:
-                        send_post_with_visual(target_chat_id, visual_buffer, plain, html_full)
+                        post_message_id = send_post_with_visual(
+                            target_chat_id,
+                            visual_buffer,
+                            plain,
+                            html_full,
+                        )
                     except Exception as e:
                         kind = note("telegram_send_failed", f"{canon} ({e})")
                         print(
@@ -2091,6 +2218,17 @@ async def amain() -> None:
 
                 posted += 1
                 print(f"[POSTED] rubric={rubric_id} audience={aud} url={canon}", flush=True)
+                _handle_post_poll(
+                    rubric_id=rubric_id,
+                    plain_post=plain,
+                    canonical_url=canon,
+                    date_key=now.date().isoformat(),
+                    chat_id=target_chat_id,
+                    post_message_id=post_message_id,
+                    dry_run=DRY_RUN,
+                    dry_run_dir=dry_run_out,
+                    dry_run_stem=dry_run_stem,
+                )
                 await asyncio.sleep(1.0)
                 break
 

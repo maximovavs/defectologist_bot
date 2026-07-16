@@ -2433,6 +2433,63 @@ def build_pro_friendly_repair_prompt(
     )
 
 
+BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
+    "missing_parent_safety_note",
+    "blanket_reassurance",
+    "misleading_politeness_framing",
+    "bilingual_topic_mismatch",
+    "bilingual_missing_family_action",
+    "bilingual_false_causality",
+    "bilingual_unsupported_mechanism",
+}
+
+BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS = (
+    "banned_phrase",
+    "unsupported_mechanism_claim",
+)
+
+
+def _should_repair_bilingual_parents_reason(reason: str) -> bool:
+    reason = (reason or "").strip()
+    return reason in BILINGUAL_PARENTS_REPAIR_EXACT_REASONS or any(
+        reason.startswith(prefix + ":") for prefix in BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS
+    )
+
+
+def build_bilingual_parents_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    previous_output: str = "",
+) -> str:
+    reason = (reason or "").strip()
+    if not _should_repair_bilingual_parents_reason(reason):
+        return ""
+
+    previous_note = (
+        "\n\nПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous_output.strip()
+        if previous_output.strip()
+        else ""
+    )
+    return (
+        (base_prompt or "")
+        + previous_note
+        + "\n\nПОВТОРИ bilingual_parents пост. Предыдущий вариант не прошёл строгую валидацию.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + "Сохрани заголовок и строку 👶 Возраст:. "
+        + "Сохрани точный блок 🌍 Что помогает в двуязычной семье:. "
+        + "В этом блоке дай 2–4 конкретных семейных действия, основанных только на EVIDENCE. "
+        + "Явно опиши действие семьи с русским или домашним языком. "
+        + "Не представляй билингвизм, два языка или переключение языков как причину задержки речи или речевого расстройства. "
+        + "Не придумывай механизмы, диагнозы или терапевтические эффекты. "
+        + "Сохрани блок 💡 Что это дает:. "
+        + "Не используй Markdown, placeholders или служебные маркеры."
+    )
+
+
 # -----------------------
 # Public API
 # -----------------------
@@ -2464,6 +2521,7 @@ async def generate_post_plain_from_evidence_async(
         return "", False, "no_evidence_short"
 
     is_pro_format = aud == "pros" or rf == "pro_friendly"
+    is_bilingual_format = rf == "bilingual_parents"
 
     prompt = build_generation_prompt(
         day_key=dk,
@@ -2566,15 +2624,20 @@ async def generate_post_plain_from_evidence_async(
             if ok:
                 return out, True, "ok:groq"
 
-            repair_prompt = (
-                build_pro_friendly_repair_prompt(
+            if is_pro_format:
+                repair_prompt = build_pro_friendly_repair_prompt(
                     prompt,
                     reason,
                     evidence_prevalidated=evidence_prevalidated,
                 )
-                if is_pro_format
-                else build_generic_repair_prompt(reason)
-            )
+            elif is_bilingual_format:
+                repair_prompt = build_bilingual_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                )
+            else:
+                repair_prompt = build_generic_repair_prompt(reason)
             if repair_prompt:
                 out2 = postprocess(await groq_chat(repair_prompt, groq_key))
                 ok2, reason2 = validate(out2)
@@ -2607,6 +2670,19 @@ async def generate_post_plain_from_evidence_async(
                     prompt,
                     reason,
                     evidence_prevalidated=evidence_prevalidated,
+                )
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif is_bilingual_format:
+                gemini_repair_prompt = build_bilingual_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
                 )
                 if gemini_repair_prompt:
                     out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))

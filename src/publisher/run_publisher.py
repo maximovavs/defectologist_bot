@@ -31,8 +31,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 from src.publisher.dedup_policy import (
     semantic_post_threshold_for_rubric,
+    should_bypass_duplicate_reason,
     should_bypass_source_semantic_dedup,
-    should_allow_evergreen_source_reuse,
 )
 
 import feedparser
@@ -220,11 +220,18 @@ HARD_SKIP_REASONS = {
     "max_run_seconds",
 }
 
-PRO_VALIDATION_SKIP_REASONS = {
+VALIDATION_SKIP_REASONS = {
     "no_data_in_source",
     "empty",
     "too_short",
     "template_leak",
+    "missing_parent_safety_note",
+    "blanket_reassurance",
+    "misleading_politeness_framing",
+    "bilingual_topic_mismatch",
+    "bilingual_missing_family_action",
+    "bilingual_false_causality",
+    "bilingual_unsupported_mechanism",
     "pro_insufficient_evidence",
     "pro_empty",
     "pro_title_too_long",
@@ -241,7 +248,7 @@ PRO_VALIDATION_SKIP_REASONS = {
     "pro_missing_method_card_heading",
 }
 
-PRO_VALIDATION_SKIP_PREFIXES = (
+VALIDATION_SKIP_PREFIXES = (
     "banned_phrase",
     "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
@@ -385,7 +392,7 @@ def _skip_kind(reason: str) -> str:
     return "hard" if reason in HARD_SKIP_REASONS else "soft"
 
 
-def _extract_pro_validation_skip_reason(llm_note: str) -> str:
+def _extract_validation_skip_reason(llm_note: str) -> str:
     note = norm_space(llm_note)
     if not note:
         return ""
@@ -400,11 +407,16 @@ def _extract_pro_validation_skip_reason(llm_note: str) -> str:
             candidate = candidate.split("=", 1)[1].strip()
         if candidate.startswith("invalid_") and ":" in candidate:
             candidate = candidate.split(":", 1)[1].strip()
-        if candidate in PRO_VALIDATION_SKIP_REASONS:
+        if candidate in VALIDATION_SKIP_REASONS:
             return candidate
-        if any(candidate.startswith(prefix + ":") for prefix in PRO_VALIDATION_SKIP_PREFIXES):
+        if any(candidate.startswith(prefix + ":") for prefix in VALIDATION_SKIP_PREFIXES):
             return candidate
     return ""
+
+
+def _extract_pro_validation_skip_reason(llm_note: str) -> str:
+    """Backward-compatible alias for callers using the former pro-only helper."""
+    return _extract_validation_skip_reason(llm_note)
 
 
 def _build_posted_zero_alert_plain(
@@ -1112,7 +1124,7 @@ def order_candidates_for_rubric(
     rng: random.Random,
 ) -> List[Dict[str, str]]:
     items = [dict(candidate) for candidate in candidates]
-    if rubric_id != "method_piggybank":
+    if rubric_id not in {"method_piggybank", "bilingual_corner"}:
         rng.shuffle(items)
         return items
 
@@ -1558,7 +1570,7 @@ async def amain() -> None:
                     continue
 
                 if store.has_url(canon):
-                    if should_allow_evergreen_source_reuse(rubric_id):
+                    if should_bypass_duplicate_reason(rubric_id, "dup_url_db"):
                         print(
                             f"[WARN] dup_url_db_ignored evergreen_reuse rubric={rubric_id} url={canon}",
                             flush=True,
@@ -1630,7 +1642,7 @@ async def amain() -> None:
                     continue
 
                 if store.has_evidence_hash(evidence_hash):
-                    if should_allow_evergreen_source_reuse(rubric_id):
+                    if should_bypass_duplicate_reason(rubric_id, "dup_evidence_hash_db"):
                         print(
                             f"[WARN] dup_evidence_hash_db_ignored evergreen_reuse rubric={rubric_id} url={canon}",
                             flush=True,
@@ -1782,7 +1794,7 @@ async def amain() -> None:
                     continue
 
                 if not ok or not plain_raw:
-                    pro_reason = _extract_pro_validation_skip_reason(llm_note) if rf == "pro_friendly" else ""
+                    validation_reason = _extract_validation_skip_reason(llm_note)
                     quota_reason = next(
                         (
                             reason
@@ -1791,7 +1803,7 @@ async def amain() -> None:
                         ),
                         "",
                     )
-                    skip_reason = pro_reason or quota_reason or "llm_invalid_output"
+                    skip_reason = validation_reason or quota_reason or "llm_invalid_output"
                     kind = note(skip_reason, canon)
                     print(
                         f"[SKIP][{kind}] {llm_note} reason={skip_reason} "

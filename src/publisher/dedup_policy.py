@@ -87,7 +87,19 @@ def should_allow_evergreen_source_reuse(rubric_id: str | None) -> bool:
         "play_and_speak",
         "myth_fact",
         "age_norms",
+        "bilingual_corner",
     }
+
+
+EVERGREEN_SOURCE_REUSE_REASONS = frozenset({"dup_url_db", "dup_evidence_hash_db"})
+
+
+def should_bypass_duplicate_reason(rubric_id: str | None, reason: str | None) -> bool:
+    """Limit evergreen reuse to persisted source URL/evidence duplicates."""
+    return (
+        should_allow_evergreen_source_reuse(rubric_id)
+        and (reason or "").strip() in EVERGREEN_SOURCE_REUSE_REASONS
+    )
 
 
 def semantic_post_threshold_for_rubric(rubric_id: str | None) -> float:

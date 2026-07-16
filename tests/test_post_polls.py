@@ -152,7 +152,7 @@ class PostPublishPollHandlingTest(unittest.TestCase):
         source = inspect.getsource(publisher.amain)
         record_at = source.index("store.record_publication(")
         posted_at = source.index("posted += 1", record_at)
-        poll_at = source.index("_handle_post_poll(", posted_at)
+        poll_at = source.index("_handle_post_engagement(", posted_at)
 
         self.assertLess(record_at, posted_at)
         self.assertLess(posted_at, poll_at)
@@ -236,13 +236,14 @@ class PostPublishPollHandlingTest(unittest.TestCase):
 
 
 class PollWorkflowTest(unittest.TestCase):
-    def test_workflow_enables_polls_for_schedule_and_manual_by_default(self):
+    def test_workflow_uses_auto_engagement_for_schedule_and_manual_by_default(self):
         workflow = (publisher.ROOT / ".github" / "workflows" / "post.yml").read_text(encoding="utf-8")
 
-        self.assertIn("post_poll:", workflow)
-        self.assertIn('default: "yes"', workflow)
-        self.assertIn("POST_POLLS_ENABLED:", workflow)
-        self.assertIn("github.event.inputs.post_poll == 'no'", workflow)
+        self.assertIn("engagement_mode:", workflow)
+        self.assertIn('default: "auto"', workflow)
+        self.assertIn("POST_ENGAGEMENT_MODE:", workflow)
+        self.assertIn("github.event.inputs.engagement_mode", workflow)
+        self.assertNotIn("post_poll:", workflow)
         self.assertIn('POLL_OPEN_PERIOD_SECONDS: "86400"', workflow)
         self.assertIn('POLL_DISABLE_NOTIFICATION: "1"', workflow)
 

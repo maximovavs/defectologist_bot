@@ -52,6 +52,11 @@ from src.services.llm_generator import (
 )
 from src.services.publication_store import PublicationStore
 from src.services.poll_builder import PollSpec, build_poll_spec
+from src.services.engagement_builder import (
+    EngagementSpec,
+    append_engagement_footer,
+    build_engagement_spec,
+)
 from src.services.visual_pipeline import build_post_visual
 
 
@@ -71,6 +76,13 @@ POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
 POST_POLLS_ENABLED = os.getenv("POST_POLLS_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+_POST_ENGAGEMENT_MODE_RAW = os.getenv("POST_ENGAGEMENT_MODE", "").strip().lower()
+if _POST_ENGAGEMENT_MODE_RAW in {"auto", "polls_only", "off"}:
+    POST_ENGAGEMENT_MODE = _POST_ENGAGEMENT_MODE_RAW
+elif "POST_POLLS_ENABLED" in os.environ:
+    POST_ENGAGEMENT_MODE = "polls_only" if POST_POLLS_ENABLED else "off"
+else:
+    POST_ENGAGEMENT_MODE = "auto"
 POLL_OPEN_PERIOD_SECONDS = int(os.getenv("POLL_OPEN_PERIOD_SECONDS", "86400"))
 POLL_DISABLE_NOTIFICATION = os.getenv("POLL_DISABLE_NOTIFICATION", "1").strip().lower() in (
     "1",
@@ -1413,6 +1425,60 @@ def _write_dry_run_poll(output_dir: Path, file_stem: str, poll: PollSpec) -> Pat
     return path
 
 
+def _engagement_json_payload(spec: EngagementSpec) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"kind": spec.kind, "mode": spec.mode}
+    if spec.kind == "footer":
+        payload["footer_text"] = spec.footer_text
+    elif spec.kind == "poll" and spec.poll is not None:
+        payload["question"] = spec.poll.question
+        payload["options"] = list(spec.poll.options)
+    return payload
+
+
+def _write_dry_run_engagement(output_dir: Path, file_stem: str, spec: EngagementSpec) -> Path:
+    path = output_dir / f"{file_stem}.engagement.json"
+    path.write_text(
+        json.dumps(_engagement_json_payload(spec), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _handle_post_engagement(
+    *,
+    spec: EngagementSpec,
+    rubric_id: str,
+    canonical_url: str,
+    chat_id: str = "",
+    post_message_id: Optional[int] = None,
+    dry_run: bool = False,
+    dry_run_dir: Optional[Path] = None,
+    dry_run_stem: str = "",
+) -> int | None:
+    """Send only a selected poll, keeping optional engagement non-fatal."""
+    if spec.kind != "poll" or spec.poll is None:
+        return None
+    if dry_run:
+        if dry_run_dir is None or not dry_run_stem:
+            raise RuntimeError("dry-run poll output path is missing")
+        _write_dry_run_poll(dry_run_dir, dry_run_stem, spec.poll)
+        return None
+    try:
+        poll_message_id = send_post_poll(chat_id, spec.poll, int(post_message_id or 0))
+    except Exception as e:
+        print(
+            f"[POLL][WARN] poll_send_failed rubric={rubric_id} url={canonical_url} err={e}",
+            flush=True,
+        )
+        return None
+    print(
+        f"[POLL][SENT] rubric={rubric_id} post_message_id={post_message_id} "
+        f"poll_message_id={poll_message_id}",
+        flush=True,
+    )
+    return poll_message_id
+
+
 def _handle_post_poll(
     *,
     rubric_id: str,
@@ -2158,7 +2224,68 @@ async def amain() -> None:
                     flush=True,
                 )
 
-                html_full = render_plain_to_telegram_html(plain)
+                engagement_spec = EngagementSpec(kind="none", mode="none")
+                display_plain = plain
+                try:
+                    engagement_spec = build_engagement_spec(
+                        rubric_id=rubric_id,
+                        plain_post=plain,
+                        canonical_url=canon,
+                        date_key=now.date().isoformat(),
+                        policy_mode=POST_ENGAGEMENT_MODE,
+                    )
+                except Exception as e:
+                    print(
+                        f"[ENGAGEMENT][WARN] build_failed rubric={rubric_id} url={canon} err={e}",
+                        flush=True,
+                    )
+                    engagement_spec = EngagementSpec(kind="none", mode="none")
+                    display_plain = plain
+
+                if engagement_spec.kind == "footer":
+                    footer_failed = False
+                    try:
+                        candidate_display = append_engagement_footer(
+                            plain,
+                            engagement_spec.footer_text,
+                            POST_MAX_CHARS,
+                        )
+                    except Exception as e:
+                        footer_failed = True
+                        print(
+                            f"[ENGAGEMENT][WARN] footer_failed rubric={rubric_id} url={canon} err={e}",
+                            flush=True,
+                        )
+                        candidate_display = plain
+                    if footer_failed:
+                        engagement_spec = EngagementSpec(kind="none", mode="none")
+                    elif candidate_display == plain:
+                        print(
+                            f"[ENGAGEMENT][SKIP] rubric={rubric_id} mode={engagement_spec.mode} "
+                            "reason=max_chars",
+                            flush=True,
+                        )
+                        engagement_spec = EngagementSpec(kind="none", mode="none")
+                    else:
+                        display_plain = candidate_display
+
+                if engagement_spec.kind == "poll":
+                    print(
+                        f"[ENGAGEMENT][POLL] rubric={rubric_id} mode={engagement_spec.mode}",
+                        flush=True,
+                    )
+                elif engagement_spec.kind == "footer":
+                    print(
+                        f"[ENGAGEMENT][FOOTER] rubric={rubric_id} mode={engagement_spec.mode}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[ENGAGEMENT][NONE] rubric={rubric_id} mode={engagement_spec.mode}",
+                        flush=True,
+                    )
+
+                html_full = render_plain_to_telegram_html(display_plain)
                 post_message_id: Optional[int] = None
                 target_chat_id = ""
                 dry_run_out: Optional[Path] = None
@@ -2172,7 +2299,8 @@ async def amain() -> None:
                     filename = getattr(visual_buffer, "name", f"{posted+1:02d}_{aud}_{rubric_id}.png")
                     ext = Path(filename).suffix or ".png"
                     (out / f"{dry_run_stem}{ext}").write_bytes(visual_buffer.getvalue())
-                    (out / f"{dry_run_stem}.txt").write_text(plain, encoding="utf-8")
+                    (out / f"{dry_run_stem}.txt").write_text(display_plain, encoding="utf-8")
+                    _write_dry_run_engagement(out, dry_run_stem, engagement_spec)
                 else:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:
@@ -2181,7 +2309,7 @@ async def amain() -> None:
                         post_message_id = send_post_with_visual(
                             target_chat_id,
                             visual_buffer,
-                            plain,
+                            display_plain,
                             html_full,
                         )
                     except Exception as e:
@@ -2218,11 +2346,10 @@ async def amain() -> None:
 
                 posted += 1
                 print(f"[POSTED] rubric={rubric_id} audience={aud} url={canon}", flush=True)
-                _handle_post_poll(
+                _handle_post_engagement(
+                    spec=engagement_spec,
                     rubric_id=rubric_id,
-                    plain_post=plain,
                     canonical_url=canon,
-                    date_key=now.date().isoformat(),
                     chat_id=target_chat_id,
                     post_message_id=post_message_id,
                     dry_run=DRY_RUN,

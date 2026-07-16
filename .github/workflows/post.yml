@@ -21,14 +21,15 @@ on:
         description: "Куда публиковать при ручном запуске: test | prod"
         required: false
         default: "test"
-      post_poll:
-        description: "Отправить engagement poll после контентного поста"
+      engagement_mode:
+        description: "Engagement after post: auto | polls_only | off"
         required: false
         type: choice
-        default: "yes"
+        default: "auto"
         options:
-          - "yes"
-          - "no"
+          - "auto"
+          - "polls_only"
+          - "off"
       rubric_id:
         description: "Какую рубрику тестировать"
         required: false
@@ -90,7 +91,7 @@ jobs:
       INCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.include_sources || '' }}
       EXCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.exclude_sources || '' }}
       RESET_TEST_DB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.reset_test_db || 'no' }}
-      POST_POLLS_ENABLED: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.post_poll == 'no' && '0' || '1' }}
+      POST_ENGAGEMENT_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.engagement_mode || 'auto' }}
       POLL_OPEN_PERIOD_SECONDS: "86400"
       POLL_DISABLE_NOTIFICATION: "1"
       STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}

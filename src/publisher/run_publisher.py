@@ -1755,7 +1755,8 @@ async def amain() -> None:
                 if store.has_url(canon):
                     if should_bypass_duplicate_reason(rubric_id, "dup_url_db"):
                         print(
-                            f"[WARN] dup_url_db_ignored evergreen_reuse rubric={rubric_id} url={canon}",
+                            f"[WARN] dup_url_db_ignored evergreen_reuse rubric={rubric_id} "
+                            f"source={candidate_source_id} url={canon}",
                             flush=True,
                         )
                     else:
@@ -1827,7 +1828,8 @@ async def amain() -> None:
                 if store.has_evidence_hash(evidence_hash):
                     if should_bypass_duplicate_reason(rubric_id, "dup_evidence_hash_db"):
                         print(
-                            f"[WARN] dup_evidence_hash_db_ignored evergreen_reuse rubric={rubric_id} url={canon}",
+                            f"[WARN] dup_evidence_hash_db_ignored evergreen_reuse rubric={rubric_id} "
+                            f"source={candidate_source_id} url={canon}",
                             flush=True,
                         )
                     else:

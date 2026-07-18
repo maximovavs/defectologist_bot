@@ -208,11 +208,15 @@ audiences:
         cadence: "WEEKLY"
         byweekday: ["SA"]
         sources:
-          - "logopediya_documents_rss"
           - "logopedy_articles_latest"
           - "logoportal_latest"
           - "kidskey_speech_games"
           - "parents_language_activities"
           - "parents_toddler_language_boost"
+          - "hanen_parent_tips"
+          - "naeyc_family_communication"
+          - "fraser_parent_speech_tips"
+          - "parents_sensory_play_language"
+          - "parents_baby_language_activities"
         format: "pro_friendly"
         media: ["image_card"]

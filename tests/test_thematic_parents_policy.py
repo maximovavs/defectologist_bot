@@ -106,6 +106,22 @@ class ThematicParentsPolicyTest(unittest.TestCase):
         self.assertIn("непосредственно увидеть или услышать", prompt)
         self.assertIn("Не пиши о развитии внимания", prompt)
 
+    def test_thematic_benefit_heading_accepts_e_and_yo(self):
+        base = (
+            "Игра со звуками\n"
+            "👶 Возраст: 4–5 лет\n"
+            "🧭 Тема: Звукопроизношение\n"
+            "🏠 Что можно попробовать дома:\n"
+            "1. Назовите два звука. 2. Попросите ребёнка выбрать услышанный звук.\n"
+            "💡 Что это дает: ребёнок повторяет целевой звук в слогах\n"
+        )
+        evidence = "Звукопроизношение и артикуляция. Ребёнок слушает и различает звуки речи."
+        for heading in ("💡 Что это дает:", "💡 Что это даёт:"):
+            with self.subTest(heading=heading):
+                candidate = base.replace("💡 Что это дает:", heading)
+                ok, reason = _validate_thematic_output(candidate, evidence, "speech_sounds")
+                self.assertTrue(ok, reason)
+
     def test_thursday_effective_format_and_engagement(self):
         source = inspect.getsource(publisher.amain)
         self.assertIn('"bilingual_parents"', source)

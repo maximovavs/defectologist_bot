@@ -848,7 +848,7 @@ def _validate_thematic_output(
 
     benefit = _extract_section_after_header(
         out,
-        r"^💡\s*Что это дает\s*[:：]?\s*",
+        r"^💡\s*Что это да[её]т\s*[:：]?\s*",
         [r"^Источник\s*:", r"^🔗", r"^#"],
     )
     if not benefit:

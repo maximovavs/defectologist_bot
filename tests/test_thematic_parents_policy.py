@@ -59,6 +59,53 @@ class ThematicParentsPolicyTest(unittest.TestCase):
         bilingual = valid.replace("🧭 Тема: Звукопроизношение", "🌍 Что помогает в двуязычной семье:")
         self.assertEqual(_validate_thematic_output(bilingual, evidence, "speech_sounds")[1], "thematic_topic_mismatch")
 
+    def test_thematic_benefit_requires_observable_child_result(self):
+        valid = (
+            "Игра со звуками\n"
+            "👶 Возраст: 4–5 лет\n"
+            "🧭 Тема: Звукопроизношение\n"
+            "🏠 Что можно попробовать дома:\n"
+            "1. Назовите два звука. 2. Попросите ребёнка выбрать услышанный звук.\n"
+            "💡 Что это дает: ребёнок замечает положение губ во время произнесения.\n"
+        )
+        evidence = "Звукопроизношение и артикуляция. Ребёнок слушает и различает звуки речи."
+        for phrase in (
+            "ребёнок повторяет целевой звук в слогах",
+            "ребёнок различает два похожих звука",
+            "ребёнок выбирает нужную картинку",
+            "ребёнок замечает положение губ",
+        ):
+            with self.subTest(phrase=phrase):
+                candidate = valid.replace("ребёнок замечает положение губ во время произнесения", phrase)
+                ok, reason = _validate_thematic_output(candidate, evidence, "speech_sounds")
+                self.assertTrue(ok, reason)
+
+        for phrase in (
+            "ребёнок удерживает внимание",
+            "улучшает внимание",
+            "связывает звук с конкретным образом",
+            "укрепляет артикуляционный аппарат",
+            "активирует речевые центры",
+            "стимулирует речевое развитие",
+            "формирует нейронные связи",
+        ):
+            with self.subTest(phrase=phrase):
+                candidate = valid.replace("ребёнок замечает положение губ во время произнесения", phrase)
+                ok, reason = _validate_thematic_output(candidate, evidence, "speech_sounds")
+                self.assertFalse(ok)
+                self.assertEqual(reason, "thematic_nonobservable_benefit")
+
+        empty = valid.replace("ребёнок замечает положение губ во время произнесения", "")
+        self.assertEqual(
+            _validate_thematic_output(empty, evidence, "speech_sounds")[1],
+            "thematic_nonobservable_benefit",
+        )
+
+    def test_thematic_repair_covers_observable_benefit_reason(self):
+        prompt = build_thematic_parents_repair_prompt("BASE", "thematic_nonobservable_benefit")
+        self.assertIn("непосредственно увидеть или услышать", prompt)
+        self.assertIn("Не пиши о развитии внимания", prompt)
+
     def test_thursday_effective_format_and_engagement(self):
         source = inspect.getsource(publisher.amain)
         self.assertIn('"bilingual_parents"', source)

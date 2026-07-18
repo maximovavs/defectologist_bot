@@ -235,6 +235,8 @@ SOFT_SKIP_REASONS = {
     "thematic_missing_home_action",
     "thematic_unsupported_mechanism",
     "thematic_missing_heading",
+    "thematic_nonobservable_benefit",
+    "parent_risky_oral_manipulation",
     "missing_parent_safety_note",
     "blanket_reassurance",
     "misleading_politeness_framing",
@@ -271,6 +273,8 @@ VALIDATION_SKIP_REASONS = {
     "thematic_missing_home_action",
     "thematic_unsupported_mechanism",
     "thematic_missing_heading",
+    "thematic_nonobservable_benefit",
+    "parent_risky_oral_manipulation",
     "pro_insufficient_evidence",
     "pro_empty",
     "pro_title_too_long",
@@ -600,7 +604,31 @@ def _extract_age_value(lines: List[str]) -> str:
     return ""
 
 
+AGE_TAG_ALIASES = {
+    "дошкольный": "#для_дошкольников",
+    "дошкольный возраст": "#для_дошкольников",
+    "дошкольники": "#для_дошкольников",
+    "для дошкольников": "#для_дошкольников",
+    "младший дошкольный возраст": "#для_младших_дошкольников",
+    "младшие дошкольники": "#для_младших_дошкольников",
+    "старший дошкольный возраст": "#для_старших_дошкольников",
+    "старшие дошкольники": "#для_старших_дошкольников",
+    "школьный возраст": "#для_школьников",
+    "школьники": "#для_школьников",
+    "ранний возраст": "#для_детей_раннего_возраста",
+}
+
+
+def _normalize_age_alias_value(age_value: str) -> str:
+    value = norm_space(age_value).strip().lower().replace("ё", "е")
+    return re.sub(r"[\s.,;:!?…]+$", "", value).strip()
+
+
 def _build_age_tag(age_value: str) -> str:
+    alias = AGE_TAG_ALIASES.get(_normalize_age_alias_value(age_value))
+    if alias:
+        return alias
+
     value = _slugify_tag_body(age_value)
     if not value:
         return ""

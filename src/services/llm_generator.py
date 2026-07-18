@@ -665,6 +665,72 @@ def _has_parent_specific_risk(text_or_lines: str | List[str]) -> bool:
     return False
 
 
+PARENT_ORAL_SAFETY_FORMATS = {
+    "tip_of_day",
+    "exercise_steps",
+    "games_vocab",
+    "myth_fact",
+    "bilingual_parents",
+    "thematic_parents",
+    "question_week",
+    "age_norms",
+}
+
+PARENT_ORAL_ACTION_RE = re.compile(
+    r"(?<!\w)\w*(?:фиксир|удержива|зажим|зажм|прижим|приж|нажим|нажм|надав|дав|тян|оттяг|"
+    r"смещ|смест|сдвиг|двиг|массир|размин)\w*\b",
+    re.IGNORECASE,
+)
+PARENT_ORAL_TARGET_RE = re.compile(
+    r"\b(?:язык\w*|губ\w*|челюст\w*|щёк\w*|щек\w*|нёб\w*|неб\w*|десн\w*|рот\w*)\b",
+    re.IGNORECASE,
+)
+PARENT_ORAL_NEGATION_RE = re.compile(
+    r"(?:\bне\b|\bнельзя\b|\bне\s+следует\b|\bне\s+пытайтесь\b|\bизбегайте\b|\bзапрещено\b)"
+    r"(?:\s+\w+){0,5}\s*$",
+    re.IGNORECASE,
+)
+PARENT_ORAL_OBSERVATION_RE = re.compile(
+    r"(?:\bнаблюда\w*\s+за\b|\bобратите\s+внимание\s+на\b|\bследите\s+за\b)",
+    re.IGNORECASE,
+)
+
+
+def _validate_parent_oral_safety_output(text: str) -> Tuple[bool, str]:
+    """Reject parent instructions that physically manipulate oral structures."""
+    for raw_fragment in re.split(r"[.!?;\n]+", text or ""):
+        fragment = _normalize_scan_text(raw_fragment)
+        if not fragment:
+            continue
+
+        for action_match in PARENT_ORAL_ACTION_RE.finditer(fragment):
+            start = max(0, action_match.start() - 80)
+            end = min(len(fragment), action_match.end() + 80)
+            context = fragment[start:end]
+            if not PARENT_ORAL_TARGET_RE.search(context):
+                continue
+
+            prefix = fragment[: action_match.start()].rstrip()
+            if PARENT_ORAL_NEGATION_RE.search(prefix):
+                continue
+
+            child_self_action = re.search(
+                r"\bреб[её]нок\b(?:\s+\w+){0,3}\s+самостоятельно(?:\s+\w+){0,2}$",
+                prefix,
+                flags=re.IGNORECASE,
+            )
+            if child_self_action:
+                continue
+
+            observation_prefix = fragment[: action_match.start()]
+            if PARENT_ORAL_OBSERVATION_RE.search(observation_prefix):
+                continue
+
+            return False, "parent_risky_oral_manipulation"
+
+    return True, "ok"
+
+
 def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
     blob = _normalize_scan_text(text)
     blanket = _contains_any_fragment(blob, BLANKET_REASSURANCE)
@@ -729,6 +795,22 @@ def _validate_bilingual_output(text: str, evidence_text: str = "") -> Tuple[bool
     return True, "ok"
 
 
+THEMATIC_OBSERVABLE_BENEFIT_RE = re.compile(
+    r"\b(?:повторя\w*|произнос\w*|называ\w*|выбира\w*|показыва\w*|различа\w*|"
+    r"отвеча\w*|составля\w*|пересказыва\w*|выполня\w*|указывает\w*|сортиру\w*|"
+    r"соединя\w*|наход\w*|замеча\w*|слыш\w*|говор\w*|обраща\w*)\b",
+    re.IGNORECASE,
+)
+THEMATIC_NONOBSERVABLE_BENEFIT_RE = re.compile(
+    r"(?:удержива\w*\s+внимани\w*|улучша\w*\s+внимани\w*|развива\w*\s+мозг\w*|"
+    r"формир\w*\s+нейронн\w*\s+связ\w*|активир\w*\s+речев\w*\s+центр\w*|"
+    r"укрепля\w*\s+артикуляционн\w*\s+аппарат\w*|стимулир\w*\s+речев\w*\s+развити\w*|"
+    r"связыва\w*\s+звук\w*\s+с\s+образ\w*|закрепля\w*\s+правильн\w*\s+произношени\w*|"
+    r"исправля\w*\s+нарушени\w*|нормализ\w*\s+реч\w*)",
+    re.IGNORECASE,
+)
+
+
 def _validate_thematic_output(
     text: str,
     evidence_text: str = "",
@@ -763,6 +845,18 @@ def _validate_thematic_output(
         return False, "thematic_missing_home_action"
     if not topic_matches_text(out, topic_id) and topic_id:
         return False, "thematic_topic_mismatch"
+
+    benefit = _extract_section_after_header(
+        out,
+        r"^💡\s*Что это дает\s*[:：]?\s*",
+        [r"^Источник\s*:", r"^🔗", r"^#"],
+    )
+    if not benefit:
+        return False, "thematic_nonobservable_benefit"
+    if THEMATIC_NONOBSERVABLE_BENEFIT_RE.search(_normalize_scan_text(benefit)):
+        return False, "thematic_nonobservable_benefit"
+    if not THEMATIC_OBSERVABLE_BENEFIT_RE.search(_normalize_scan_text(benefit)):
+        return False, "thematic_nonobservable_benefit"
 
     grounded, _reason = validate_evidence_grounding(out, evidence_text, "thematic_parents")
     if not grounded:
@@ -1158,6 +1252,11 @@ def _validate_output(
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
     aud = (audience or "").strip().lower()
+
+    if rf in PARENT_ORAL_SAFETY_FORMATS:
+        ok, reason = _validate_parent_oral_safety_output(out)
+        if not ok:
+            return False, reason
 
     ok, reason = _validate_politeness_title(out)
     if not ok:
@@ -1777,6 +1876,7 @@ def _build_generation_prompt_raw(
             + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор спокойных практических материалов для родителей.\n"
             + "Используй только конкретные домашние действия из EVIDENCE. Не добавляй диагнозы, обещания результата, механизмы, таймеры или материалы, которых нет в источнике.\n"
             + "Не используй bilingual heading, отдельный блок о двух языках или рекомендации про русский язык, если EVIDENCE прямо не относится к двуязычию.\n"
+            + "Заголовок должен естественно звучать по-русски. Предпочитай: «игра со звуком», «сказка со звуками», «слова со звуком», «как услышать звук», «игра на различение звуков». Избегай искусственных конструкций: «сказка для звуков», «упражнение для букв», «игра для речи», если можно назвать конкретный навык.\n"
             + "\nШАБЛОН:\n"
             + template
             + "\nEVIDENCE:\n"
@@ -2534,6 +2634,7 @@ BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
     "missing_parent_safety_note",
     "blanket_reassurance",
     "misleading_politeness_framing",
+    "parent_risky_oral_manipulation",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
     "bilingual_false_causality",
@@ -2543,6 +2644,20 @@ BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
 BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS = (
     "banned_phrase",
     "unsupported_mechanism_claim",
+)
+
+PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION = (
+    "Не предлагай взрослому физически фиксировать, удерживать, прижимать, тянуть, смещать или массировать язык, губы, "
+    "челюсть, щёки, нёбо или дёсны ребёнка. Разрешены только: словесная модель взрослого; показ собственного движения "
+    "взрослым; самостоятельное повторение ребёнком; наблюдение за положением губ и языка; зеркало, только если оно прямо "
+    "присутствует в EVIDENCE. Не добавляй зеркало, инструменты или материалы, отсутствующие в EVIDENCE."
+)
+
+THEMATIC_OBSERVABLE_BENEFIT_REPAIR_INSTRUCTION = (
+    "В блоке «💡 Что это дает» опиши только то, что взрослый может непосредственно увидеть или услышать. "
+    "Используй наблюдаемый результат: ребёнок повторяет, произносит, называет, различает, выбирает, показывает, "
+    "отвечает или составляет фразу. Не пиши о развитии внимания, связывании звука с образом, укреплении органов речи, "
+    "активации мозга, закреплении результата или других внутренних механизмах."
 )
 
 
@@ -2582,6 +2697,11 @@ def build_bilingual_parents_repair_prompt(
         + "Не представляй билингвизм, два языка или переключение языков как причину задержки речи или речевого расстройства. "
         + "Не придумывай механизмы, диагнозы или терапевтические эффекты. "
         + "Сохрани блок 💡 Что это дает:. "
+        + (
+            "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
+            if reason == "parent_risky_oral_manipulation"
+            else ""
+        )
         + "Не используй Markdown, placeholders или служебные маркеры."
     )
 
@@ -2594,10 +2714,12 @@ THEMATIC_PARENTS_REPAIR_EXACT_REASONS = {
     "missing_parent_safety_note",
     "blanket_reassurance",
     "misleading_politeness_framing",
+    "parent_risky_oral_manipulation",
     "thematic_topic_mismatch",
     "thematic_missing_home_action",
     "thematic_unsupported_mechanism",
     "thematic_missing_heading",
+    "thematic_nonobservable_benefit",
 }
 
 
@@ -2626,6 +2748,16 @@ def build_thematic_parents_repair_prompt(
         + "В домашнем блоке дай 2–4 конкретных действия, основанных только на EVIDENCE. "
         + "Не добавляй диагнозы, обещания результата, неподтверждённые механизмы, материалы или таймеры. "
         + "Не используй 🌍 Что помогает в двуязычной семье и не добавляй блок о двух языках, если тема не bilingualism. "
+        + (
+            "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
+            if reason == "parent_risky_oral_manipulation"
+            else ""
+        )
+        + (
+            "\n" + THEMATIC_OBSERVABLE_BENEFIT_REPAIR_INSTRUCTION
+            if reason in {"thematic_nonobservable_benefit", "parent_risky_oral_manipulation"}
+            else ""
+        )
         + "Не используй Markdown, placeholders или служебные маркеры."
     )
 
@@ -2745,6 +2877,9 @@ async def generate_post_plain_from_evidence_async(
                 "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
                 "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
             )
+
+        if reason == "parent_risky_oral_manipulation":
+            repair += "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
 
         if dk == "FR" or rf == "question_week":
             repair += (

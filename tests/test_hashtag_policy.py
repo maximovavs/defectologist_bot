@@ -9,10 +9,27 @@ sys.modules.setdefault(
     types.SimpleNamespace(SentenceTransformer=object, util=types.SimpleNamespace()),
 )
 
-from src.publisher.run_publisher import finalize_plain_post_for_publication
+from src.publisher.run_publisher import _build_age_tag, finalize_plain_post_for_publication
 
 
 class HashtagPolicyTest(unittest.TestCase):
+    def test_age_aliases_are_normalized_before_slug_fallback(self):
+        cases = {
+            "дошкольный": "#для_дошкольников",
+            "Дошкольный возраст": "#для_дошкольников",
+            "дошкольники": "#для_дошкольников",
+            "младший дошкольный возраст": "#для_младших_дошкольников",
+            "старший дошкольный возраст": "#для_старших_дошкольников",
+            "школьный возраст": "#для_школьников",
+            "ранний возраст": "#для_детей_раннего_возраста",
+        }
+        for age, expected in cases.items():
+            with self.subTest(age=age):
+                self.assertEqual(_build_age_tag(age), expected)
+
+        self.assertEqual(_build_age_tag("  Дошкольный   возраст!  "), "#для_дошкольников")
+        self.assertEqual(_build_age_tag("5–6 лет"), "#для_детей_5_6_лет")
+
     def test_uses_controlled_thematic_tag_only(self):
         plain = (
             "Попросите двумя словами\n\n"

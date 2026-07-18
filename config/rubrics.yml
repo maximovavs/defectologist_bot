@@ -4,7 +4,7 @@ channel:
   locale: "ru-RU"
   timezone: "Asia/Nicosia"
   disclaimer: "Информация носит образовательный характер и не заменяет консультация специалиста."
-  hashtags: ["#логопед", "#речь", "#билингвизм", "#развитиеРечи"]
+  hashtags: ["#логопед", "#речь", "#развитиеРечи"]
 
 branding:
   card_theme: "kids"
@@ -103,6 +103,12 @@ audiences:
           - "asha_practice_portal_multilingual_service_delivery"
           - "asha_public_speech_sound_disorders"
           - "asha_developmental_milestones"
+          - "healthychildren_language_development"
+          - "hanen_parent_tips"
+          - "handyhandouts_parent_tips"
+          - "nationwidechildrens_speech_language"
+          - "actionforchildren_communication_milestones"
+          - "gosh_speech_language_12_24_months"
           - "colorin_bilingual_parents"
           - "cal_dual_language_home_support"
           - "carla_family_resources"
@@ -116,7 +122,7 @@ audiences:
         media: ["image_card"]
 
       - id: bilingual_corner
-        title: "Русский за границей"
+        title: "Речь в разных ситуациях"
         kind: bilingual
         cadence: "WEEKLY"
         byweekday: ["TH"]
@@ -125,9 +131,23 @@ audiences:
           - "asha_practice_portal_multilingual_service_delivery"
           - "colorin_bilingual_parents"
           - "hanen_bilingual_myths"
+          - "healthychildren_bilingual_myths"
           - "habilnet_bilingual_parents"
           - "cal_dual_language_home_support"
           - "docdeti_bilingualism"
+          - "raisingchildren_bilingual"
+          - "zerotothree_dual_language"
+          - "asha_public_speech_sound_disorders"
+          - "asha_developmental_milestones"
+          - "healthychildren_language_development"
+          - "hanen_parent_tips"
+          - "nationwidechildrens_speech_language"
+          - "naeyc_family_communication"
+          - "actionforchildren_communication_milestones"
+          - "gosh_speech_language_12_24_months"
+          - "kidskey_speech_games"
+          - "parents_language_activities"
+          - "parents_toddler_language_boost"
           - "logoportal_latest"
         format: "bilingual_parents"
         media: ["image_card"]

@@ -57,6 +57,15 @@ from src.services.engagement_builder import (
     append_engagement_footer,
     build_engagement_spec,
 )
+from src.services.topic_policy import (
+    RUBRIC_TOPIC_ROTATION,
+    TOPIC_HASHTAGS,
+    TOPICS,
+    detect_evidence_topics,
+    rank_candidates_for_topic,
+    select_topic_plan,
+    topic_matches_text,
+)
 from src.services.visual_pipeline import build_post_visual
 
 
@@ -83,6 +92,7 @@ elif "POST_POLLS_ENABLED" in os.environ:
     POST_ENGAGEMENT_MODE = "polls_only" if POST_POLLS_ENABLED else "off"
 else:
     POST_ENGAGEMENT_MODE = "auto"
+POST_TOPIC_ID = os.getenv("POST_TOPIC_ID", "auto").strip().lower() or "auto"
 POLL_OPEN_PERIOD_SECONDS = int(os.getenv("POLL_OPEN_PERIOD_SECONDS", "86400"))
 POLL_DISABLE_NOTIFICATION = os.getenv("POLL_DISABLE_NOTIFICATION", "1").strip().lower() in (
     "1",
@@ -173,7 +183,7 @@ RUBRIC_TAGS_BY_DAY = {
     "MO": "#совет_логопеда",
     "TU": "#играем_и_говорим",
     "WE": "#миф_факт",
-    "TH": "#русский_за_границей",
+    "TH": "#речь_в_разных_ситуациях",
     "FR": "#вопрос_недели",
     "SA": "#методическая_копилка",
     "SU": "#возрастная_норма",
@@ -221,6 +231,10 @@ SOFT_SKIP_REASONS = {
     "bilingual_missing_family_action",
     "bilingual_false_causality",
     "bilingual_unsupported_mechanism",
+    "thematic_topic_mismatch",
+    "thematic_missing_home_action",
+    "thematic_unsupported_mechanism",
+    "thematic_missing_heading",
     "missing_parent_safety_note",
     "blanket_reassurance",
     "misleading_politeness_framing",
@@ -253,6 +267,10 @@ VALIDATION_SKIP_REASONS = {
     "bilingual_missing_family_action",
     "bilingual_false_causality",
     "bilingual_unsupported_mechanism",
+    "thematic_topic_mismatch",
+    "thematic_missing_home_action",
+    "thematic_unsupported_mechanism",
+    "thematic_missing_heading",
     "pro_insufficient_evidence",
     "pro_empty",
     "pro_title_too_long",
@@ -452,6 +470,7 @@ def _build_posted_zero_alert_plain(
     state_scope: str,
     db_name: str,
     attempted_rubrics: List[str],
+    topic_preference: str = "auto",
 ) -> str:
     soft_total = sum(soft_skip_reasons.values())
     hard_total = sum(hard_skip_reasons.values())
@@ -464,6 +483,7 @@ def _build_posted_zero_alert_plain(
         f"AUDIENCE={audience} | PROVIDER={provider} | TARGET_CHANNEL={TARGET_CHANNEL}",
         f"STATE_SCOPE={state_scope} | History DB={db_name}",
         f"Rubrics attempted: {', '.join(attempted_rubrics) or '—'}",
+        f"Topic preference: {topic_preference or 'auto'}",
         f"Soft skips: {soft_total} | Hard skips: {hard_total}",
     ]
 
@@ -635,10 +655,18 @@ CONTROLLED_THEMATIC_TAGS: List[tuple[List[str], str]] = [
 ]
 
 
-def _controlled_thematic_tag(body_text: str, day_key: str = "", rubric_id: str = "") -> str:
+def _controlled_thematic_tag(
+    body_text: str,
+    day_key: str = "",
+    rubric_id: str = "",
+    topic_id: str = "",
+) -> str:
     blob = (body_text or "").lower().replace("ё", "е")
     dk = (day_key or "").strip().upper()
     rubric = (rubric_id or "").strip().lower()
+    effective_topic = (topic_id or "").strip().lower()
+    if effective_topic in TOPIC_HASHTAGS and topic_matches_text(body_text, effective_topic):
+        return TOPIC_HASHTAGS[effective_topic]
     bilingual_markers = ["билингв", "двуязыч", "два языка", "двух язык", "домашний язык"]
     if (rubric in {"bilingual_corner", "bilingual_parents"} or dk == "TH") and any(
         marker in blob for marker in bilingual_markers
@@ -655,8 +683,14 @@ def _filter_relevant_thematic_tags(
     body_text: str,
     day_key: str = "",
     rubric_id: str = "",
+    topic_id: str = "",
 ) -> List[str]:
-    controlled = _controlled_thematic_tag(body_text, day_key=day_key, rubric_id=rubric_id)
+    controlled = _controlled_thematic_tag(
+        body_text,
+        day_key=day_key,
+        rubric_id=rubric_id,
+        topic_id=topic_id,
+    )
     return [controlled] if controlled else []
 
 
@@ -775,6 +809,7 @@ def finalize_plain_post_for_publication(
     source_url: str,
     max_chars: int,
     rubric_id: str = "",
+    topic_id: str = "",
 ) -> str:
     raw_lines = (plain_text or "").replace("\r\n", "\n").split("\n")
     while raw_lines and not raw_lines[-1].strip():
@@ -790,7 +825,13 @@ def finalize_plain_post_for_publication(
     age_tag = _build_age_tag(age_value)
 
     body_text = "\n".join(body_lines).strip()
-    thematic_tags = _filter_relevant_thematic_tags(thematic_tags, body_text, day_key=day_key, rubric_id=rubric_id)
+    thematic_tags = _filter_relevant_thematic_tags(
+        thematic_tags,
+        body_text,
+        day_key=day_key,
+        rubric_id=rubric_id,
+        topic_id=topic_id,
+    )
 
     final_tags: List[str] = []
     for tag in [rubric_tag, age_tag, *thematic_tags]:
@@ -1233,6 +1274,19 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     return out
 
 
+def load_topic_source_ids() -> Dict[str, set[str]]:
+    raw = load_yaml(CFG_DIR / "topics.yml").get("topics", {}) or {}
+    return {
+        str(topic_id).strip().lower(): {
+            str(source_id).strip()
+            for source_id in (topic_cfg.get("source_ids", []) or [])
+            if str(source_id).strip()
+        }
+        for topic_id, topic_cfg in raw.items()
+        if isinstance(topic_cfg, dict)
+    }
+
+
 def render_plain_to_telegram_html(plain_text: str) -> str:
     lines = (plain_text or "").splitlines()
     if not lines:
@@ -1444,6 +1498,26 @@ def _write_dry_run_engagement(output_dir: Path, file_stem: str, spec: Engagement
     return path
 
 
+def _write_dry_run_topic(
+    output_dir: Path,
+    file_stem: str,
+    preferred_plan: Any,
+    effective_topic_id: str,
+    effective_topic_title: str,
+) -> Path:
+    path = output_dir / f"{file_stem}.topic.json"
+    payload = {
+        "preferred_topic_id": preferred_plan.preferred_topic_id,
+        "preferred_topic_title": preferred_plan.preferred_topic_title,
+        "effective_topic_id": effective_topic_id,
+        "effective_topic_title": effective_topic_title,
+        "override_used": preferred_plan.override_used,
+        "fallback_used": not effective_topic_id or effective_topic_id != preferred_plan.preferred_topic_id,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def _handle_post_engagement(
     *,
     spec: EngagementSpec,
@@ -1575,7 +1649,8 @@ async def amain() -> None:
     print(
         f"[START] Publisher started at {now.isoformat()} "
         f"target_channel={TARGET_CHANNEL} state_scope={state_scope} db={db_path.name} "
-        f"rubric_id={selected_rubric_id or '(auto)'} reset_test_db={RESET_TEST_DB}",
+        f"rubric_id={selected_rubric_id or '(auto)'} topic_override={POST_TOPIC_ID} "
+        f"reset_test_db={RESET_TEST_DB}",
         flush=True,
     )
 
@@ -1585,6 +1660,11 @@ async def amain() -> None:
     disclaimer = channel_cfg.get("disclaimer", "") or ""
     hashtags = channel_cfg.get("hashtags", []) or []
     sources = load_sources()
+    registered_source_ids = set(sources)
+    topic_source_ids = {
+        topic_id: source_ids & registered_source_ids
+        for topic_id, source_ids in load_topic_source_ids().items()
+    }
     store = PublicationStore(db_path)
     recent_since_iso = _start_recent_window(now).isoformat()
 
@@ -1640,6 +1720,22 @@ async def amain() -> None:
                 if not is_due(rubric, now):
                     continue
 
+            try:
+                topic_plan = select_topic_plan(rubric_id, week_key, POST_TOPIC_ID)
+            except ValueError as e:
+                print(
+                    f"[TOPIC][WARN] invalid_override rubric={rubric_id} override={POST_TOPIC_ID} "
+                    f"err={e}; using auto",
+                    flush=True,
+                )
+                topic_plan = select_topic_plan(rubric_id, week_key, "auto")
+            print(
+                f"[TOPIC] rubric={rubric_id} week={week_key} "
+                f"preferred={topic_plan.preferred_topic_id or '(none)'} "
+                f"override={topic_plan.override_used}",
+                flush=True,
+            )
+
             if rubric_id not in attempted_rubrics:
                 attempted_rubrics.append(rubric_id)
 
@@ -1685,6 +1781,11 @@ async def amain() -> None:
             seed = int(hashlib.sha1(f"{now.date()}|{rubric_id}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(seed)
             all_items = order_candidates_for_rubric(rubric_id, all_items, rng)
+            all_items = rank_candidates_for_topic(
+                all_items,
+                topic_plan.preferred_topic_id,
+                topic_source_ids.get(topic_plan.preferred_topic_id, set()),
+            )
 
             print(
                 f"[RUBRIC] rubric={rubric_id} audience={aud} candidates_total={len(all_items)} max_scan={MAX_CANDIDATES_PER_RUBRIC}",
@@ -1797,6 +1898,39 @@ async def amain() -> None:
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                         break
                     continue
+
+                detected_topic_ids = detect_evidence_topics(evidence)
+                effective_topic_id = ""
+                effective_topic_title = ""
+                preferred_topic_id = topic_plan.preferred_topic_id
+                allowed_topic_ids = RUBRIC_TOPIC_ROTATION.get(rubric_id.lower(), ())
+                if preferred_topic_id and preferred_topic_id in detected_topic_ids:
+                    effective_topic_id = preferred_topic_id
+                    effective_topic_title = TOPICS[effective_topic_id]
+                    print(
+                        f"[TOPIC][MATCH] rubric={rubric_id} source={candidate_source_id} "
+                        f"preferred={preferred_topic_id} effective={effective_topic_id}",
+                        flush=True,
+                    )
+                else:
+                    fallback_topic = next(
+                        (topic_id for topic_id in allowed_topic_ids if topic_id in detected_topic_ids),
+                        "",
+                    )
+                    if fallback_topic:
+                        effective_topic_id = fallback_topic
+                        effective_topic_title = TOPICS[fallback_topic]
+                        print(
+                            f"[TOPIC][FALLBACK] rubric={rubric_id} source={candidate_source_id} "
+                            f"preferred={preferred_topic_id or '(none)'} effective={fallback_topic}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[TOPIC][UNDETECTED] rubric={rubric_id} source={candidate_source_id} "
+                            f"preferred={preferred_topic_id or '(none)'}",
+                            flush=True,
+                        )
 
                 if rubric_id == "age_norms" and not _is_age_norms_content_fit(evidence):
                     kind = note("rubric_topic_mismatch_source", canon)
@@ -1913,6 +2047,14 @@ async def amain() -> None:
 
                 sd = safe_domain(canon) or safe_domain(url) or "источник"
 
+                llm_rubric_format = rf
+                if rubric_id.lower() == "bilingual_corner":
+                    llm_rubric_format = (
+                        "bilingual_parents"
+                        if effective_topic_id == "bilingualism"
+                        else "thematic_parents"
+                    )
+
                 pro_evidence_prevalidated = False
                 if rf == "pro_friendly":
                     pro_evidence_ok, pro_evidence_reason = validate_pro_evidence_for_generation(evidence)
@@ -1936,7 +2078,7 @@ async def amain() -> None:
                     plain_raw, ok, llm_note = await asyncio.wait_for(
                         generate_post_plain_from_evidence_async(
                             rubric_title=rubric_title,
-                            rubric_format=rf,
+                            rubric_format=llm_rubric_format,
                             audience=aud,
                             title_suffix=title_suffix,
                             source_domain=sd,
@@ -1950,6 +2092,8 @@ async def amain() -> None:
                             max_chars=POST_MAX_CHARS,
                             day_key=effective_day,
                             evidence_prevalidated=pro_evidence_prevalidated,
+                            topic_id=effective_topic_id,
+                            topic_title=effective_topic_title,
                         ),
                         timeout=MAX_LLM_SECONDS_PER_CANDIDATE,
                     )
@@ -2010,6 +2154,7 @@ async def amain() -> None:
                     source_url=canon,
                     max_chars=POST_MAX_CHARS,
                     rubric_id=rubric_id,
+                    topic_id=effective_topic_id,
                 )
 
                 if not plain or _looks_incomplete_final_body(_body_without_footer(plain)):
@@ -2235,6 +2380,7 @@ async def amain() -> None:
                         canonical_url=canon,
                         date_key=now.date().isoformat(),
                         policy_mode=POST_ENGAGEMENT_MODE,
+                        topic_id=effective_topic_id,
                     )
                 except Exception as e:
                     print(
@@ -2303,6 +2449,13 @@ async def amain() -> None:
                     (out / f"{dry_run_stem}{ext}").write_bytes(visual_buffer.getvalue())
                     (out / f"{dry_run_stem}.txt").write_text(display_plain, encoding="utf-8")
                     _write_dry_run_engagement(out, dry_run_stem, engagement_spec)
+                    _write_dry_run_topic(
+                        out,
+                        dry_run_stem,
+                        topic_plan,
+                        effective_topic_id,
+                        effective_topic_title,
+                    )
                 else:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:
@@ -2347,7 +2500,11 @@ async def amain() -> None:
                 seen_evidence_hashes_this_run.add(evidence_hash)
 
                 posted += 1
-                print(f"[POSTED] rubric={rubric_id} audience={aud} url={canon}", flush=True)
+                print(
+                    f"[POSTED] rubric={rubric_id} audience={aud} "
+                    f"topic={effective_topic_id or '(none)'} url={canon}",
+                    flush=True,
+                )
                 _handle_post_engagement(
                     spec=engagement_spec,
                     rubric_id=rubric_id,
@@ -2384,6 +2541,7 @@ async def amain() -> None:
                         state_scope=state_scope,
                         db_name=db_path.name,
                         attempted_rubrics=attempted_rubrics,
+                        topic_preference=POST_TOPIC_ID,
                     ),
                 )
             except Exception as e:

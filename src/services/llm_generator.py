@@ -48,6 +48,7 @@ from src.services.visual_pipeline import (
     _validate_compiled_visual_prompt,
     build_visual_role_rule,
 )
+from src.services.topic_policy import detect_evidence_topics, topic_matches_text
 
 
 # -----------------------
@@ -728,6 +729,57 @@ def _validate_bilingual_output(text: str, evidence_text: str = "") -> Tuple[bool
     return True, "ok"
 
 
+def _validate_thematic_output(
+    text: str,
+    evidence_text: str = "",
+    topic_id: str = "",
+) -> Tuple[bool, str]:
+    out = (text or "").strip()
+    if topic_id != "bilingualism" and re.search(
+        r"🌍\s*что помогает в двуязычной семье|двуязычной семье|русский язык за границей",
+        out,
+        flags=re.IGNORECASE,
+    ):
+        return False, "thematic_topic_mismatch"
+    if not re.search(r"^🧭\s*Тема\s*[:：].+\S", out, flags=re.IGNORECASE | re.MULTILINE):
+        return False, "thematic_missing_heading"
+    if not re.search(r"^🏠\s*Что можно попробовать дома\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
+        return False, "thematic_missing_heading"
+    if not re.search(r"^💡\s*Что это да[её]т\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
+        return False, "thematic_missing_heading"
+
+    if topic_id and topic_id not in detect_evidence_topics(evidence_text):
+        return False, "thematic_topic_mismatch"
+
+    actions = _extract_section_after_header(
+        out,
+        r"^🏠\s*Что можно попробовать дома\s*[:：]?\s*",
+        [r"^💡", r"^Источник\s*:", r"^🔗", r"^#"],
+    )
+    numbered = re.findall(r"(?:^|\s)([1-4])[).]\s+", actions)
+    sentences = [part.strip() for part in re.split(r"[.!?]\s+", actions) if part.strip()]
+    action_count = len(set(numbered)) if numbered else len(sentences)
+    if not 2 <= action_count <= 4:
+        return False, "thematic_missing_home_action"
+    if not topic_matches_text(out, topic_id) and topic_id:
+        return False, "thematic_topic_mismatch"
+
+    grounded, _reason = validate_evidence_grounding(out, evidence_text, "thematic_parents")
+    if not grounded:
+        return False, "thematic_unsupported_mechanism"
+    return True, "ok"
+
+
+def _topic_instruction(topic_id: str = "", topic_title: str = "") -> str:
+    if not (topic_id or "").strip():
+        return ""
+    return (
+        f"\nТематический фокус этого поста: {(topic_title or topic_id).strip()}.\n"
+        "Используй только сведения из EVIDENCE, которые относятся к этой теме.\n"
+        "Не добавляй факты, рекомендации, механизмы или обещания, которых нет в источнике.\n"
+    )
+
+
 def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -1097,6 +1149,7 @@ def _validate_output(
     rubric_format: str = "",
     audience: str = "",
     evidence_text: str = "",
+    topic_id: str = "",
 ) -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -1138,12 +1191,17 @@ def _validate_output(
 
     grounded, grounding_reason = validate_evidence_grounding(out, evidence_text, rf)
     if not grounded:
-        if dk == "TH" or rf == "bilingual_parents":
+        if dk == "TH" or rf in {"bilingual_parents", "thematic_parents"}:
+            if rf == "thematic_parents":
+                return False, "thematic_unsupported_mechanism"
             return False, "bilingual_unsupported_mechanism"
         return False, grounding_reason
 
     if dk == "MO" or rf == "tip_of_day":
         return _validate_tip_of_day_output(out)
+
+    if rf == "thematic_parents":
+        return _validate_thematic_output(out, evidence_text, topic_id=topic_id)
 
     if dk == "TH" or rf == "bilingual_parents":
         return _validate_bilingual_output(out, evidence_text)
@@ -1563,12 +1621,15 @@ def _build_generation_prompt_raw(
     hashtags: List[str],
     max_chars: int,
     evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
 ) -> str:
     aud = (audience or "parents").strip().lower()
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     rules = _common_rules(max_chars, allow_numbered_steps=is_pro_format)
+    rules += _topic_instruction(topic_id, topic_title)
     if evidence_prevalidated:
         rules = _remove_general_no_data_rules_for_prevalidated_evidence(rules)
 
@@ -1699,6 +1760,30 @@ def _build_generation_prompt_raw(
             + "\n"
         )
 
+    if rf == "thematic_parents":
+        topic_line = topic_title or "только тему, явно подтверждённую EVIDENCE"
+        template = (
+            "Первая строка — короткий заголовок по конкретной теме статьи.\n"
+            "👶 Возраст: укажи диапазон только если он есть в EVIDENCE\n"
+            f"🧭 Тема: {topic_line}\n\n"
+            "🏠 Что можно попробовать дома:\n"
+            "Дай 2–4 конкретных действия семьи, пронумерованных 1., 2., 3., 4. только при наличии в EVIDENCE.\n\n"
+            "💡 Что это дает: одним предложением назови наблюдаемый навык без обещания результата.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор спокойных практических материалов для родителей.\n"
+            + "Используй только конкретные домашние действия из EVIDENCE. Не добавляй диагнозы, обещания результата, механизмы, таймеры или материалы, которых нет в источнике.\n"
+            + "Не используй bilingual heading, отдельный блок о двух языках или рекомендации про русский язык, если EVIDENCE прямо не относится к двуязычию.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
     if dk == "TH" or rf == "bilingual_parents":
         template = (
             f"{rubric_title} {title_suffix}\n"
@@ -1816,6 +1901,8 @@ def build_generation_prompt(
     hashtags: List[str],
     max_chars: int,
     evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
 ) -> str:
     raw_prompt = _build_generation_prompt_raw(
         day_key=day_key,
@@ -1830,6 +1917,8 @@ def build_generation_prompt(
         hashtags=hashtags,
         max_chars=max_chars,
         evidence_prevalidated=evidence_prevalidated,
+        topic_id=topic_id,
+        topic_title=topic_title,
     )
     return _prepare_generation_prompt(
         raw_prompt,
@@ -2387,6 +2476,8 @@ def build_pro_friendly_repair_prompt(
     base_prompt: str,
     reason: str,
     evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
 ) -> str:
     reason = (reason or "").strip()
     if not _should_repair_pro_friendly_reason(reason):
@@ -2396,6 +2487,7 @@ def build_pro_friendly_repair_prompt(
         safe_base_prompt = _remove_general_no_data_rules_for_prevalidated_evidence(base_prompt or "")
         return (
             safe_base_prompt
+            + _topic_instruction(topic_id, topic_title)
             + "\n\nREPAIR: Evidence already passed pre-validation.\n"
             + f"Validation reason: {reason}.\n"
             + "Select one concrete action and one explicitly named exercise or material from the evidence anchors and evidence.\n"
@@ -2414,6 +2506,7 @@ def build_pro_friendly_repair_prompt(
 
     return (
         base_prompt
+        + _topic_instruction(topic_id, topic_title)
         + "\n\nПОВТОРИ pro_friendly method card. Предыдущий вариант не прошёл строгую валидацию.\n"
         + f"Точная причина валидации: {reason}\n"
         + no_data_note
@@ -2464,6 +2557,8 @@ def build_bilingual_parents_repair_prompt(
     base_prompt: str,
     reason: str,
     previous_output: str = "",
+    topic_id: str = "",
+    topic_title: str = "",
 ) -> str:
     reason = (reason or "").strip()
     if not _should_repair_bilingual_parents_reason(reason):
@@ -2476,6 +2571,7 @@ def build_bilingual_parents_repair_prompt(
     )
     return (
         (base_prompt or "")
+        + _topic_instruction(topic_id, topic_title)
         + previous_note
         + "\n\nПОВТОРИ bilingual_parents пост. Предыдущий вариант не прошёл строгую валидацию.\n"
         + f"Точная причина валидации: {reason}\n"
@@ -2486,6 +2582,50 @@ def build_bilingual_parents_repair_prompt(
         + "Не представляй билингвизм, два языка или переключение языков как причину задержки речи или речевого расстройства. "
         + "Не придумывай механизмы, диагнозы или терапевтические эффекты. "
         + "Сохрани блок 💡 Что это дает:. "
+        + "Не используй Markdown, placeholders или служебные маркеры."
+    )
+
+
+THEMATIC_PARENTS_REPAIR_EXACT_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
+    "missing_parent_safety_note",
+    "blanket_reassurance",
+    "misleading_politeness_framing",
+    "thematic_topic_mismatch",
+    "thematic_missing_home_action",
+    "thematic_unsupported_mechanism",
+    "thematic_missing_heading",
+}
+
+
+def build_thematic_parents_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    previous_output: str = "",
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    reason = (reason or "").strip()
+    if reason not in THEMATIC_PARENTS_REPAIR_EXACT_REASONS and not reason.startswith("banned_phrase:"):
+        return ""
+    previous_note = (
+        "\n\nПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous_output.strip()
+        if previous_output.strip()
+        else ""
+    )
+    return (
+        (base_prompt or "")
+        + _topic_instruction(topic_id, topic_title)
+        + previous_note
+        + "\n\nПОВТОРИ thematic_parents пост. Предыдущий вариант не прошёл строгую валидацию.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + "Сохрани короткий заголовок, 👶 Возраст:, 🧭 Тема:, 🏠 Что можно попробовать дома: и 💡 Что это дает:. "
+        + "В домашнем блоке дай 2–4 конкретных действия, основанных только на EVIDENCE. "
+        + "Не добавляй диагнозы, обещания результата, неподтверждённые механизмы, материалы или таймеры. "
+        + "Не используй 🌍 Что помогает в двуязычной семье и не добавляй блок о двух языках, если тема не bilingualism. "
         + "Не используй Markdown, placeholders или служебные маркеры."
     )
 
@@ -2510,6 +2650,8 @@ async def generate_post_plain_from_evidence_async(
     max_chars: int,
     day_key: Optional[str] = None,
     evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
@@ -2522,6 +2664,7 @@ async def generate_post_plain_from_evidence_async(
 
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     is_bilingual_format = rf == "bilingual_parents"
+    is_thematic_format = rf == "thematic_parents"
 
     prompt = build_generation_prompt(
         day_key=dk,
@@ -2536,6 +2679,8 @@ async def generate_post_plain_from_evidence_async(
         hashtags=hashtags,
         max_chars=max_chars,
         evidence_prevalidated=evidence_prevalidated,
+        topic_id=topic_id,
+        topic_title=topic_title,
     )
 
     def postprocess(s: str) -> str:
@@ -2560,7 +2705,14 @@ async def generate_post_plain_from_evidence_async(
             out_lines and out_lines[0].strip().upper().startswith("НЕТ_ДАННЫХ")
         ):
             return False, "no_data_in_source"
-        return _validate_output(out, day_key=dk, rubric_format=rf, audience=aud, evidence_text=ev)
+        return _validate_output(
+            out,
+            day_key=dk,
+            rubric_format=rf,
+            audience=aud,
+            evidence_text=ev,
+            topic_id=topic_id,
+        )
 
     if prov == "none":
         return "", False, "provider:none"
@@ -2629,12 +2781,24 @@ async def generate_post_plain_from_evidence_async(
                     prompt,
                     reason,
                     evidence_prevalidated=evidence_prevalidated,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
                 )
             elif is_bilingual_format:
                 repair_prompt = build_bilingual_parents_repair_prompt(
                     prompt,
                     reason,
                     previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+            elif is_thematic_format:
+                repair_prompt = build_thematic_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
                 )
             else:
                 repair_prompt = build_generic_repair_prompt(reason)
@@ -2670,6 +2834,8 @@ async def generate_post_plain_from_evidence_async(
                     prompt,
                     reason,
                     evidence_prevalidated=evidence_prevalidated,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
                 )
                 if gemini_repair_prompt:
                     out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
@@ -2683,6 +2849,23 @@ async def generate_post_plain_from_evidence_async(
                     prompt,
                     reason,
                     previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif is_thematic_format:
+                gemini_repair_prompt = build_thematic_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
                 )
                 if gemini_repair_prompt:
                     out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
@@ -2742,6 +2925,8 @@ def generate_post_plain_from_evidence(
     max_chars: int,
     day_key: Optional[str] = None,
     evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
 ) -> Tuple[str, bool, str]:
     try:
         asyncio.get_running_loop()
@@ -2763,6 +2948,8 @@ def generate_post_plain_from_evidence(
                 max_chars=max_chars,
                 day_key=day_key,
                 evidence_prevalidated=evidence_prevalidated,
+                topic_id=topic_id,
+                topic_title=topic_title,
             )
         )
     raise RuntimeError(

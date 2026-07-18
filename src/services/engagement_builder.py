@@ -89,6 +89,12 @@ RUBRIC_FOOTER_TEMPLATES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
+NEUTRAL_THURSDAY_FOOTERS = (
+    "💬 Что из этого вы уже замечали в повседневном общении?",
+    "💬 Какой из предложенных шагов удобнее попробовать дома?",
+    "💬 Какая часть темы оказалась для вас наиболее полезной?",
+)
+
 _UNSAFE_FOOTER_RE = re.compile(
     r"диагноз|диагност|лечени|лечить|терапевт|гарант|нормальн|ненормальн|"
     r"оцен\w*\s+(?:ребёнка|ребенка|ребёнок|ребенок)|проверьте\s+(?:ребёнка|ребенка)|"
@@ -161,6 +167,7 @@ def build_engagement_spec(
     canonical_url: str,
     date_key: str,
     policy_mode: str = "auto",
+    topic_id: str = "",
 ) -> EngagementSpec:
     """Choose a stable, rubric-aware engagement without another model call."""
     normalized_rubric = _normalized_rubric_id(rubric_id)
@@ -186,10 +193,15 @@ def build_engagement_spec(
     if selected_mode == "none":
         return EngagementSpec(kind="none", mode="none")
 
-    templates = RUBRIC_FOOTER_TEMPLATES.get(normalized_rubric, {}).get(
-        selected_mode,
-        FOOTER_TEMPLATES[selected_mode],
-    )
+    if normalized_rubric == "bilingual_corner" and selected_mode == "comment" and (
+        (topic_id or "").strip().lower() != "bilingualism"
+    ):
+        templates = NEUTRAL_THURSDAY_FOOTERS
+    else:
+        templates = RUBRIC_FOOTER_TEMPLATES.get(normalized_rubric, {}).get(
+            selected_mode,
+            FOOTER_TEMPLATES[selected_mode],
+        )
     footer = templates[
         _stable_index(date_key, normalized_rubric, canonical_url, selected_mode, len(templates))
     ]
@@ -229,6 +241,7 @@ __all__ = [
     "EngagementSpec",
     "FOOTER_TEMPLATES",
     "RUBRIC_FOOTER_TEMPLATES",
+    "NEUTRAL_THURSDAY_FOOTERS",
     "append_engagement_footer",
     "build_engagement_spec",
 ]

@@ -1,0 +1,95 @@
+version: 1
+
+topics:
+  early_communication:
+    source_ids:
+      - hanen_parent_tips
+      - nationwidechildrens_speech_language
+      - naeyc_family_communication
+      - actionforchildren_communication_milestones
+      - gosh_speech_language_12_24_months
+      - healthychildren_language_development
+      - asha_developmental_milestones
+      - parents_baby_language_activities
+
+  vocabulary_phrase:
+    source_ids:
+      - hanen_parent_tips
+      - kidskey_speech_games
+      - healthychildren_language_development
+      - parents_language_activities
+      - parents_toddler_language_boost
+      - parents_baby_language_activities
+
+  speech_sounds:
+    source_ids:
+      - asha_public_speech_sound_disorders
+      - handyhandouts_parent_tips
+      - logopedy_articles_latest
+      - logoportal_latest
+      - logorina_latest
+
+  phonemic_awareness:
+    source_ids:
+      - logopedy_articles_latest
+      - logoportal_latest
+      - kidskey_speech_games
+      - asha_public_speech_sound_disorders
+
+  grammar:
+    source_ids:
+      - hanen_parent_tips
+      - kidskey_speech_games
+      - parents_language_activities
+      - logopedy_articles_latest
+      - logoportal_latest
+
+  narrative_speech:
+    source_ids:
+      - naeyc_family_communication
+      - kidskey_speech_games
+      - parents_language_activities
+      - verywell_dramatic_play_language
+      - logopedy_articles_latest
+      - logoportal_latest
+
+  preliteracy:
+    source_ids:
+      - logopedy_articles_latest
+      - logoportal_latest
+      - kidskey_speech_games
+      - naeyc_family_communication
+      - parents_language_activities
+
+  hearing_and_speech:
+    source_ids:
+      - asha_public_speech_sound_disorders
+      - healthychildren_language_development
+      - nationwidechildrens_speech_language
+      - actionforchildren_communication_milestones
+      - gosh_speech_language_12_24_months
+
+  bilingualism:
+    source_ids:
+      - asha_multilingual_public
+      - asha_practice_portal_multilingual_service_delivery
+      - colorin_bilingual_parents
+      - hanen_bilingual_myths
+      - healthychildren_bilingual_myths
+      - habilnet_bilingual_parents
+      - cal_dual_language_home_support
+      - docdeti_bilingualism
+      - raisingchildren_bilingual
+      - zerotothree_dual_language
+
+  everyday_communication:
+    source_ids:
+      - hanen_parent_tips
+      - naeyc_family_communication
+      - fraser_parent_speech_tips
+      - actionforchildren_communication_milestones
+      - parents_language_activities
+      - parents_toddler_language_boost
+      - parents_sensory_play_language
+      - parents_baby_language_activities
+      - verywell_household_objects_play

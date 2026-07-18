@@ -30,6 +30,23 @@ on:
           - "auto"
           - "polls_only"
           - "off"
+      topic_id:
+        description: "Preferred topic: auto or explicit topic ID"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - "auto"
+          - "early_communication"
+          - "vocabulary_phrase"
+          - "speech_sounds"
+          - "phonemic_awareness"
+          - "grammar"
+          - "narrative_speech"
+          - "preliteracy"
+          - "hearing_and_speech"
+          - "bilingualism"
+          - "everyday_communication"
       rubric_id:
         description: "Какую рубрику тестировать"
         required: false
@@ -40,7 +57,7 @@ on:
           - "tip_of_day | Понедельник — Совет логопеда дня"
           - "play_and_speak | Вторник — Играем и говорим"
           - "myth_fact | Среда — Миф / Факт"
-          - "bilingual_corner | Четверг — Русский за границей"
+          - "bilingual_corner | Четверг — Речь в разных ситуациях"
           - "question_week | Пятница — Вопрос недели"
           - "age_norms | Воскресенье — Возрастная норма"
           - "method_piggybank | Суббота — Методическая копилка"
@@ -92,6 +109,7 @@ jobs:
       EXCLUDE_SOURCES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.exclude_sources || '' }}
       RESET_TEST_DB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.reset_test_db || 'no' }}
       POST_ENGAGEMENT_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.engagement_mode || 'auto' }}
+      POST_TOPIC_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.topic_id || 'auto' }}
       POLL_OPEN_PERIOD_SECONDS: "86400"
       POLL_DISABLE_NOTIFICATION: "1"
       STATE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}

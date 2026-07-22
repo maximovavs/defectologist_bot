@@ -676,6 +676,8 @@ PARENT_ORAL_SAFETY_FORMATS = {
     "age_norms",
 }
 
+PARENT_RUSSIAN_PHONEME_FORMATS = set(PARENT_ORAL_SAFETY_FORMATS)
+
 PARENT_ORAL_ACTION_RE = re.compile(
     r"(?<!\w)\w*(?:фиксир|удержива|зажим|зажм|прижим|приж|нажим|нажм|надав|дав|тян|оттяг|"
     r"смещ|смест|сдвиг|двиг|массир|размин)\w*\b",
@@ -727,6 +729,44 @@ def _validate_parent_oral_safety_output(text: str) -> Tuple[bool, str]:
                 continue
 
             return False, "parent_risky_oral_manipulation"
+
+    return True, "ok"
+
+
+def _parent_phoneme_content(text: str) -> str:
+    kept: List[str] = []
+    for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        lowered = line.lower()
+        if not line or lowered.startswith("источник:") or line.startswith("🔗") or line.startswith("#"):
+            continue
+        kept.append(line)
+
+    content = "\n".join(kept)
+    content = re.sub(r"https?://\S+|www\.\S+", " ", content, flags=re.IGNORECASE)
+    content = re.sub(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", " ", content, flags=re.IGNORECASE)
+    return content
+
+
+def _validate_parent_russian_phoneme_notation_output(text: str) -> tuple[bool, str]:
+    content = _parent_phoneme_content(text)
+    if not content:
+        return True, "ok"
+
+    if re.search(r"/\s*[A-Za-z]{1,3}\s*/", content) or re.search(r"\[\s*[A-Za-z]{1,3}\s*\]", content):
+        return False, "parent_ambiguous_latin_phoneme"
+
+    contextual = re.compile(
+        r"\b(?:звук|фонема|буква|произнесите|повторите|назовите)\b"
+        r"(?:\s+звук)?\s+(?:[«\"']\s*)?[A-Za-z]{1,3}(?:\s*[»\"'])?\b",
+        re.IGNORECASE,
+    )
+    if contextual.search(content):
+        return False, "parent_ambiguous_latin_phoneme"
+
+    for token in re.findall(r"[A-Za-zА-Яа-яЁё]+", content):
+        if re.search(r"[A-Za-z]", token) and re.search(r"[А-Яа-яЁё]", token):
+            return False, "parent_ambiguous_latin_phoneme"
 
     return True, "ok"
 
@@ -1258,6 +1298,11 @@ def _validate_output(
         if not ok:
             return False, reason
 
+    if rf in PARENT_RUSSIAN_PHONEME_FORMATS:
+        ok, reason = _validate_parent_russian_phoneme_notation_output(out)
+        if not ok:
+            return False, reason
+
     ok, reason = _validate_politeness_title(out)
     if not ok:
         return False, reason
@@ -1729,6 +1774,8 @@ def _build_generation_prompt_raw(
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     rules = _common_rules(max_chars, allow_numbered_steps=is_pro_format)
     rules += _topic_instruction(topic_id, topic_title)
+    if not is_pro_format and rf in PARENT_RUSSIAN_PHONEME_FORMATS:
+        rules += "\n" + PARENT_RUSSIAN_PHONEME_PROMPT_RULE + "\n"
     if evidence_prevalidated:
         rules = _remove_general_no_data_rules_for_prevalidated_evidence(rules)
 
@@ -2635,6 +2682,7 @@ BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
     "blanket_reassurance",
     "misleading_politeness_framing",
     "parent_risky_oral_manipulation",
+    "parent_ambiguous_latin_phoneme",
     "bilingual_topic_mismatch",
     "bilingual_missing_family_action",
     "bilingual_false_causality",
@@ -2646,11 +2694,26 @@ BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS = (
     "unsupported_mechanism_claim",
 )
 
+PARENT_RUSSIAN_PHONEME_PROMPT_RULE = (
+    "В русскоязычном посте обозначай русские звуки только кириллицей. "
+    "Используй понятную родителям запись: [п], [р], [с], [б]. "
+    "Не используй латинские символы /p/, /r/, /s/, [p], [r], [s] для обозначения русских звуков. "
+    "Не копируй IPA-символ из англоязычного EVIDENCE в русский родительский текст без перевода в однозначную русскую запись. "
+    "Если соответствие нельзя установить уверенно по EVIDENCE и русским примерам слов, убери буквенный символ и опиши упражнение словами. Не угадывай звук."
+)
+
 PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION = (
     "Не предлагай взрослому физически фиксировать, удерживать, прижимать, тянуть, смещать или массировать язык, губы, "
     "челюсть, щёки, нёбо или дёсны ребёнка. Разрешены только: словесная модель взрослого; показ собственного движения "
     "взрослым; самостоятельное повторение ребёнком; наблюдение за положением губ и языка; зеркало, только если оно прямо "
     "присутствует в EVIDENCE. Не добавляй зеркало, инструменты или материалы, отсутствующие в EVIDENCE."
+)
+
+PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION = (
+    "\u0423\u0434\u0430\u043b\u0438 \u0434\u0432\u0443\u0441\u043c\u044b\u0441\u043b\u0435\u043d\u043d\u0443\u044e \u043b\u0430\u0442\u0438\u043d\u0441\u043a\u0443\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0440\u0443\u0441\u0441\u043a\u043e\u0433\u043e \u0437\u0432\u0443\u043a\u0430. \u0414\u043b\u044f \u0440\u0443\u0441\u0441\u043a\u043e\u0433\u043e \u0437\u0432\u0443\u043a\u0430 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u043a\u0438\u0440\u0438\u043b\u043b\u0438\u0447\u0435\u0441\u043a\u0443\u044e \u0431\u0443\u043a\u0432\u0443 \u0432 \u043a\u0432\u0430\u0434\u0440\u0430\u0442\u043d\u044b\u0445 \u0441\u043a\u043e\u0431\u043a\u0430\u0445: [\u043f], [\u0440], [\u0441]. "
+    "\u041e\u0440\u0438\u0435\u043d\u0442\u0438\u0440\u0443\u0439\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 EVIDENCE \u0438 \u0440\u0443\u0441\u0441\u043a\u0438\u0435 \u043f\u0440\u0438\u043c\u0435\u0440\u044b \u0441\u043b\u043e\u0432. \u041d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, \u0434\u043b\u044f \u0441\u043b\u043e\u0432 \u00ab\u043f\u0430\u043f\u0430\u00bb, \u00ab\u043f\u0438\u0440\u043e\u0433\u00bb, \u00ab\u043f\u0442\u0438\u0446\u0430\u00bb \u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u0430 \u0437\u0430\u043f\u0438\u0441\u044c [\u043f], \u043d\u043e \u043d\u0435 /p/ \u0438 \u043d\u0435 [p]. "
+    "\u0415\u0441\u043b\u0438 \u043f\u043e EVIDENCE \u043d\u0435\u043b\u044c\u0437\u044f \u0443\u0432\u0435\u0440\u0435\u043d\u043d\u043e \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u0440\u0443\u0441\u0441\u043a\u0443\u044e \u0431\u0443\u043a\u0432\u0443, \u043f\u0435\u0440\u0435\u0444\u043e\u0440\u043c\u0443\u043b\u0438\u0440\u0443\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043a\u0446\u0438\u044e \u0431\u0435\u0437 \u0431\u0443\u043a\u0432\u0435\u043d\u043d\u043e\u0433\u043e \u0441\u0438\u043c\u0432\u043e\u043b\u0430. \u041d\u0435 \u0443\u0433\u0430\u0434\u044b\u0432\u0430\u0439. "
+    "\u041d\u0435 \u0438\u0437\u043c\u0435\u043d\u044f\u0439 \u0430\u043d\u0433\u043b\u0438\u0439\u0441\u043a\u0438\u0435 \u0441\u043b\u043e\u0432\u0430 \u0438 \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0439 \u043d\u043e\u0432\u044b\u0435 \u043f\u0440\u0438\u043c\u0435\u0440\u044b."
 )
 
 THEMATIC_OBSERVABLE_BENEFIT_REPAIR_INSTRUCTION = (
@@ -2702,6 +2765,11 @@ def build_bilingual_parents_repair_prompt(
             if reason == "parent_risky_oral_manipulation"
             else ""
         )
+        + (
+            "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
+            if reason == "parent_ambiguous_latin_phoneme"
+            else ""
+        )
         + "Не используй Markdown, placeholders или служебные маркеры."
     )
 
@@ -2715,6 +2783,7 @@ THEMATIC_PARENTS_REPAIR_EXACT_REASONS = {
     "blanket_reassurance",
     "misleading_politeness_framing",
     "parent_risky_oral_manipulation",
+    "parent_ambiguous_latin_phoneme",
     "thematic_topic_mismatch",
     "thematic_missing_home_action",
     "thematic_unsupported_mechanism",
@@ -2751,6 +2820,11 @@ def build_thematic_parents_repair_prompt(
         + (
             "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
             if reason == "parent_risky_oral_manipulation"
+            else ""
+        )
+        + (
+            "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
+            if reason == "parent_ambiguous_latin_phoneme"
             else ""
         )
         + (
@@ -2880,6 +2954,8 @@ async def generate_post_plain_from_evidence_async(
 
         if reason == "parent_risky_oral_manipulation":
             repair += "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
+        if reason == "parent_ambiguous_latin_phoneme":
+            repair += "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
 
         if dk == "FR" or rf == "question_week":
             repair += (
@@ -3009,7 +3085,7 @@ async def generate_post_plain_from_evidence_async(
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
                     return "", False, f"invalid_gemini_retry:{reason2}"
 
-            elif reason == "parent_risky_oral_manipulation":
+            elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"}:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
                 if gemini_repair_prompt:
                     out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))

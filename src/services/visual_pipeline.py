@@ -922,6 +922,37 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     }
 
 
+def _visual_qa_key_candidates(explicit_key: str = "") -> tuple[tuple[str, str], ...]:
+    candidates = (
+        ("explicit", explicit_key),
+        ("visual_qa", os.getenv("GEMINI_VISUAL_QA_API_KEY", "")),
+        ("general", os.getenv("GEMINI_API_KEY", "")),
+    )
+    seen: set[str] = set()
+    unique: list[tuple[str, str]] = []
+    for source_name, raw_key in candidates:
+        api_key = (raw_key or "").strip()
+        if not api_key or api_key in seen:
+            continue
+        seen.add(api_key)
+        unique.append((source_name, api_key))
+    return tuple(unique)
+
+
+def _visual_qa_key_metadata(
+    source_name: str = "",
+    attempts: int = 0,
+    fallback_used: bool = False,
+    fallback_trigger: str = "",
+) -> Dict[str, str]:
+    return {
+        "human_qa_key_source": source_name,
+        "human_qa_key_attempts": str(attempts),
+        "human_qa_key_fallback_used": str(bool(fallback_used)),
+        "human_qa_key_fallback_trigger": fallback_trigger,
+    }
+
+
 def evaluate_visual_quality(
     image_buffer: BytesIO,
     rubric_id: str = "",
@@ -931,12 +962,8 @@ def evaluate_visual_quality(
     expected_prompt: str = "",
 ) -> Dict[str, object]:
     """Run lightweight Gemini QA for an AI cover; missing QA credentials are non-blocking."""
-    api_key = (
-        gemini_api_key
-        or os.getenv("GEMINI_VISUAL_QA_API_KEY", "")
-        or os.getenv("GEMINI_API_KEY", "")
-    ).strip()
-    if not api_key:
+    key_candidates = _visual_qa_key_candidates(gemini_api_key)
+    if not key_candidates:
         return {
             "status": "skipped",
             "pass": True,
@@ -944,6 +971,7 @@ def evaluate_visual_quality(
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            **_visual_qa_key_metadata(),
         }
 
     expected_roles_match = re.search(r"Expected roles:\s*([^\n]+)", expected_prompt or "", flags=re.IGNORECASE)
@@ -990,33 +1018,126 @@ def evaluate_visual_quality(
         }],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
-    try:
-        response = requests.post(
-            url,
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-            json=payload,
-            timeout=GEMINI_VISUAL_QA_TIMEOUT_SECONDS,
-        )
-        if response.status_code >= 400:
+    max_attempts = min(2, len(key_candidates))
+    last_trigger = ""
+    for attempt, (source_name, api_key) in enumerate(key_candidates[:max_attempts], start=1):
+        try:
+            response = requests.post(
+                url,
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                json=payload,
+                timeout=GEMINI_VISUAL_QA_TIMEOUT_SECONDS,
+            )
+        except requests.Timeout:
+            status_label = "timeout"
+            print(f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={status_label}", flush=True)
+            last_trigger = status_label
+            if attempt < max_attempts:
+                next_source = key_candidates[attempt][0]
+                print(
+                    f"[VISUAL][QA_KEY_FALLBACK] from={source_name} to={next_source} trigger={status_label}",
+                    flush=True,
+                )
+                continue
             return {
                 "status": "skipped",
                 "pass": True,
-                "reason": f"qa_http_{response.status_code}",
+                "reason": "qa_timeout",
                 "people_count": "unknown",
                 "adult_count": "unknown",
                 "child_count": "unknown",
+                **_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger),
             }
-        parsed = _parse_visual_qa_response(_visual_qa_text(response.json()))
-        return _enforce_visual_qa_hard_failures(parsed, rubric_id)
-    except Exception as exc:
-        return {
-            "status": "skipped",
-            "pass": True,
-            "reason": f"qa_unavailable:{exc.__class__.__name__}",
-            "people_count": "unknown",
-            "adult_count": "unknown",
-            "child_count": "unknown",
-        }
+        except requests.RequestException as exc:
+            status_label = f"network_{exc.__class__.__name__}"
+            print(f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={status_label}", flush=True)
+            last_trigger = status_label
+            if attempt < max_attempts:
+                next_source = key_candidates[attempt][0]
+                print(
+                    f"[VISUAL][QA_KEY_FALLBACK] from={source_name} to={next_source} trigger={status_label}",
+                    flush=True,
+                )
+                continue
+            return {
+                "status": "skipped",
+                "pass": True,
+                "reason": f"qa_unavailable:{exc.__class__.__name__}",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+                **_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger),
+            }
+        except Exception as exc:
+            print(
+                f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status=exception_{exc.__class__.__name__}",
+                flush=True,
+            )
+            return {
+                "status": "skipped",
+                "pass": True,
+                "reason": f"qa_unavailable:{exc.__class__.__name__}",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+                **_visual_qa_key_metadata(source_name, attempt, attempt > 1, "exception"),
+            }
+
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code >= 400:
+            status_label = f"http_{status_code}"
+            print(f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={status_label}", flush=True)
+            if status_code in {401, 403}:
+                print(f"[WARN][VISUAL][QA_KEY] source={source_name} status={status_label}", flush=True)
+            retryable_key_failure = status_code in {401, 403, 429} or 500 <= status_code <= 599
+            last_trigger = status_label
+            if retryable_key_failure and attempt < max_attempts:
+                next_source = key_candidates[attempt][0]
+                print(
+                    f"[VISUAL][QA_KEY_FALLBACK] from={source_name} to={next_source} trigger={status_label}",
+                    flush=True,
+                )
+                continue
+            return {
+                "status": "skipped",
+                "pass": True,
+                "reason": f"qa_http_{status_code}",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+                **_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger),
+            }
+
+        try:
+            parsed = _parse_visual_qa_response(_visual_qa_text(response.json()))
+        except Exception as exc:
+            return {
+                "status": "skipped",
+                "pass": True,
+                "reason": f"qa_unavailable:{exc.__class__.__name__}",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+                **_visual_qa_key_metadata(source_name, attempt, attempt > 1, "invalid_response"),
+            }
+        normalized = _enforce_visual_qa_hard_failures(parsed, rubric_id)
+        normalized.update(_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger))
+        print(
+            f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} "
+            f"status={normalized.get('status', 'skipped')}",
+            flush=True,
+        )
+        return normalized
+
+    return {
+        "status": "skipped",
+        "pass": True,
+        "reason": "qa_unavailable",
+        "people_count": "unknown",
+        "adult_count": "unknown",
+        "child_count": "unknown",
+        **_visual_qa_key_metadata(),
+    }
 
 
 def _safe_visual_qa(
@@ -1060,6 +1181,10 @@ def _safe_visual_qa(
         "people_count": result.get("people_count", "unknown"),
         "adult_count": result.get("adult_count", "unknown"),
         "child_count": result.get("child_count", "unknown"),
+        "human_qa_key_source": str(result.get("human_qa_key_source", "")),
+        "human_qa_key_attempts": str(result.get("human_qa_key_attempts", "0")),
+        "human_qa_key_fallback_used": str(result.get("human_qa_key_fallback_used", "False")),
+        "human_qa_key_fallback_trigger": str(result.get("human_qa_key_fallback_trigger", "")),
     }
     return _enforce_visual_qa_hard_failures(normalized, rubric_id)
 
@@ -1132,6 +1257,7 @@ def _build_object_visual_fallback(
 ) -> Tuple[BytesIO, Dict[str, str]]:
     object_prompt = build_object_only_visual_prompt(title, rubric_id)
     category = _object_scene_category(title, rubric_id)
+    key_result = retry_qa or first_qa or {}
     print(f"[VISUAL][OBJECT_FALLBACK] trigger={_short_log_message(trigger)} category={category}", flush=True)
     try:
         buffer, object_meta = download_pollinations_image_with_meta(
@@ -1159,6 +1285,10 @@ def _build_object_visual_fallback(
             "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
             "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
             "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
+            "human_qa_key_source": str(key_result.get("human_qa_key_source", "")),
+            "human_qa_key_attempts": str(key_result.get("human_qa_key_attempts", "0")),
+            "human_qa_key_fallback_used": str(key_result.get("human_qa_key_fallback_used", "False")),
+            "human_qa_key_fallback_trigger": str(key_result.get("human_qa_key_fallback_trigger", "")),
         }
     except Exception as exc:
         print(f"[VISUAL][TEXT_FALLBACK] trigger={_short_log_message(trigger)}", flush=True)
@@ -1181,6 +1311,10 @@ def _build_object_visual_fallback(
             "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
             "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
             "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
+            "human_qa_key_source": str(key_result.get("human_qa_key_source", "")),
+            "human_qa_key_attempts": str(key_result.get("human_qa_key_attempts", "0")),
+            "human_qa_key_fallback_used": str(key_result.get("human_qa_key_fallback_used", "False")),
+            "human_qa_key_fallback_trigger": str(key_result.get("human_qa_key_fallback_trigger", "")),
         }
 
 
@@ -1296,6 +1430,10 @@ def build_post_visual(
         "human_qa_first_reason": "",
         "human_qa_retry_status": "not_run",
         "human_qa_retry_reason": "",
+        "human_qa_key_source": "",
+        "human_qa_key_attempts": "0",
+        "human_qa_key_fallback_used": "False",
+        "human_qa_key_fallback_trigger": "",
         "object_prompt_used": "False",
         "object_scene_category": "",
         "object_generation_status": "not_run",
@@ -1364,6 +1502,10 @@ def build_post_visual(
                 "human_qa_first_reason": str(first_qa.get("reason", "ok")),
                 "human_qa_retry_status": "not_run",
                 "human_qa_retry_reason": "",
+                "human_qa_key_source": str(first_qa.get("human_qa_key_source", "")),
+                "human_qa_key_attempts": str(first_qa.get("human_qa_key_attempts", "0")),
+                "human_qa_key_fallback_used": str(first_qa.get("human_qa_key_fallback_used", "False")),
+                "human_qa_key_fallback_trigger": str(first_qa.get("human_qa_key_fallback_trigger", "")),
                 "object_prompt_used": "False",
                 "object_scene_category": "",
                 "object_generation_status": "not_run",
@@ -1447,6 +1589,10 @@ def build_post_visual(
                     "human_qa_first_reason": str(first_qa_result.get("reason", retry_reason)),
                     "human_qa_retry_status": str(retry_qa.get("status", "skipped")),
                     "human_qa_retry_reason": str(retry_qa.get("reason", "ok")),
+                    "human_qa_key_source": str(retry_qa.get("human_qa_key_source", "")),
+                    "human_qa_key_attempts": str(retry_qa.get("human_qa_key_attempts", "0")),
+                    "human_qa_key_fallback_used": str(retry_qa.get("human_qa_key_fallback_used", "False")),
+                    "human_qa_key_fallback_trigger": str(retry_qa.get("human_qa_key_fallback_trigger", "")),
                     "object_prompt_used": "False",
                     "object_scene_category": "",
                     "object_generation_status": "not_run",

@@ -716,19 +716,33 @@ PARENT_AGE_ACTION_RE = re.compile(
 )
 PARENT_INFANT_REQUIRED_WORD_RE = re.compile(
     r"(?:(?:реб[её]н(?:ок|ка)|малыш\w*|ожидайте|попрос\w*|предлож\w*|пусть|ждите).{0,100})"
-    r"(?:сказ\w*|произнес\w*|назва\w*|повтор\w*|ответ\w*\s+слов\w*|попрос\w*\s+словами)"
-    r"(?:\s+[^.!?\n]{0,45})?(?:[«\"“'][^»\"”']+[»\"”']|\b[а-яё]{2,}(?:\s+[а-яё]{2,})?)",
+    r"(?:(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)"
+    r"\s+(?:[«\"“'][^»\"”']+[»\"”']|[а-яё]{2,}(?:\s+[а-яё]{2,}){0,2})|"
+    r"ответ\w*\s+слов\w*|попрос\w*\s+словами)",
+    re.IGNORECASE | re.DOTALL,
+)
+PARENT_INFANT_OPTIONAL_VERBAL_RE = re.compile(
+    r"(?:реб[её]н(?:ок|ка)|малыш\w*).{0,30}(?:может|попыта\w*|пыта\w*).{0,45}"
+    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)|"
+    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*).{0,100}не\s+обязательн\w*",
     re.IGNORECASE | re.DOTALL,
 )
 PARENT_OPEN_VERBAL_ANSWER_RE = re.compile(
     r"(?:как\s+называется|что\s+ты\s+делаешь|куда\s+положим|расскажи,?\s+что\s+видишь|что\s+произошло|"
-    r"какой\s+это\s+предмет|ответь\s+словами|"
+    r"какой\s+это\s+предмет|что\s+здесь\s+нарисовано|где\s+[а-яё][^.!?\n]{0,40}|ответь\s+словами|"
     r"реб[её]нок\w*\s+отвеча\w*\s+словами)",
+    re.IGNORECASE,
+)
+PARENT_LOCAL_NONVERBAL_ALTERNATIVE_RE = re.compile(
+    r"(?:предлож\w*(?:\s+реб[её]нку)?|реб[её]нок\w*\s+может).{0,50}"
+    r"(?:показать|выбрать|дать|указать|ответить\s+жестом)|"
+    r"ответ\w*.{0,35}(?:взгляд\w*|жест\w*|звук\w*)",
     re.IGNORECASE,
 )
 PARENT_PHRASE_TASK_RE = re.compile(
     r"(?:реб[её]н(?:ок|ка)|малыш\w*|попрос\w*).{0,100}(?:состав\w*\s+фраз|повтор\w*\s+фраз|сказ\w*\s+фраз)|"
-    r"(?:составь|повтори|скажи|ответь)\w*\s+(?:[^.!?\n]{0,35}\s+)?(?:фраз\w*|предложен\w*|полным\s+предложен\w*)",
+    r"(?:составь|повтори|скажи|ответь|расскажи)\w*\s+(?:[^.!?\n]{0,35}\s+)?"
+    r"(?:фраз\w*|предложен\w*|полным\s+предложен\w*|истори\w*)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -760,17 +774,39 @@ def _validate_parent_age_action_fit(text: str) -> Tuple[bool, str]:
     if not parsed or parsed.min_months is None:
         return True, "ok"
     body = _parent_body_without_age(text)
-    if parsed.min_months < 12 and (PARENT_AGE_ACTION_RE.search(body) or PARENT_INFANT_REQUIRED_WORD_RE.search(body)):
-        return False, "parent_age_action_mismatch"
-    if parsed.min_months < 18:
-        for segment in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", body) if part.strip()):
-            if not PARENT_OPEN_VERBAL_ANSWER_RE.search(segment):
+    if parsed.min_months < 12:
+        for segment in (part.strip() for part in re.split(r"[.!?;\n]+", body) if part.strip()):
+            if not (PARENT_AGE_ACTION_RE.search(segment) or PARENT_INFANT_REQUIRED_WORD_RE.search(segment)):
                 continue
-            if not re.search(
-                r"(?:покаж\w*|выбер\w*|посмотр\w*|дай\w*|жест\w*|звук\w*|улыб\w*|поверн\w*|издай\w*)",
-                segment,
-                re.IGNORECASE,
-            ):
+            if PARENT_INFANT_OPTIONAL_VERBAL_RE.search(segment):
+                continue
+            return False, "parent_age_action_mismatch"
+    if parsed.min_months < 18:
+        numbered_steps = list(re.finditer(r"(?m)^\s*\d+[.)]\s+", body))
+        for question in PARENT_OPEN_VERBAL_ANSWER_RE.finditer(body):
+            line_start = body.rfind("\n", 0, question.start()) + 1
+            line_end = body.find("\n", question.end())
+            if line_end < 0:
+                line_end = len(body)
+            padding = max(0, 120 - (question.end() - question.start()))
+            context_start = max(line_start, question.start() - padding // 2)
+            context_end = min(line_end, question.end() + padding - padding // 2)
+            contexts = [body[context_start:context_end]]
+
+            sentence_start = max(
+                line_start - 1,
+                *(body.rfind(mark, line_start, question.start()) for mark in ".!?;"),
+            ) + 1
+            sentence_ends = [body.find(mark, question.end(), line_end) for mark in ".!?;"]
+            sentence_end = min((position for position in sentence_ends if position >= 0), default=line_end)
+            contexts.append(body[sentence_start:sentence_end])
+
+            for index, step in enumerate(numbered_steps):
+                step_end = numbered_steps[index + 1].start() if index + 1 < len(numbered_steps) else len(body)
+                if step.start() <= question.start() < step_end:
+                    contexts.append(body[step.start():step_end])
+                    break
+            if not any(PARENT_LOCAL_NONVERBAL_ALTERNATIVE_RE.search(context) for context in contexts):
                 return False, "parent_age_action_mismatch"
     if parsed.min_months < 24 and PARENT_PHRASE_TASK_RE.search(body):
         return False, "parent_age_action_mismatch"
@@ -1353,8 +1389,20 @@ PARENT_HEARING_INFERENCE_RE = re.compile(
     r"можно\s+(?:понять|определ\w*|узна\w*)).{0,120}(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|"
     r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|провер\w*|"
     r"показыва\w*|можно\s+(?:понять|определ\w*|узна\w*))|"
-    r"(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,100}(?:значит|исключ\w*|хорош\w*\s+слыш\w*|"
-    r"слух\w*\s+в\s+норм\w*|снижени\w*\s+слух\w*)",
+    r"(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,120}(?:"
+    r"значит.{0,40}слух\w*|хорош\w*\s+слыш\w*|потер\w*\s+слух\w*\s+исключ\w*|"
+    r"слух\w*\s+в\s+норм\w*|(?:снижени|нарушени)\w*\s+слух\w*\s+нет)",
+    re.IGNORECASE,
+)
+PARENT_HEARING_NEGATED_INFERENCE_RE = re.compile(
+    r"(?:\bне\b|\bнельзя\b|\bневозможно\b)\s+(?:\w+\s+){0,4}"
+    r"(?:означа\w*|показыва\w*|определя\w*|определить|проверя\w*|проверить|узна\w*|понять|сделать\s+вывод)|"
+    r"\bне\s+заменя\w*\b",
+    re.IGNORECASE,
+)
+PARENT_HEARING_PROFESSIONAL_REFERRAL_RE = re.compile(
+    r"(?:обсуд\w*|обрат\w*).{0,100}(?:врач\w*|специалист\w*|аудиолог\w*|логопед\w*|педиатр\w*)|"
+    r"провер\w*\s+слух\w*.{0,60}(?:у\s+врач\w*|у\s+аудиолог\w*|специалист\w*)",
     re.IGNORECASE,
 )
 
@@ -1364,18 +1412,14 @@ def _validate_parent_hearing_inference_output(text: str) -> Tuple[bool, str]:
         stripped = line.strip()
         if re.match(r"^🔴\s*Миф\s*:", stripped, re.IGNORECASE):
             continue
-        for sentence in (part.strip() for part in re.split(r"(?<=[.!?;])\s+", stripped) if part.strip()):
-            if not PARENT_HEARING_INFERENCE_RE.search(sentence):
+        for sentence in (part.strip() for part in re.split(r"[.!?;]+", stripped) if part.strip()):
+            if PARENT_HEARING_PROFESSIONAL_REFERRAL_RE.search(sentence):
                 continue
-            if re.search(
-                r"\b(?:не|нельзя|не означает|не показыва\w*|не проверя\w*|не заменя\w*|невозможно)\b",
-                sentence,
-                re.IGNORECASE,
-            ):
-                continue
-            if re.search(r"(?:с врачом|специалист\w*|аудиолог\w*|логопед\w*|педиатр\w*)", sentence, re.IGNORECASE):
-                continue
-            return False, "parent_false_hearing_inference"
+            for inference in PARENT_HEARING_INFERENCE_RE.finditer(sentence):
+                context = sentence[max(0, inference.start() - 60):min(len(sentence), inference.end() + 30)]
+                if PARENT_HEARING_NEGATED_INFERENCE_RE.search(context):
+                    continue
+                return False, "parent_false_hearing_inference"
     return True, "ok"
 
 
@@ -1391,18 +1435,24 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
         return True, "ok"
     content = _parent_phoneme_content(text)
     sound_context = re.compile(
-        r"(?:звук|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком)",
+        r"(?:звук\w*|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком|"
+        r"целев\w*\s+звук|потрениру\w*\s+звук)",
         re.IGNORECASE,
     )
     if re.search(
-        r"(?:звук|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком)"
+        r"(?:звук\w*|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком|"
+        r"целев\w*\s+звук|потрениру\w*\s+звук)"
         r".{0,35}\[\s*[а-яё]{1,3}\s*\]",
         content,
         re.IGNORECASE,
     ):
         return False, "parent_cross_language_sound_norm"
     evidence_lower = (evidence_text or "").lower()
-    example_marker = re.compile(r"(?:например|слова\s*:|подберите\s+слова|слова\s+со\s+звуком)", re.IGNORECASE)
+    example_marker = re.compile(
+        r"(?:например\s*:|\bслова\b\s*:|слова\s+со\s+звуком|подберите\s+слова|"
+        r"в\s+словах|потрениру\w*\s+на\s+словах)",
+        re.IGNORECASE,
+    )
     for marker in example_marker.finditer(content):
         local_start = max(0, marker.start() - 120)
         local_end = min(len(content), marker.end() + 180)
@@ -1416,16 +1466,27 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
         if not candidates:
             tail = content[marker.end():local_end]
             candidates = re.findall(r"[А-Яа-яЁё]{2,}", tail.lower())[:5]
-        ignored = {"например", "слова", "подберите", "звуком", "звук", "произнесите", "повторите"}
+        ignored = {
+            "например", "слова", "подберите", "звуком", "звук", "произнесите", "повторите",
+            "потренируйте", "словах", "целевой",
+        }
         if any(word not in ignored and word not in evidence_lower for word in candidates):
             return False, "parent_cross_language_sound_norm"
-    age_norm = re.compile(
-        r"(?:звук|фонем\w*|произнош\w*).{0,100}(?:возраст\w*|\d+\s*(?:лет|года|месяц\w*)|"
-        r"к\s+(?:\d+|четыр\w*)\s*(?:год|лет)?|долж\w*|формиру\w*|появля\w*|осваива\w*)",
-        re.IGNORECASE,
-    )
     for sentence in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", content) if part.strip()):
-        if age_norm.search(sentence) and not re.search(r"(?:нельзя|не\s+перенос|зависит\s+от\s+язык)", sentence, re.IGNORECASE):
+        has_sound_term = re.search(r"(?:звук\w*|фонем\w*|произнош\w*)", sentence, re.IGNORECASE)
+        has_age_term = re.search(r"(?:возраст\w*|год\w*|лет|месяц\w*)", sentence, re.IGNORECASE)
+        has_normative_term = re.search(
+            r"(?:долж\w*|формиру\w*|появля\w*|осваива\w*|сформирован\w*)",
+            sentence,
+            re.IGNORECASE,
+        )
+        is_language_caveat = re.search(
+            r"(?:нельзя.{0,45}перенос|не\s+перенос|зависит\s+от\s+язык|"
+            r"в\s+разн\w*\s+язык\w*.{0,80}разн\w*\s+(?:время|возраст))",
+            sentence,
+            re.IGNORECASE,
+        )
+        if has_sound_term and has_age_term and has_normative_term and not is_language_caveat:
             return False, "parent_cross_language_sound_norm"
     return True, "ok"
 

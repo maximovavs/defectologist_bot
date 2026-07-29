@@ -233,8 +233,10 @@ class VisualFallbackPolicyTest(unittest.TestCase):
     def test_object_fallback_categories_prioritize_specific_rubric_signals(self):
         cases = (
             ("Положение языка при произнесении звука", "articulation_speech"),
-            ("Два языка дома", "bilingual_languages"),
-            ("Реакция на колокольчик", "hearing_sounds_music"),
+            ("Игра для двух языков дома", "bilingual_languages"),
+            ("Реакция малыша на колокольчик", "hearing_sounds_music"),
+            ("Язык находится за верхними зубами", "articulation_speech"),
+            ("Развитие домашнего языка в двуязычной семье", "bilingual_languages"),
         )
         for title, expected in cases:
             with self.subTest(title=title):

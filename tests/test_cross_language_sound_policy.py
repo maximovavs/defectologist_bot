@@ -6,6 +6,9 @@ from src.services.llm_generator import _validate_cross_language_sound_output
 ENGLISH_EVIDENCE = " ".join(
     ["This English source describes speech sounds, phonemes, examples and age norms."] * 8
 )
+RUSSIAN_EVIDENCE = " ".join(
+    ["Русский источник прямо описывает звук [ш], слова шапка и шар для упражнения."] * 8
+)
 
 
 class CrossLanguageSoundPolicyTest(unittest.TestCase):
@@ -26,31 +29,75 @@ class CrossLanguageSoundPolicyTest(unittest.TestCase):
         )
 
     def test_allows_language_neutral_statement(self):
-        self.assertEqual(
-            _validate_cross_language_sound_output("Покажите картинку и дождитесь реакции ребёнка.", ENGLISH_EVIDENCE),
-            (True, "ok"),
+        cases = (
+            "Покажите картинку и дождитесь реакции ребёнка.",
+            "Возраст освоения звуков зависит от языка ребёнка.",
+            "Нормы одного языка нельзя автоматически переносить на другой.",
+            "Если отдельные звуки долго остаются непонятными, обсудите это с логопедом.",
+            "В разных языках одни и те же звуки могут осваиваться в разное время.",
+            "Положите в корзину [мяч], [кубик] и [книгу].",
         )
-
-
-    def test_rejects_any_cyrillic_phoneme_in_english_evidence(self):
-        for phoneme in ("\u0448", "\u0436", "\u0444", "\u0446", "\u0447", "\u0449", "\u043b"):
-            with self.subTest(phoneme=phoneme):
+        for text in cases:
+            with self.subTest(text=text):
                 self.assertEqual(
-                    _validate_cross_language_sound_output(
-                        f"\u0417\u0432\u0443\u043a [{phoneme}] \u0432\u0430\u0436\u0435\u043d \u0434\u043b\u044f \u0440\u0435\u0447\u0438.",
-                        ENGLISH_EVIDENCE,
-                    )[1],
-                    "parent_cross_language_sound_norm",
+                    _validate_cross_language_sound_output(text, ENGLISH_EVIDENCE),
+                    (True, "ok"),
                 )
 
-    def test_rejects_generic_examples_only_in_sound_context(self):
-        for example in ("\u0448\u0430\u043f\u043a\u0430", "\u0436\u0443\u043a", "\u0444\u043b\u0430\u0433", "\u0446\u0432\u0435\u0442", "\u0447\u0430\u0448\u043a\u0430", "\u0449\u0451\u0442\u043a\u0430", "\u043b\u0430\u043c\u043f\u0430"):
-            with self.subTest(example=example):
-                text = f"\u041f\u043e\u0434\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u043b\u043e\u0432\u0430 \u0441\u043e \u0437\u0432\u0443\u043a\u043e\u043c: {example}."
+    def test_rejects_any_cyrillic_phoneme_in_english_evidence(self):
+        cases = (
+            "звук [ш]", "звук [ж]", "фонема [ф]", "звук [ц]", "звук [ч]", "звук [щ]",
+            "звук [л]", "фонема [р]", "произнесите [к]", "повторите звук [м]", "слова со звуком [с]",
+        )
+        for text in cases:
+            with self.subTest(text=text):
                 self.assertEqual(
                     _validate_cross_language_sound_output(text, ENGLISH_EVIDENCE)[1],
                     "parent_cross_language_sound_norm",
                 )
+
+    def test_rejects_generic_examples_only_in_sound_context(self):
+        cases = (
+            "Потренируйте звук. Например: «шапка», «шар», «машина».",
+            "Потренируйте звук. Слова: жук, жаба, лыжи.",
+            "Потренируйте звук. Подберите слова «флаг», «кофта», «шкаф».",
+            "Потренируйте звук [с] в словах сок, нос, лес.",
+            "Выберите целевой звук. Потренируйте на словах дом, дым, сад.",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _validate_cross_language_sound_output(text, ENGLISH_EVIDENCE)[1],
+                    "parent_cross_language_sound_norm",
+                )
+
+    def test_rejects_cross_language_age_norms_in_any_word_order(self):
+        cases = (
+            "Звук [ш] должен появиться к 4 годам.",
+            "Звук [р] формируется к 5 годам.",
+            "Все звуки появляются к четырём годам.",
+            "Почти все звуки осваиваются к определённому возрасту.",
+            "К 4 годам ребёнок должен произносить все звуки.",
+            "К 5 годам произношение должно быть полностью сформировано.",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _validate_cross_language_sound_output(text, ENGLISH_EVIDENCE)[1],
+                    "parent_cross_language_sound_norm",
+                )
+
+    def test_does_not_apply_cross_language_policy_to_russian_evidence(self):
+        self.assertEqual(
+            _validate_cross_language_sound_output("Потренируйте звук [ш] в слове «шапка».", RUSSIAN_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_ordinary_russian_object_list_without_sound_context_is_allowed(self):
+        self.assertEqual(
+            _validate_cross_language_sound_output("Возьмите мяч, чашку, ложку и книгу.", ENGLISH_EVIDENCE),
+            (True, "ok"),
+        )
 
 if __name__ == "__main__":
     unittest.main()

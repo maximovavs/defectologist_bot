@@ -1621,14 +1621,6 @@ DRY_RUN_VISUAL_FIELDS = (
     "human_qa_key_attempts",
     "human_qa_key_fallback_used",
     "human_qa_key_fallback_trigger",
-    "human_qa_first_key_source",
-    "human_qa_first_key_attempts",
-    "human_qa_first_key_fallback_used",
-    "human_qa_first_key_fallback_trigger",
-    "human_qa_retry_key_source",
-    "human_qa_retry_key_attempts",
-    "human_qa_retry_key_fallback_used",
-    "human_qa_retry_key_fallback_trigger",
     "object_prompt_used",
     "object_scene_category",
     "object_generation_status",
@@ -1651,7 +1643,10 @@ def _write_dry_run_visual(
             encoding="utf-8",
         )
     except Exception as exc:
-        print(f"[WARN] dry_run_visual_diagnostics_failed error_type={exc.__class__.__name__}", flush=True)
+        print(
+            f"[DRY_RUN][WARN] visual_metadata_write_failed stem={stem} error={exc.__class__.__name__}",
+            flush=True,
+        )
 
 
 def _handle_post_engagement(

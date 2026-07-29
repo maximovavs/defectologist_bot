@@ -11,26 +11,42 @@ class ParentHearingInferenceTest(unittest.TestCase):
         )
 
     def test_allows_observation_and_disclaimer(self):
-        self.assertEqual(
-            _validate_parent_hearing_inference_output("Понаблюдайте, какие просьбы ребёнок выполняет.")[0],
-            True,
+        cases = (
+            "Понаблюдайте, реагирует ли ребёнок на обращение.",
+            "Посмотрите, поворачивается ли ребёнок к знакомому звуку.",
+            "Отметьте, реагирует ли ребёнок на тихое обращение.",
+            "Это упражнение показывает произношение, но не проверяет слух.",
+            "По произношению нельзя определить состояние слуха.",
+            "Домашняя игра не заменяет проверку слуха.",
+            "Эта реакция не означает, что слух в норме.",
+            "При сомнениях обсудите проверку слуха с врачом или аудиологом.",
         )
-        self.assertEqual(
-            _validate_parent_hearing_inference_output("Игра не заменяет проверку слуха специалистом.")[0],
-            True,
-        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(_validate_parent_hearing_inference_output(text), (True, "ok"))
 
     def test_does_not_reject_myth_statement(self):
         self.assertEqual(
-            _validate_parent_hearing_inference_output("🔴 Миф: по игре можно проверить слух дома.")[0],
+            _validate_parent_hearing_inference_output(
+                "🔴 Миф: если ребёнок повторяет слово, значит слух в норме."
+            )[0],
             True,
         )
 
-
     def test_rejects_hearing_inference_phrases(self):
         cases = (
-            "\u0412\u044b \u0443\u0432\u0438\u0434\u0438\u0442\u0435, \u0441\u043b\u044b\u0448\u0438\u0442 \u043b\u0438 \u0440\u0435\u0431\u0451\u043d\u043e\u043a \u0437\u0432\u0443\u043a.",
-            "\u0415\u0441\u043b\u0438 \u0440\u0435\u0431\u0451\u043d\u043e\u043a \u043f\u043e\u0432\u0442\u043e\u0440\u044f\u0435\u0442 \u0437\u0432\u0443\u043a, \u0437\u043d\u0430\u0447\u0438\u0442 \u0441\u043b\u0443\u0445 \u0432 \u043d\u043e\u0440\u043c\u0435.",
+            "Вы увидите, слышит ли ребёнок звук.",
+            "Вы поймёте, слышит ли ребёнок.",
+            "Так можно узнать, слышит ли малыш.",
+            "По реакции в этой игре можно понять, слышит ли ребёнок.",
+            "Эта игра показывает, слышит ли ребёнок.",
+            "Если ребёнок повторяет звук, значит слух в норме.",
+            "Если ребёнок повторяет слово, он хорошо слышит.",
+            "Если ребёнок называет картинку, потеря слуха исключена.",
+            "Если малыш произносит звук, нарушения слуха нет.",
+            "По произношению можно определить состояние слуха.",
+            "По повторению слова можно понять, есть ли снижение слуха.",
+            "Домашняя игра показывает, есть ли нарушение слуха.",
         )
         for text in cases:
             with self.subTest(text=text):
@@ -38,6 +54,24 @@ class ParentHearingInferenceTest(unittest.TestCase):
                     _validate_parent_hearing_inference_output(text)[1],
                     "parent_false_hearing_inference",
                 )
+
+    def test_negation_on_another_line_does_not_excuse_dangerous_claim(self):
+        text = (
+            "Вы увидите, слышит ли ребёнок звук.\n"
+            "Эта игра не заменяет врача."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_inference_output(text)[1],
+            "parent_false_hearing_inference",
+        )
+
+    def test_unrelated_negation_in_same_sentence_does_not_excuse_claim(self):
+        self.assertEqual(
+            _validate_parent_hearing_inference_output(
+                "Не спешите, затем вы увидите, слышит ли ребёнок звук."
+            )[1],
+            "parent_false_hearing_inference",
+        )
 
 if __name__ == "__main__":
     unittest.main()

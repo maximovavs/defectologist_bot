@@ -1232,20 +1232,22 @@ OBJECT_SCENE_CATEGORIES = {
 def _object_scene_category(title: str, rubric_id: str) -> str:
     value = f"{rubric_id} {title}".lower()
     articulation_markers = (
-        "артикуля", "положение языка", "движение языка", "губ", "произношение", "звукопроизнош",
-        "speech sound", "pronunciation", "articulation", "tongue position",
+        "артикуля", "положение языка", "движение языка", "язык за зубами", "язык находится за", "губ", "произношение",
+        "звукопроизнош", "речевой звук", "speech sound", "pronunciation", "articulation", "tongue position",
+        "lip position",
     )
     if any(marker in value for marker in articulation_markers):
         return "articulation_speech"
     bilingual_markers = (
-        "билингв", "двуязыч", "два языка", "двух языках", "домашний язык", "родной язык и",
+        "билингв", "двуязыч", "два языка", "двух языках", "двух языков", "на двух языках", "домашний язык",
+        "родной язык и",
         "multilingual", "bilingual", "two languages", "home language",
     )
     if any(marker in value for marker in bilingual_markers):
         return "bilingual_languages"
     hearing_markers = (
-        "слух", "слышит", "слушает", "звуковая реакция", "музыка", "ритм", "колокольчик", "барабан",
-        "hearing", "listening", "music", "rhythm",
+        "слух", "слышит", "слушает", "реакция на звук", "звуковая реакция", "музыка", "ритм",
+        "колокольчик", "барабан", "hearing", "listening", "music", "rhythm", "bell", "drum",
     )
     if any(marker in value for marker in hearing_markers):
         return "hearing_sounds_music"

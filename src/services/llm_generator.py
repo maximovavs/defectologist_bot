@@ -715,16 +715,20 @@ PARENT_AGE_ACTION_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 PARENT_INFANT_REQUIRED_WORD_RE = re.compile(
-    r"(?:реб[её]нок|малыш|ожидайте).{0,100}(?:скажет|повтор\w*\s+слово|назов\w*\s+слово|произнес\w*\s+слово|ответ\w*\s+слов\w*)",
+    r"(?:(?:реб[её]н(?:ок|ка)|малыш\w*|ожидайте|попрос\w*|предлож\w*|пусть|ждите).{0,100})"
+    r"(?:сказ\w*|произнес\w*|назва\w*|повтор\w*|ответ\w*\s+слов\w*|попрос\w*\s+словами)"
+    r"(?:\s+[^.!?\n]{0,45})?(?:[«\"“'][^»\"”']+[»\"”']|\b[а-яё]{2,}(?:\s+[а-яё]{2,})?)",
     re.IGNORECASE | re.DOTALL,
 )
 PARENT_OPEN_VERBAL_ANSWER_RE = re.compile(
-    r"(?:как\s+называется|что\s+ты\s+делаешь|куда\s+положим|расскажи,?\s+что\s+видишь|ответь\s+словами|"
+    r"(?:как\s+называется|что\s+ты\s+делаешь|куда\s+положим|расскажи,?\s+что\s+видишь|что\s+произошло|"
+    r"какой\s+это\s+предмет|ответь\s+словами|"
     r"реб[её]нок\w*\s+отвеча\w*\s+словами)",
     re.IGNORECASE,
 )
 PARENT_PHRASE_TASK_RE = re.compile(
-    r"(?:реб[её]н(?:ок|ка)|малыш\w*|попрос\w*).{0,100}(?:состав\w*\s+фраз|повтор\w*\s+фраз|сказ\w*\s+фраз)",
+    r"(?:реб[её]н(?:ок|ка)|малыш\w*|попрос\w*).{0,100}(?:состав\w*\s+фраз|повтор\w*\s+фраз|сказ\w*\s+фраз)|"
+    r"(?:составь|повтори|скажи|ответь)\w*\s+(?:[^.!?\n]{0,35}\s+)?(?:фраз\w*|предложен\w*|полным\s+предложен\w*)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -758,9 +762,16 @@ def _validate_parent_age_action_fit(text: str) -> Tuple[bool, str]:
     body = _parent_body_without_age(text)
     if parsed.min_months < 12 and (PARENT_AGE_ACTION_RE.search(body) or PARENT_INFANT_REQUIRED_WORD_RE.search(body)):
         return False, "parent_age_action_mismatch"
-    if parsed.min_months < 18 and PARENT_OPEN_VERBAL_ANSWER_RE.search(body):
-        if not re.search(r"(?:покаж\w*|выбер\w*|посмотр\w*|дай\w*|жест\w*|звук\w*|улыб\w*|поверн\w*)", body, re.IGNORECASE):
-            return False, "parent_age_action_mismatch"
+    if parsed.min_months < 18:
+        for segment in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", body) if part.strip()):
+            if not PARENT_OPEN_VERBAL_ANSWER_RE.search(segment):
+                continue
+            if not re.search(
+                r"(?:покаж\w*|выбер\w*|посмотр\w*|дай\w*|жест\w*|звук\w*|улыб\w*|поверн\w*|издай\w*)",
+                segment,
+                re.IGNORECASE,
+            ):
+                return False, "parent_age_action_mismatch"
     if parsed.min_months < 24 and PARENT_PHRASE_TASK_RE.search(body):
         return False, "parent_age_action_mismatch"
     return True, "ok"
@@ -1338,9 +1349,12 @@ def _validate_parent_observable_benefit_output(text: str, thematic: bool = False
 
 
 PARENT_HEARING_INFERENCE_RE = re.compile(
-    r"(?:проверь\w*\s+слух|провер\w*\s+слух|тест\w*\s+слух|"
-    r"определ\w*\s+слух|если\s+неправильн\w*\s+произнош\w*\s*,?\s*(?:то\s+)?(?:плох\w*|слаб\w*)\s+слух|"
-    r"свидетельств\w*\s+(?:о|об)\s+развити\w*\s+слух\w*)",
+    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|провер\w*|показыва\w*|"
+    r"можно\s+(?:понять|определ\w*|узна\w*)).{0,120}(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|"
+    r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|провер\w*|"
+    r"показыва\w*|можно\s+(?:понять|определ\w*|узна\w*))|"
+    r"(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,100}(?:значит|исключ\w*|хорош\w*\s+слыш\w*|"
+    r"слух\w*\s+в\s+норм\w*|снижени\w*\s+слух\w*)",
     re.IGNORECASE,
 )
 
@@ -1350,11 +1364,18 @@ def _validate_parent_hearing_inference_output(text: str) -> Tuple[bool, str]:
         stripped = line.strip()
         if re.match(r"^🔴\s*Миф\s*:", stripped, re.IGNORECASE):
             continue
-        if not PARENT_HEARING_INFERENCE_RE.search(stripped):
-            continue
-        if re.search(r"\b(?:не|нельзя|не заменя\w*|не свидетельству\w*)\b", stripped, re.IGNORECASE):
-            continue
-        return False, "parent_false_hearing_inference"
+        for sentence in (part.strip() for part in re.split(r"(?<=[.!?;])\s+", stripped) if part.strip()):
+            if not PARENT_HEARING_INFERENCE_RE.search(sentence):
+                continue
+            if re.search(
+                r"\b(?:не|нельзя|не означает|не показыва\w*|не проверя\w*|не заменя\w*|невозможно)\b",
+                sentence,
+                re.IGNORECASE,
+            ):
+                continue
+            if re.search(r"(?:с врачом|специалист\w*|аудиолог\w*|логопед\w*|педиатр\w*)", sentence, re.IGNORECASE):
+                continue
+            return False, "parent_false_hearing_inference"
     return True, "ok"
 
 
@@ -1369,13 +1390,43 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
     if not _evidence_is_predominantly_english(evidence_text):
         return True, "ok"
     content = _parent_phoneme_content(text)
-    if re.search(r"(?:звук|фонем\w*|произнос\w*|повтор\w*)\s*\[[пбрсрлмткд]\]", content, re.IGNORECASE):
+    sound_context = re.compile(
+        r"(?:звук|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком)",
+        re.IGNORECASE,
+    )
+    if re.search(
+        r"(?:звук|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком)"
+        r".{0,35}\[\s*[а-яё]{1,3}\s*\]",
+        content,
+        re.IGNORECASE,
+    ):
         return False, "parent_cross_language_sound_norm"
-    russian_examples = ("папа", "пирог", "птица", "бабочка", "барабан", "бублик")
-    if any(example in content.lower() and example not in (evidence_text or "").lower() for example in russian_examples):
-        return False, "parent_cross_language_sound_norm"
-    if re.search(r"(?:почти\s+все\s+звуки|все\s+звуки).{0,50}(?:к\s*4|четыре\s+год|4\s*лет)", content, re.IGNORECASE):
-        return False, "parent_cross_language_sound_norm"
+    evidence_lower = (evidence_text or "").lower()
+    example_marker = re.compile(r"(?:например|слова\s*:|подберите\s+слова|слова\s+со\s+звуком)", re.IGNORECASE)
+    for marker in example_marker.finditer(content):
+        local_start = max(0, marker.start() - 120)
+        local_end = min(len(content), marker.end() + 180)
+        local = content[local_start:local_end]
+        if not sound_context.search(local):
+            continue
+        quoted = re.findall(r"[«\"“]([^»\"”]+)[»\"”]", local)
+        candidates: List[str] = []
+        for quoted_group in quoted:
+            candidates.extend(re.findall(r"[А-Яа-яЁё]{2,}", quoted_group.lower()))
+        if not candidates:
+            tail = content[marker.end():local_end]
+            candidates = re.findall(r"[А-Яа-яЁё]{2,}", tail.lower())[:5]
+        ignored = {"например", "слова", "подберите", "звуком", "звук", "произнесите", "повторите"}
+        if any(word not in ignored and word not in evidence_lower for word in candidates):
+            return False, "parent_cross_language_sound_norm"
+    age_norm = re.compile(
+        r"(?:звук|фонем\w*|произнош\w*).{0,100}(?:возраст\w*|\d+\s*(?:лет|года|месяц\w*)|"
+        r"к\s+(?:\d+|четыр\w*)\s*(?:год|лет)?|долж\w*|формиру\w*|появля\w*|осваива\w*)",
+        re.IGNORECASE,
+    )
+    for sentence in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", content) if part.strip()):
+        if age_norm.search(sentence) and not re.search(r"(?:нельзя|не\s+перенос|зависит\s+от\s+язык)", sentence, re.IGNORECASE):
+            return False, "parent_cross_language_sound_norm"
     return True, "ok"
 
 
@@ -2940,7 +2991,7 @@ PARENT_EDITORIAL_PROMPT_RULE = (
     "не переноси на весь пост самый широкий диапазон источника. Не требуй от младенца слова, фразы или открытого словесного ответа: "
     "разрешены взгляд, улыбка, поворот, поиск глазами, жест, звук, лепет, показ и ожидание продолжения. "
     "В блоке пользы описывай только наблюдаемое действие или реакцию ребенка, без обещаний развития, механизмов, слуховых проверок и диагнозов. "
-    "Не называй игру домашней проверкой слуха. Не переносись русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
+    "Не называй игру домашней проверкой слуха. Не переноси русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
     "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
     "с правильным согласованием, без длинной инструкции в H1."
 )

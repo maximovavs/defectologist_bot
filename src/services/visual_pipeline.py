@@ -945,12 +945,21 @@ def _visual_qa_key_metadata(
     fallback_used: bool = False,
     fallback_trigger: str = "",
 ) -> Dict[str, str]:
-    return {
-        "human_qa_key_source": source_name,
-        "human_qa_key_attempts": str(attempts),
-        "human_qa_key_fallback_used": str(bool(fallback_used)),
-        "human_qa_key_fallback_trigger": fallback_trigger,
+    metadata = {
+        "qa_key_source": source_name,
+        "qa_key_attempts": str(attempts),
+        "qa_key_fallback_used": str(bool(fallback_used)),
+        "qa_key_fallback_trigger": fallback_trigger,
     }
+    metadata.update(
+        {
+            "human_qa_key_source": source_name,
+            "human_qa_key_attempts": str(attempts),
+            "human_qa_key_fallback_used": str(bool(fallback_used)),
+            "human_qa_key_fallback_trigger": fallback_trigger,
+        }
+    )
+    return metadata
 
 
 def evaluate_visual_quality(
@@ -1185,6 +1194,14 @@ def _safe_visual_qa(
         "human_qa_key_attempts": str(result.get("human_qa_key_attempts", "0")),
         "human_qa_key_fallback_used": str(result.get("human_qa_key_fallback_used", "False")),
         "human_qa_key_fallback_trigger": str(result.get("human_qa_key_fallback_trigger", "")),
+        "qa_key_source": str(result.get("qa_key_source", result.get("human_qa_key_source", ""))),
+        "qa_key_attempts": str(result.get("qa_key_attempts", result.get("human_qa_key_attempts", "0"))),
+        "qa_key_fallback_used": str(
+            result.get("qa_key_fallback_used", result.get("human_qa_key_fallback_used", "False"))
+        ),
+        "qa_key_fallback_trigger": str(
+            result.get("qa_key_fallback_trigger", result.get("human_qa_key_fallback_trigger", ""))
+        ),
     }
     return _enforce_visual_qa_hard_failures(normalized, rubric_id)
 
@@ -1214,12 +1231,24 @@ OBJECT_SCENE_CATEGORIES = {
 
 def _object_scene_category(title: str, rubric_id: str) -> str:
     value = f"{rubric_id} {title}".lower()
-    if any(word in value for word in ("билинг", "язык", "language", "двуязыч")):
-        return "bilingual_languages"
-    if any(word in value for word in ("слух", "звук", "музык", "hearing", "sound", "music")):
-        return "hearing_sounds_music"
-    if any(word in value for word in ("артикуля", "губ", "язык", "speech", "articulation")):
+    articulation_markers = (
+        "артикуля", "положение языка", "движение языка", "губ", "произношение", "звукопроизнош",
+        "speech sound", "pronunciation", "articulation", "tongue position",
+    )
+    if any(marker in value for marker in articulation_markers):
         return "articulation_speech"
+    bilingual_markers = (
+        "билингв", "двуязыч", "два языка", "двух языках", "домашний язык", "родной язык и",
+        "multilingual", "bilingual", "two languages", "home language",
+    )
+    if any(marker in value for marker in bilingual_markers):
+        return "bilingual_languages"
+    hearing_markers = (
+        "слух", "слышит", "слушает", "звуковая реакция", "музыка", "ритм", "колокольчик", "барабан",
+        "hearing", "listening", "music", "rhythm",
+    )
+    if any(marker in value for marker in hearing_markers):
+        return "hearing_sounds_music"
     if any(word in value for word in ("чита", "букв", "read", "letter")):
         return "reading_prep"
     if any(word in value for word in ("игр", "мяч", "game", "общен", "commun")):
@@ -1268,6 +1297,7 @@ def _build_object_visual_fallback(
             **base_meta,
             **object_meta,
             "mode": "ai_object_fallback",
+            "text_fallback_used": "False",
             "visual_source": "object_ai",
             "fallback_stage": "object",
             "fallback_trigger": trigger,
@@ -1296,6 +1326,7 @@ def _build_object_visual_fallback(
         return fallback, {
             **base_meta,
             "mode": "text_fallback",
+            "text_fallback_used": "True",
             "visual_source": "text_card",
             "fallback_stage": "text",
             "fallback_trigger": trigger,
@@ -1423,6 +1454,7 @@ def build_post_visual(
         "visual_qa_attempts": "0",
         "visual_qa_required": str(visual_qa_required),
         "visual_retry_used": "False",
+        "text_fallback_used": "False",
         "visual_source": "",
         "fallback_stage": "none",
         "fallback_trigger": "",
@@ -1487,6 +1519,7 @@ def build_post_visual(
                 **base_meta,
                 **download_meta,
                 "mode": "ai_human",
+                "text_fallback_used": "False",
                 "visual_source": "human_ai",
                 "fallback_stage": "none",
                 "fallback_trigger": "",
@@ -1573,6 +1606,7 @@ def build_post_visual(
                     **base_meta,
                     **retry_download_meta,
                     "mode": "ai_human_retry",
+                    "text_fallback_used": "False",
                     "visual_source": "human_ai_retry",
                     "fallback_stage": "human_retry",
                     "fallback_trigger": retry_reason,

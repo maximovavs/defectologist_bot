@@ -159,7 +159,7 @@ jobs:
 
       # общий лимит поста
       POST_MAX_CHARS: "1000"
-      TG_CAPTION_MAX_BYTES: "950"
+      TG_CAPTION_MAX_UTF16_UNITS: "1000"
 
     steps:
       - uses: actions/checkout@v6

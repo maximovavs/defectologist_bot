@@ -1601,6 +1601,59 @@ def _write_dry_run_topic(
     return path
 
 
+DRY_RUN_VISUAL_FIELDS = (
+    "mode",
+    "reason",
+    "final_reason",
+    "visual_source",
+    "fallback_stage",
+    "fallback_trigger",
+    "fallback_reason",
+    "visual_qa_required",
+    "visual_qa_status",
+    "visual_qa_reason",
+    "visual_qa_attempts",
+    "human_qa_first_status",
+    "human_qa_first_reason",
+    "human_qa_retry_status",
+    "human_qa_retry_reason",
+    "human_qa_key_source",
+    "human_qa_key_attempts",
+    "human_qa_key_fallback_used",
+    "human_qa_key_fallback_trigger",
+    "human_qa_first_key_source",
+    "human_qa_first_key_attempts",
+    "human_qa_first_key_fallback_used",
+    "human_qa_first_key_fallback_trigger",
+    "human_qa_retry_key_source",
+    "human_qa_retry_key_attempts",
+    "human_qa_retry_key_fallback_used",
+    "human_qa_retry_key_fallback_trigger",
+    "object_prompt_used",
+    "object_scene_category",
+    "object_generation_status",
+    "text_fallback_used",
+    "model",
+    "gen_size",
+    "output_size",
+)
+
+
+def _write_dry_run_visual(
+    out_dir: Path,
+    stem: str,
+    visual_meta: dict[str, object],
+) -> None:
+    try:
+        payload = {field: visual_meta.get(field) for field in DRY_RUN_VISUAL_FIELDS if field in visual_meta}
+        (out_dir / f"{stem}.visual.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[WARN] dry_run_visual_diagnostics_failed error_type={exc.__class__.__name__}", flush=True)
+
+
 def _handle_post_engagement(
     *,
     spec: EngagementSpec,
@@ -2553,6 +2606,7 @@ async def amain() -> None:
                         effective_topic_id,
                         effective_topic_title,
                     )
+                    _write_dry_run_visual(out, dry_run_stem, visual_meta)
                 else:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:

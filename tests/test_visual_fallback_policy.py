@@ -5,7 +5,10 @@ from io import StringIO
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from src.services.visual_pipeline import (
+    _object_scene_category,
     _visual_qa_key_candidates,
     build_object_only_visual_prompt,
     build_post_visual,
@@ -106,6 +109,22 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             self.assertEqual(result["human_qa_key_source"], "general")
             self.assertEqual(request.call_count, 2)
 
+    def test_timeout_can_use_next_key_once(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["human_qa_key_source"], "general")
+        self.assertEqual(result["human_qa_key_fallback_trigger"], "timeout")
+        self.assertEqual(request.call_count, 2)
+
     def test_both_keys_are_bounded_to_two_requests_and_logs_hide_keys(self):
         visual_key = "VISUAL_SECRET_DO_NOT_LOG"
         general_key = "GENERAL_SECRET_DO_NOT_LOG"
@@ -132,6 +151,8 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         ) as request:
             result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
         self.assertEqual(result["human_qa_key_source"], "general")
+        self.assertEqual(result["qa_key_source"], "general")
+        self.assertEqual(result["qa_key_attempts"], "1")
         self.assertEqual(request.call_count, 1)
 
     def test_key_fallback_does_not_weaken_hard_failure(self):
@@ -208,6 +229,19 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(meta["fallback_stage"], "text")
         self.assertEqual(meta["human_qa_first_reason"], "ghosted_figure")
         self.assertEqual(meta["human_qa_retry_reason"], "action_mismatch")
+
+    def test_object_fallback_categories_prioritize_specific_rubric_signals(self):
+        cases = (
+            ("Положение языка при произнесении звука", "articulation_speech"),
+            ("Два языка дома", "bilingual_languages"),
+            ("Реакция на колокольчик", "hearing_sounds_music"),
+        )
+        for title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(_object_scene_category(title, "tip_of_day"), expected)
+
+    def test_lone_language_word_does_not_select_bilingual_category(self):
+        self.assertNotEqual(_object_scene_category("Положение языка", "tip_of_day"), "bilingual_languages")
 
 
 if __name__ == "__main__":

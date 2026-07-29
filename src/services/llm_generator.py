@@ -715,7 +715,9 @@ PARENT_AGE_ACTION_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 PARENT_INFANT_REQUIRED_WORD_RE = re.compile(
-    r"(?:(?:реб[её]н(?:ок|ка)|малыш\w*|ожидайте|попрос\w*|предлож\w*|пусть|ждите).{0,100})"
+    r"(?:(?:попрос\w*\s+(?:реб[её]н(?:ка|ку)|малыш\w*)|предлож\w*\s+(?:реб[её]нку|малыш\w*)|"
+    r"пусть\s+реб[её]нок|(?:ждите|ожидайте).{0,40}(?:когда\s+)?реб[её]нок|"
+    r"реб[её]нок\s+долж\w*).{0,100})"
     r"(?:(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)"
     r"\s+(?:[«\"“'][^»\"”']+[»\"”']|[а-яё]{2,}(?:\s+[а-яё]{2,}){0,2})|"
     r"ответ\w*\s+слов\w*|попрос\w*\s+словами)",
@@ -724,7 +726,10 @@ PARENT_INFANT_REQUIRED_WORD_RE = re.compile(
 PARENT_INFANT_OPTIONAL_VERBAL_RE = re.compile(
     r"(?:реб[её]н(?:ок|ка)|малыш\w*).{0,30}(?:может|попыта\w*|пыта\w*).{0,45}"
     r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)|"
-    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*).{0,100}не\s+обязательн\w*",
+    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*).{0,100}не\s+обязательн\w*|"
+    r"(?:не\s+требуйте|по\s+желанию).{0,80}"
+    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)|"
+    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*).{0,80}по\s+желанию",
     re.IGNORECASE | re.DOTALL,
 )
 PARENT_OPEN_VERBAL_ANSWER_RE = re.compile(
@@ -776,7 +781,7 @@ def _validate_parent_age_action_fit(text: str) -> Tuple[bool, str]:
     body = _parent_body_without_age(text)
     if parsed.min_months < 12:
         for segment in (part.strip() for part in re.split(r"[.!?;\n]+", body) if part.strip()):
-            if not (PARENT_AGE_ACTION_RE.search(segment) or PARENT_INFANT_REQUIRED_WORD_RE.search(segment)):
+            if not PARENT_INFANT_REQUIRED_WORD_RE.search(segment):
                 continue
             if PARENT_INFANT_OPTIONAL_VERBAL_RE.search(segment):
                 continue
@@ -1385,24 +1390,24 @@ def _validate_parent_observable_benefit_output(text: str, thematic: bool = False
 
 
 PARENT_HEARING_INFERENCE_RE = re.compile(
-    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|провер\w*|показыва\w*|"
-    r"можно\s+(?:понять|определ\w*|узна\w*)).{0,120}(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|"
-    r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|провер\w*|"
-    r"показыва\w*|можно\s+(?:понять|определ\w*|узна\w*))|"
+    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|"
+    r"позволя\w*\s+проверить|можно\s+(?:понять|определ\w*|узна\w*|проверить)).{0,120}"
+    r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|"
+    r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|"
+    r"проверь\w*|проверя\w*|проверите|показыва\w*|позволя\w*\s+проверить|"
+    r"можно\s+(?:понять|определ\w*|узна\w*|проверить))|"
     r"(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,120}(?:"
     r"значит.{0,40}слух\w*|хорош\w*\s+слыш\w*|потер\w*\s+слух\w*\s+исключ\w*|"
     r"слух\w*\s+в\s+норм\w*|(?:снижени|нарушени)\w*\s+слух\w*\s+нет)",
     re.IGNORECASE,
 )
 PARENT_HEARING_NEGATED_INFERENCE_RE = re.compile(
-    r"(?:\bне\b|\bнельзя\b|\bневозможно\b)\s+(?:\w+\s+){0,4}"
-    r"(?:означа\w*|показыва\w*|определя\w*|определить|проверя\w*|проверить|узна\w*|понять|сделать\s+вывод)|"
-    r"\bне\s+заменя\w*\b",
+    r"(?:\bне\b(?!\s+только\b)|\bнельзя\b|\bневозможно\b)\s+(?:\w+\s+){0,4}$",
     re.IGNORECASE,
 )
-PARENT_HEARING_PROFESSIONAL_REFERRAL_RE = re.compile(
-    r"(?:обсуд\w*|обрат\w*).{0,100}(?:врач\w*|специалист\w*|аудиолог\w*|логопед\w*|педиатр\w*)|"
-    r"провер\w*\s+слух\w*.{0,60}(?:у\s+врач\w*|у\s+аудиолог\w*|специалист\w*)",
+PARENT_HEARING_INFERENCE_ACTION_RE = re.compile(
+    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|"
+    r"показыва\w*|позволя\w*)",
     re.IGNORECASE,
 )
 
@@ -1413,11 +1418,10 @@ def _validate_parent_hearing_inference_output(text: str) -> Tuple[bool, str]:
         if re.match(r"^🔴\s*Миф\s*:", stripped, re.IGNORECASE):
             continue
         for sentence in (part.strip() for part in re.split(r"[.!?;]+", stripped) if part.strip()):
-            if PARENT_HEARING_PROFESSIONAL_REFERRAL_RE.search(sentence):
-                continue
             for inference in PARENT_HEARING_INFERENCE_RE.finditer(sentence):
-                context = sentence[max(0, inference.start() - 60):min(len(sentence), inference.end() + 30)]
-                if PARENT_HEARING_NEGATED_INFERENCE_RE.search(context):
+                actions = list(PARENT_HEARING_INFERENCE_ACTION_RE.finditer(sentence[:inference.end()]))
+                action_start = actions[-1].start() if actions else inference.start()
+                if PARENT_HEARING_NEGATED_INFERENCE_RE.search(sentence[:action_start]):
                     continue
                 return False, "parent_false_hearing_inference"
     return True, "ok"
@@ -1434,11 +1438,6 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
     if not _evidence_is_predominantly_english(evidence_text):
         return True, "ok"
     content = _parent_phoneme_content(text)
-    sound_context = re.compile(
-        r"(?:звук\w*|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком|"
-        r"целев\w*\s+звук|потрениру\w*\s+звук)",
-        re.IGNORECASE,
-    )
     if re.search(
         r"(?:звук\w*|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком|"
         r"целев\w*\s+звук|потрениру\w*\s+звук)"
@@ -1448,30 +1447,40 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
     ):
         return False, "parent_cross_language_sound_norm"
     evidence_lower = (evidence_text or "").lower()
-    example_marker = re.compile(
-        r"(?:например\s*:|\bслова\b\s*:|слова\s+со\s+звуком|подберите\s+слова|"
-        r"в\s+словах|потрениру\w*\s+на\s+словах)",
+    sound_example_marker = re.compile(
+        r"(?:слова\s+со\s+звуком|подберите\s+слова|потрениру\w*\s+звук\w*\s+в\s+словах|"
+        r"\bслова\s*:|примеры\s+слов\s+для\s+звука)",
         re.IGNORECASE,
     )
-    for marker in example_marker.finditer(content):
-        local_start = max(0, marker.start() - 120)
-        local_end = min(len(content), marker.end() + 180)
-        local = content[local_start:local_end]
-        if not sound_context.search(local):
-            continue
-        quoted = re.findall(r"[«\"“]([^»\"”]+)[»\"”]", local)
-        candidates: List[str] = []
-        for quoted_group in quoted:
-            candidates.extend(re.findall(r"[А-Яа-яЁё]{2,}", quoted_group.lower()))
-        if not candidates:
-            tail = content[marker.end():local_end]
-            candidates = re.findall(r"[А-Яа-яЁё]{2,}", tail.lower())[:5]
-        ignored = {
-            "например", "слова", "подберите", "звуком", "звук", "произнесите", "повторите",
-            "потренируйте", "словах", "целевой",
-        }
-        if any(word not in ignored and word not in evidence_lower for word in candidates):
-            return False, "parent_cross_language_sound_norm"
+    for block in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", content) if part.strip()):
+        for marker in sound_example_marker.finditer(block):
+            tail = block[marker.end():]
+            quoted_list = re.search(
+                r"([«\"“][^»\"”]+[»\"”](?:\s*,\s*[«\"“][^»\"”]+[»\"”]){1,4})",
+                tail,
+            )
+            quoted_groups = (
+                re.findall(r"[«\"“]([^»\"”]+)[»\"”]", quoted_list.group(1))
+                if quoted_list
+                else []
+            )
+            candidates = [
+                word.lower()
+                for group in quoted_groups
+                for word in re.findall(r"[А-Яа-яЁё]{2,}", group)
+            ]
+            if not candidates:
+                comma_list = re.search(
+                    r"([А-Яа-яЁё]{2,}(?:\s*,\s*[А-Яа-яЁё]{2,}){1,4})",
+                    tail,
+                )
+                candidates = (
+                    re.findall(r"[А-Яа-яЁё]{2,}", comma_list.group(1).lower())
+                    if comma_list
+                    else []
+                )
+            if candidates and any(word not in evidence_lower for word in candidates):
+                return False, "parent_cross_language_sound_norm"
     for sentence in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", content) if part.strip()):
         has_sound_term = re.search(r"(?:звук\w*|фонем\w*|произнош\w*)", sentence, re.IGNORECASE)
         has_age_term = re.search(r"(?:возраст\w*|год\w*|лет|месяц\w*)", sentence, re.IGNORECASE)

@@ -230,17 +230,23 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(meta["human_qa_first_reason"], "ghosted_figure")
         self.assertEqual(meta["human_qa_retry_reason"], "action_mismatch")
 
-    def test_object_fallback_categories_prioritize_specific_rubric_signals(self):
+    def test_object_fallback_categories_follow_title_topic(self):
         cases = (
-            ("Положение языка при произнесении звука", "articulation_speech"),
-            ("Игра для двух языков дома", "bilingual_languages"),
-            ("Реакция малыша на колокольчик", "hearing_sounds_music"),
-            ("Язык находится за верхними зубами", "articulation_speech"),
-            ("Развитие домашнего языка в двуязычной семье", "bilingual_languages"),
+            ("Положение языка при произнесении звука", "tip_of_day", "articulation_speech"),
+            ("Игра для двух языков дома", "tip_of_day", "bilingual_languages"),
+            ("Реакция малыша на колокольчик", "tip_of_day", "hearing_sounds_music"),
+            ("Язык находится за верхними зубами", "tip_of_day", "articulation_speech"),
+            ("Развитие домашнего языка в двуязычной семье", "tip_of_day", "bilingual_languages"),
+            ("Реакция на колокольчик", "bilingual_corner", "hearing_sounds_music"),
+            ("Положение языка при произнесении звука", "bilingual_corner", "articulation_speech"),
+            ("Два языка дома", "bilingual_corner", "bilingual_languages"),
+            ("Четверг — Речь в разных ситуациях", "speech_sounds", "articulation_speech"),
+            ("Четверг — Речь в разных ситуациях", "hearing_and_speech", "hearing_sounds_music"),
+            ("Четверг — Речь в разных ситуациях", "bilingual_corner", "default"),
         )
-        for title, expected in cases:
-            with self.subTest(title=title):
-                self.assertEqual(_object_scene_category(title, "tip_of_day"), expected)
+        for title, rubric_id, expected in cases:
+            with self.subTest(title=title, rubric_id=rubric_id):
+                self.assertEqual(_object_scene_category(title, rubric_id), expected)
 
     def test_lone_language_word_does_not_select_bilingual_category(self):
         self.assertNotEqual(_object_scene_category("Положение языка", "tip_of_day"), "bilingual_languages")

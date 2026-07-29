@@ -20,7 +20,7 @@ class CrossLanguageSoundPolicyTest(unittest.TestCase):
 
     def test_rejects_invented_russian_examples_and_age_norms(self):
         self.assertEqual(
-            _validate_cross_language_sound_output("Потренируйте слова со звуком: папа и птица.", ENGLISH_EVIDENCE)[1],
+            _validate_cross_language_sound_output("Потренируйте слова со звуком: папа, птица.", ENGLISH_EVIDENCE)[1],
             "parent_cross_language_sound_norm",
         )
         self.assertEqual(
@@ -58,17 +58,30 @@ class CrossLanguageSoundPolicyTest(unittest.TestCase):
 
     def test_rejects_generic_examples_only_in_sound_context(self):
         cases = (
-            "Потренируйте звук. Например: «шапка», «шар», «машина».",
             "Потренируйте звук. Слова: жук, жаба, лыжи.",
             "Потренируйте звук. Подберите слова «флаг», «кофта», «шкаф».",
             "Потренируйте звук [с] в словах сок, нос, лес.",
-            "Выберите целевой звук. Потренируйте на словах дом, дым, сад.",
+            "Подберите слова со звуком [ш]: шапка, шар, машина.",
+            "Потренируйте звук в словах: жук, жаба, лыжи.",
         )
         for text in cases:
             with self.subTest(text=text):
                 self.assertEqual(
                     _validate_cross_language_sound_output(text, ENGLISH_EVIDENCE)[1],
                     "parent_cross_language_sound_norm",
+                )
+
+    def test_lone_example_marker_does_not_trigger_sound_example_validation(self):
+        cases = (
+            "Звуки осваиваются по-разному. Например, покажите ребёнку картинку.",
+            "Поговорите о звуках. Например, позвоните в колокольчик.",
+            "В разных языках звуки различаются. Например, используйте знакомую игру.",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _validate_cross_language_sound_output(text, ENGLISH_EVIDENCE),
+                    (True, "ok"),
                 )
 
     def test_rejects_cross_language_age_norms_in_any_word_order(self):

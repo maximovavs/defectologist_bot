@@ -1257,10 +1257,7 @@ def _object_scene_category(title: str, rubric_id: str) -> str:
         return "games_everyday_communication"
     if any(word in value for word in ("книг", "словар", "фраз", "рассказ", "book", "vocab")):
         return "books_vocab_phrases_stories"
-    return {
-        "speech_sounds": "articulation_speech",
-        "hearing_and_speech": "hearing_sounds_music",
-    }.get((rubric_id or "").strip().lower(), "default")
+    return "default"
 
 
 def build_object_only_visual_prompt(title: str, rubric_id: str, original_prompt: str = "") -> str:

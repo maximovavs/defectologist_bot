@@ -240,13 +240,19 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             ("Реакция на колокольчик", "bilingual_corner", "hearing_sounds_music"),
             ("Положение языка при произнесении звука", "bilingual_corner", "articulation_speech"),
             ("Два языка дома", "bilingual_corner", "bilingual_languages"),
-            ("Четверг — Речь в разных ситуациях", "speech_sounds", "articulation_speech"),
-            ("Четверг — Речь в разных ситуациях", "hearing_and_speech", "hearing_sounds_music"),
-            ("Четверг — Речь в разных ситуациях", "bilingual_corner", "default"),
+            ("Игра с мячом дома", "bilingual_corner", "games_everyday_communication"),
+            ("Положение языка при произнесении звука", "speech_sounds", "articulation_speech"),
+            ("Реакция малыша на колокольчик", "hearing_and_speech", "hearing_sounds_music"),
         )
         for title, rubric_id, expected in cases:
             with self.subTest(title=title, rubric_id=rubric_id):
                 self.assertEqual(_object_scene_category(title, rubric_id), expected)
+
+    def test_legacy_bilingual_rubric_does_not_override_neutral_title(self):
+        self.assertNotEqual(
+            _object_scene_category("Речь в разных ситуациях", "bilingual_corner"),
+            "bilingual_languages",
+        )
 
     def test_lone_language_word_does_not_select_bilingual_category(self):
         self.assertNotEqual(_object_scene_category("Положение языка", "tip_of_day"), "bilingual_languages")

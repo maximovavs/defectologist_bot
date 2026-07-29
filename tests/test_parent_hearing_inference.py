@@ -24,6 +24,8 @@ class ParentHearingInferenceTest(unittest.TestCase):
             "По произношению нельзя определить слух.",
             "Понаблюдайте за реакцией ребёнка, но не делайте вывод о состоянии слуха.",
             "При потере навыков лучше обсудить это с педиатром и проверить слух.",
+            "Домашнее упражнение не заменяет проверку слуха у специалиста.",
+            "Эта реакция не позволяет сделать вывод о состоянии слуха.",
         )
         for text in cases:
             with self.subTest(text=text):
@@ -56,6 +58,7 @@ class ParentHearingInferenceTest(unittest.TestCase):
             "По этой игре можно определить слух, но окончательное решение принимает специалист.",
             "Не только увидите реакцию, но и поймёте, слышит ли ребёнок звук.",
             "По этой игре можно проверить слух.",
+            "Вы поймёте, слышит ли ребёнок, затем сможете обсудить это с логопедом.",
         )
         for text in cases:
             with self.subTest(text=text):
@@ -75,12 +78,17 @@ class ParentHearingInferenceTest(unittest.TestCase):
         )
 
     def test_unrelated_negation_in_same_sentence_does_not_excuse_claim(self):
-        self.assertEqual(
-            _validate_parent_hearing_inference_output(
-                "Не спешите, затем вы увидите, слышит ли ребёнок звук."
-            )[1],
-            "parent_false_hearing_inference",
+        cases = (
+            "Не спешите, затем вы увидите, слышит ли ребёнок звук.",
+            "Не переживайте, затем вы поймёте, слышит ли ребёнок.",
+            "Не забудьте: вы увидите, слышит ли ребёнок звук.",
         )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _validate_parent_hearing_inference_output(text)[1],
+                    "parent_false_hearing_inference",
+                )
 
 if __name__ == "__main__":
     unittest.main()

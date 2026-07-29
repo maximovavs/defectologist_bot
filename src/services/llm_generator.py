@@ -715,22 +715,37 @@ PARENT_AGE_ACTION_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 PARENT_INFANT_REQUIRED_WORD_RE = re.compile(
-    r"(?:(?:попрос\w*\s+(?:реб[её]н(?:ка|ку)|малыш\w*)|предлож\w*\s+(?:реб[её]нку|малыш\w*)|"
-    r"пусть\s+реб[её]нок|(?:ждите|ожидайте).{0,40}(?:когда\s+)?реб[её]нок|"
-    r"реб[её]нок\s+долж\w*).{0,100})"
-    r"(?:(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)"
-    r"\s+(?:[«\"“'][^»\"”']+[»\"”']|[а-яё]{2,}(?:\s+[а-яё]{2,}){0,2})|"
-    r"ответ\w*\s+слов\w*|попрос\w*\s+словами)",
+    r"(?:попрос\w*\s+(?:реб[её]н\w*|малыш\w*)|предлож\w*\s+(?:реб[её]н\w*|малыш\w*)|"
+    r"пусть\s+(?:реб[её]нок|малыш\w*)|(?:ждите|ожидайте).{0,40}(?:реб[её]нок|малыш\w*)|"
+    r"(?:реб[её]нок|малыш\w*)\s+долж\w*)",
     re.IGNORECASE | re.DOTALL,
 )
+PARENT_INFANT_VERBAL_ACTION_RE = re.compile(
+    r"(?:(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)"
+    r"\s*(?::\s*)?(?:[«\"“'][^»\"”']+[»\"”']|[а-яё]{2,}(?:\s+[а-яё]{2,}){0,2})|"
+    r"ответ\w*\s+слов\w*)",
+    re.IGNORECASE,
+)
+PARENT_INFANT_ADULT_EXECUTOR_RE = re.compile(
+    r"(?:(?:попрос\w*|предлож\w*)\s+"
+    r"(?:взросл\w*|мам\w*|пап\w*|родител\w*|специалист\w*|логопед\w*|педагог\w*)|"
+    r"(?:взросл\w*|мам\w*|пап\w*|родител\w*|специалист\w*|логопед\w*|педагог\w*))"
+    r"(?:\s+\w+){0,3}\s*$",
+    re.IGNORECASE,
+)
+PARENT_INFANT_IMPLICIT_REQUEST_RE = re.compile(
+    r"(?:попрос\w*|предлож\w*)(?:\s+\w+){0,2}\s*$",
+    re.IGNORECASE,
+)
 PARENT_INFANT_OPTIONAL_VERBAL_RE = re.compile(
-    r"(?:реб[её]н(?:ок|ка)|малыш\w*).{0,30}(?:может|попыта\w*|пыта\w*).{0,45}"
-    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)|"
-    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*).{0,100}не\s+обязательн\w*|"
-    r"(?:не\s+требуйте|по\s+желанию).{0,80}"
-    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*)|"
-    r"(?:ска(?:з|ж)\w*|говор\w*|произнес\w*|наз(?:ва|ов)\w*|повтор\w*).{0,80}по\s+желанию",
-    re.IGNORECASE | re.DOTALL,
+    r"(?:\bне\s+требуйте\b|(?:реб[её]н\w*|малыш\w*).{0,35}"
+    r"(?:может(?:\s+попытаться)?(?:\s+по\s+желанию)?|по\s+желанию)|\bпо\s+желанию)\s*$",
+    re.IGNORECASE,
+)
+PARENT_INFANT_OPTIONAL_AFTER_ACTION_RE = re.compile(
+    r"^\s*(?:,\s*(?:но\s+)?(?:это\s+)?)?"
+    r"(?:по\s+желанию|не\s+обязательн\w*|необязательн\w*)",
+    re.IGNORECASE,
 )
 PARENT_OPEN_VERBAL_ANSWER_RE = re.compile(
     r"(?:как\s+называется|что\s+ты\s+делаешь|куда\s+положим|расскажи,?\s+что\s+видишь|что\s+произошло|"
@@ -774,6 +789,25 @@ def _validate_parent_age_range_width(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def _has_required_infant_verbal_task(segment: str) -> bool:
+    for action in PARENT_INFANT_VERBAL_ACTION_RE.finditer(segment or ""):
+        prefix = segment[max(0, action.start() - 120):action.start()]
+        suffix = segment[action.end():min(len(segment), action.end() + 100)]
+        if (
+            PARENT_INFANT_OPTIONAL_VERBAL_RE.search(prefix)
+            or PARENT_INFANT_OPTIONAL_AFTER_ACTION_RE.search(suffix)
+        ):
+            continue
+        if PARENT_INFANT_ADULT_EXECUTOR_RE.search(prefix):
+            continue
+        if (
+            PARENT_INFANT_REQUIRED_WORD_RE.search(prefix)
+            or PARENT_INFANT_IMPLICIT_REQUEST_RE.search(prefix)
+        ):
+            return True
+    return False
+
+
 def _validate_parent_age_action_fit(text: str) -> Tuple[bool, str]:
     parsed = _parse_parent_age_range(text)
     if not parsed or parsed.min_months is None:
@@ -781,11 +815,8 @@ def _validate_parent_age_action_fit(text: str) -> Tuple[bool, str]:
     body = _parent_body_without_age(text)
     if parsed.min_months < 12:
         for segment in (part.strip() for part in re.split(r"[.!?;\n]+", body) if part.strip()):
-            if not PARENT_INFANT_REQUIRED_WORD_RE.search(segment):
-                continue
-            if PARENT_INFANT_OPTIONAL_VERBAL_RE.search(segment):
-                continue
-            return False, "parent_age_action_mismatch"
+            if _has_required_infant_verbal_task(segment):
+                return False, "parent_age_action_mismatch"
     if parsed.min_months < 18:
         numbered_steps = list(re.finditer(r"(?m)^\s*\d+[.)]\s+", body))
         for question in PARENT_OPEN_VERBAL_ANSWER_RE.finditer(body):
@@ -1391,23 +1422,26 @@ def _validate_parent_observable_benefit_output(text: str, thematic: bool = False
 
 PARENT_HEARING_INFERENCE_RE = re.compile(
     r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|"
-    r"позволя\w*\s+проверить|можно\s+(?:понять|определ\w*|узна\w*|проверить)).{0,120}"
+    r"позволя\w*\s+(?:проверить|сделать\s+вывод)|"
+    r"можно\s+(?:понять|определ\w*|узна\w*|проверить)).{0,120}"
     r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|"
     r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|"
-    r"проверь\w*|проверя\w*|проверите|показыва\w*|позволя\w*\s+проверить|"
+    r"проверь\w*|проверя\w*|проверите|показыва\w*|"
+    r"позволя\w*\s+(?:проверить|сделать\s+вывод)|"
     r"можно\s+(?:понять|определ\w*|узна\w*|проверить))|"
+    r"означа\w*.{0,80}слух\w*\s+в\s+норм\w*|"
     r"(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,120}(?:"
     r"значит.{0,40}слух\w*|хорош\w*\s+слыш\w*|потер\w*\s+слух\w*\s+исключ\w*|"
     r"слух\w*\s+в\s+норм\w*|(?:снижени|нарушени)\w*\s+слух\w*\s+нет)",
     re.IGNORECASE,
 )
 PARENT_HEARING_NEGATED_INFERENCE_RE = re.compile(
-    r"(?:\bне\b(?!\s+только\b)|\bнельзя\b|\bневозможно\b)\s+(?:\w+\s+){0,4}$",
+    r"(?:\bне\s+|\bнельзя\s+(?:\w+\s+){0,4}|\bневозможно\s+(?:\w+\s+){0,4})$",
     re.IGNORECASE,
 )
 PARENT_HEARING_INFERENCE_ACTION_RE = re.compile(
     r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|"
-    r"показыва\w*|позволя\w*)",
+    r"показыва\w*|позволя\w*|означа\w*)",
     re.IGNORECASE,
 )
 
@@ -1447,17 +1481,26 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
     ):
         return False, "parent_cross_language_sound_norm"
     evidence_lower = (evidence_text or "").lower()
-    sound_example_marker = re.compile(
-        r"(?:слова\s+со\s+звуком|подберите\s+слова|потрениру\w*\s+звук\w*\s+в\s+словах|"
-        r"\bслова\s*:|примеры\s+слов\s+для\s+звука)",
+    sound_context = re.compile(
+        r"(?:\bзвук\w*|фонем\w*|целев\w*\s+звук\w*|слова\s+со\s+звуком|"
+        r"потрениру\w*\s+звук\w*|произнош\w*\s+звук\w*)",
         re.IGNORECASE,
     )
-    for block in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", content) if part.strip()):
+    sound_example_marker = re.compile(
+        r"(?:слова\s+со\s+звуком\s*:|подберите\s+слова\s*:?|"
+        r"потрениру\w*\s+звук\w*\s+в\s+словах\s*:|"
+        r"\bслова\s*:|примеры\s+слов(?:\s+для\s+звука)?\s*:|например\s*:)",
+        re.IGNORECASE,
+    )
+    for block in (line.strip() for line in content.splitlines() if line.strip()):
+        if not sound_context.search(block):
+            continue
         for marker in sound_example_marker.finditer(block):
-            tail = block[marker.end():]
-            quoted_list = re.search(
+            tail = re.split(r"[.!?;]", block[marker.end():], maxsplit=1)[0]
+            list_tail = re.sub(r"^\s*(?:слова\s+)?", "", tail, flags=re.IGNORECASE)
+            quoted_list = re.match(
                 r"([«\"“][^»\"”]+[»\"”](?:\s*,\s*[«\"“][^»\"”]+[»\"”]){1,4})",
-                tail,
+                list_tail,
             )
             quoted_groups = (
                 re.findall(r"[«\"“]([^»\"”]+)[»\"”]", quoted_list.group(1))
@@ -1470,9 +1513,9 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
                 for word in re.findall(r"[А-Яа-яЁё]{2,}", group)
             ]
             if not candidates:
-                comma_list = re.search(
-                    r"([А-Яа-яЁё]{2,}(?:\s*,\s*[А-Яа-яЁё]{2,}){1,4})",
-                    tail,
+                comma_list = re.match(
+                    r"([А-Яа-яЁё]{2,}(?:\s*,\s*[А-Яа-яЁё]{2,}){1,4})(?:\s*$)",
+                    list_tail,
                 )
                 candidates = (
                     re.findall(r"[А-Яа-яЁё]{2,}", comma_list.group(1).lower())

@@ -985,7 +985,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertEqual(download.call_count, 1)
         self.assertEqual(len(qa_calls), 1)
-        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["mode"], "ai_human")
         self.assertEqual(meta["visual_qa_attempts"], "1")
 
     def test_method_piggybank_qa_http_429_uses_fallback_without_retry(self):
@@ -1008,14 +1008,15 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="method_piggybank",
             )
 
-        self.assertEqual(download.call_count, 1)
-        self.assertNotEqual(buffer.getvalue(), b"first")
-        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
         self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
         self.assertEqual(meta["visual_qa_required"], "True")
-        self.assertEqual(meta["visual_qa"], "skipped")
-        self.assertEqual(meta["visual_qa_status"], "skipped")
-        self.assertEqual(meta["visual_qa_reason"], "qa_http_429")
+        self.assertEqual(meta["visual_qa"], "not_run")
+        self.assertEqual(meta["visual_qa_status"], "not_run")
+        self.assertEqual(meta["human_qa_first_status"], "skipped")
+        self.assertEqual(meta["human_qa_first_reason"], "qa_http_429")
         self.assertEqual(meta["visual_qa_attempts"], "1")
 
     def test_method_piggybank_missing_visual_qa_key_uses_fallback(self):
@@ -1030,10 +1031,11 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="method_piggybank",
             )
 
-        self.assertEqual(download.call_count, 1)
-        self.assertNotEqual(buffer.getvalue(), b"first")
-        self.assertEqual(meta["mode"], "fallback")
-        self.assertEqual(meta["visual_qa_reason"], "gemini_key_missing")
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+        self.assertEqual(meta["visual_qa_reason"], "object_only_no_human_qa")
+        self.assertEqual(meta["human_qa_first_reason"], "gemini_key_missing")
         self.assertEqual(meta["visual_qa_attempts"], "1")
 
     def test_method_piggybank_invalid_qa_response_uses_fallback(self):
@@ -1054,9 +1056,10 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="method_piggybank",
             )
 
-        self.assertEqual(download.call_count, 1)
-        self.assertEqual(meta["mode"], "fallback")
-        self.assertEqual(meta["visual_qa_reason"], "invalid_qa_response")
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+        self.assertEqual(meta["visual_qa_reason"], "object_only_no_human_qa")
+        self.assertEqual(meta["human_qa_first_reason"], "invalid_qa_response")
         self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
 
     def test_method_piggybank_visual_qa_pass_uses_ai_image(self):
@@ -1083,7 +1086,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertEqual(download.call_count, 1)
         self.assertEqual(buffer.getvalue(), b"first")
-        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["mode"], "ai_human")
         self.assertEqual(meta["visual_qa_required"], "True")
         self.assertEqual(meta["visual_qa_status"], "pass")
 
@@ -1117,7 +1120,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("empty setting without reflections, portraits, silhouettes", retry_prompt)
         self.assertIn("normal 50mm perspective", retry_prompt)
         self.assertLessEqual(len(retry_prompt), 900)
-        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["mode"], "ai_human_retry")
         self.assertEqual(meta["visual_retry_used"], "True")
         self.assertEqual(meta["visual_qa_attempts"], "2")
         self.assertEqual(meta["visual_retry_target_reason"], "ghosted_figure")
@@ -1159,7 +1162,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertEqual(download.call_count, 2)
         self.assertEqual(buffer.getvalue(), b"second")
-        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["mode"], "ai_human_retry")
         self.assertEqual(meta["visual_retry_used"], "True")
         self.assertEqual(meta["visual_qa_attempts"], "2")
 
@@ -1188,11 +1191,11 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="tip_of_day",
             )
 
-        self.assertEqual(download.call_count, 2)
+        self.assertEqual(download.call_count, 3)
         self.assertNotIn(buffer.getvalue(), {b"first", b"second"})
-        self.assertEqual(meta["mode"], "fallback")
-        self.assertEqual(meta["visual_qa"], "fail")
-        self.assertEqual(meta["visual_qa_reason"], "character_counts_unknown")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_generation_status"], "failed")
+        self.assertEqual(meta["human_qa_retry_reason"], "character_counts_unknown")
         self.assertEqual(meta["visual_qa_attempts"], "2")
 
     def test_method_piggybank_visual_qa_fail_then_retry_pass_uses_retry_image(self):
@@ -1218,7 +1221,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertEqual(download.call_count, 2)
         self.assertEqual(buffer.getvalue(), b"second")
-        self.assertEqual(meta["mode"], "ai")
+        self.assertEqual(meta["mode"], "ai_human_retry")
         self.assertEqual(meta["visual_retry_used"], "True")
         self.assertEqual(meta["visual_qa_status"], "pass")
         self.assertEqual(meta["visual_qa_attempts"], "2")
@@ -1243,12 +1246,13 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="tip_of_day",
             )
 
-        self.assertEqual(download.call_count, 1)
-        self.assertNotEqual(buffer.getvalue(), b"first")
-        self.assertEqual(meta["mode"], "fallback")
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
         self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
         self.assertEqual(meta["visual_qa_required"], "True")
-        self.assertEqual(meta["visual_qa_status"], "skipped")
+        self.assertEqual(meta["visual_qa_status"], "not_run")
+        self.assertEqual(meta["human_qa_first_status"], "skipped")
 
     def test_visual_qa_required_rubrics_env_parses_multiple_ids(self):
         with patch.dict(os.environ, {"VISUAL_QA_REQUIRED_RUBRICS": "method_piggybank, tip_of_day age_norms"}):
@@ -1278,10 +1282,10 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="tip_of_day",
             )
 
-        self.assertEqual(download.call_count, 2)
-        self.assertEqual(meta["mode"], "fallback")
-        self.assertEqual(meta["visual_qa"], "fail")
-        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_generation_status"], "failed")
+        self.assertEqual(meta["human_qa_retry_reason"], "duplicate_figure")
         self.assertIn("duplicate_figure", meta["reason"])
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):

@@ -1072,6 +1072,118 @@ def _visual_qa_skipped(result: Dict[str, object]) -> bool:
     return str(result.get("status", "")).strip().lower() == "skipped"
 
 
+OBJECT_SCENE_CATEGORIES = {
+    "books_vocab_phrases_stories": (
+        "children’s picture books, picture cards, small wooden toy objects"
+    ),
+    "hearing_sounds_music": (
+        "toy drum, small bell, wooden rhythm instruments, simple sound-wave shapes without text"
+    ),
+    "articulation_speech": "tabletop mirror with no human reflection, picture cards, wooden blocks",
+    "games_everyday_communication": "basket, ball, wooden blocks, picture cards",
+    "bilingual_languages": "two differently colored children’s books, small globe, two empty speech-bubble shapes without text",
+    "reading_prep": "picture cards, blank wooden letter-like blocks without readable letters, children’s book, pencil and blank paper",
+    "default": "children’s picture book, picture cards, wooden toys",
+}
+
+
+def _object_scene_category(title: str, rubric_id: str) -> str:
+    value = f"{rubric_id} {title}".lower()
+    if any(word in value for word in ("билинг", "язык", "language", "двуязыч")):
+        return "bilingual_languages"
+    if any(word in value for word in ("слух", "звук", "музык", "hearing", "sound", "music")):
+        return "hearing_sounds_music"
+    if any(word in value for word in ("артикуля", "губ", "язык", "speech", "articulation")):
+        return "articulation_speech"
+    if any(word in value for word in ("чита", "букв", "read", "letter")):
+        return "reading_prep"
+    if any(word in value for word in ("игр", "мяч", "game", "общен", "commun")):
+        return "games_everyday_communication"
+    if any(word in value for word in ("книг", "словар", "фраз", "рассказ", "book", "vocab")):
+        return "books_vocab_phrases_stories"
+    return "default"
+
+
+def build_object_only_visual_prompt(title: str, rubric_id: str, original_prompt: str = "") -> str:
+    """Build a deterministic, people-free prompt; title only selects the object category."""
+    category = _object_scene_category(title, rubric_id)
+    objects = OBJECT_SCENE_CATEGORIES[category]
+    return (
+        "Object-only educational still life. No people. No adults. No children. No faces. No hands. "
+        "No human figures. No silhouettes. No reflections of people. No text. No letters. No words. "
+        "No logos. No watermarks. No medical tools. Warm soft editorial illustration, beige and pastel palette, "
+        "daylight, centered, child-friendly objects. 16:9 landscape. "
+        f"Scene category: {category}. Objects: {objects}."
+    )
+
+
+def _build_object_visual_fallback(
+    *,
+    safe_title: str,
+    day_key: str,
+    fallback_title: str,
+    base_meta: Dict[str, str],
+    title: str,
+    rubric_id: str,
+    pollinations_token: str,
+    trigger: str,
+    first_qa: Dict[str, object] | None = None,
+    retry_qa: Dict[str, object] | None = None,
+) -> Tuple[BytesIO, Dict[str, str]]:
+    object_prompt = build_object_only_visual_prompt(title, rubric_id)
+    category = _object_scene_category(title, rubric_id)
+    print(f"[VISUAL][OBJECT_FALLBACK] trigger={_short_log_message(trigger)} category={category}", flush=True)
+    try:
+        buffer, object_meta = download_pollinations_image_with_meta(
+            prompt=object_prompt,
+            token=pollinations_token,
+        )
+        return buffer, {
+            **base_meta,
+            **object_meta,
+            "mode": "ai_object_fallback",
+            "visual_source": "object_ai",
+            "fallback_stage": "object",
+            "fallback_trigger": trigger,
+            "reason": "object_fallback_success",
+            "final_reason": "object_fallback_success",
+            "fallback_reason": trigger,
+            "object_prompt_used": "True",
+            "object_scene_category": category,
+            "object_generation_status": "generated",
+            "visual_qa": "not_run",
+            "visual_qa_status": "not_run",
+            "visual_qa_reason": "object_only_no_human_qa",
+            "visual_qa_attempts": "2" if retry_qa is not None else ("1" if first_qa is not None else "0"),
+            "human_qa_first_status": str((first_qa or {}).get("status", "not_run")),
+            "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
+            "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
+            "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
+        }
+    except Exception as exc:
+        print(f"[VISUAL][TEXT_FALLBACK] trigger={_short_log_message(trigger)}", flush=True)
+        fallback = build_fallback_cover_buffer(title=safe_title, day_key=day_key, fallback_title=fallback_title)
+        return fallback, {
+            **base_meta,
+            "mode": "text_fallback",
+            "visual_source": "text_card",
+            "fallback_stage": "text",
+            "fallback_trigger": trigger,
+            "reason": _short_log_message(getattr(exc, "reason", exc), max_len=220) or trigger,
+            "final_reason": "object_fallback_failed",
+            "fallback_reason": trigger,
+            "object_prompt_used": "True",
+            "object_scene_category": category,
+            "object_generation_status": "failed",
+            "visual_qa_attempts": "2" if retry_qa is not None else ("1" if first_qa is not None else "0"),
+            "exception_type": exc.__class__.__name__,
+            "human_qa_first_status": str((first_qa or {}).get("status", "not_run")),
+            "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
+            "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
+            "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
+        }
+
+
 def _fallback_for_required_visual_qa(
     *,
     safe_title: str,
@@ -1083,6 +1195,7 @@ def _fallback_for_required_visual_qa(
     qa_attempts: str,
     download_meta: Dict[str, str] | None = None,
     rubric_id: str = "",
+    pollinations_token: str = "",
 ) -> Tuple[BytesIO, Dict[str, str]]:
     qa_reason = _short_log_message(qa_result.get("reason"), max_len=220)
     print(
@@ -1090,31 +1203,17 @@ def _fallback_for_required_visual_qa(
         f"rubric={(rubric_id or '').strip().lower()} qa_reason={qa_reason}",
         flush=True,
     )
-    fallback = build_fallback_cover_buffer(
-        title=safe_title,
+    return _build_object_visual_fallback(
+        safe_title=safe_title,
         day_key=day_key,
         fallback_title=fallback_title,
+        base_meta=base_meta,
+        title=safe_title,
+        rubric_id=rubric_id,
+        pollinations_token=pollinations_token,
+        trigger="qa_unavailable_for_required_rubric",
+        first_qa=qa_result,
     )
-    return fallback, {
-        **base_meta,
-        **(download_meta or {}),
-        "mode": "fallback",
-        "reason": "qa_unavailable_for_required_rubric",
-        "final_reason": "qa_unavailable_for_required_rubric",
-        "fallback_reason": "qa_unavailable_for_required_rubric",
-        "prompt": prompt,
-        "visual_retry_used": "False" if qa_attempts == "1" else "True",
-        "visual_qa": "skipped",
-        "visual_qa_status": "skipped",
-        "visual_qa_reason": qa_reason,
-        "visual_qa_people_count": str(qa_result.get("people_count", "unknown")),
-        "visual_qa_adult_count": str(qa_result.get("adult_count", "unknown")),
-        "visual_qa_child_count": str(qa_result.get("child_count", "unknown")),
-        "visual_qa_attempts": qa_attempts,
-        "attempts_used": str((download_meta or {}).get("attempts_used", "1")),
-        "retryable_error": "False",
-        "exception_type": "VisualQaRequiredUnavailable",
-    }
 
 
 def build_post_visual(
@@ -1189,6 +1288,17 @@ def build_post_visual(
         "visual_qa_status": "not_run",
         "visual_qa_attempts": "0",
         "visual_qa_required": str(visual_qa_required),
+        "visual_retry_used": "False",
+        "visual_source": "",
+        "fallback_stage": "none",
+        "fallback_trigger": "",
+        "human_qa_first_status": "not_run",
+        "human_qa_first_reason": "",
+        "human_qa_retry_status": "not_run",
+        "human_qa_retry_reason": "",
+        "object_prompt_used": "False",
+        "object_scene_category": "",
+        "object_generation_status": "not_run",
         "visual_brief_roles": visual_brief.role_rule if visual_brief else "",
         "visual_brief_age": visual_brief.age_descriptor if visual_brief else "",
         "visual_brief_action": visual_brief.action if visual_brief else "",
@@ -1211,6 +1321,7 @@ def build_post_visual(
                 prompt=prompt,
                 token=pollinations_token,
             )
+            print("[VISUAL][HUMAN] status=generated", flush=True)
             qa_fn = visual_qa_fn or evaluate_visual_quality
             expected_brief = _build_visual_qa_expected_brief(prompt, rubric_id)
             first_qa = _safe_visual_qa(
@@ -1229,12 +1340,19 @@ def build_post_visual(
                 f"attempt=1 limit={_visual_people_limit(rubric_id)}",
                 flush=True,
             )
+            print(
+                f"[VISUAL][QA] attempt=1 status={first_qa.get('status')} "
+                f"reason={_short_log_message(first_qa.get('reason'))}",
+                flush=True,
+            )
             first_meta = {
                 **base_meta,
                 **download_meta,
-                "mode": "ai",
+                "mode": "ai_human",
+                "visual_source": "human_ai",
+                "fallback_stage": "none",
+                "fallback_trigger": "",
                 "reason": f"ok:attempts={download_meta.get('attempts_used', '1')}",
-                "prompt": prompt,
                 "visual_qa": str(first_qa.get("status", "skipped")),
                 "visual_qa_status": str(first_qa.get("status", "skipped")),
                 "visual_qa_reason": str(first_qa.get("reason", "ok")),
@@ -1242,8 +1360,15 @@ def build_post_visual(
                 "visual_qa_adult_count": str(first_qa.get("adult_count", "unknown")),
                 "visual_qa_child_count": str(first_qa.get("child_count", "unknown")),
                 "visual_qa_attempts": "1",
+                "human_qa_first_status": str(first_qa.get("status", "skipped")),
+                "human_qa_first_reason": str(first_qa.get("reason", "ok")),
+                "human_qa_retry_status": "not_run",
+                "human_qa_retry_reason": "",
+                "object_prompt_used": "False",
+                "object_scene_category": "",
+                "object_generation_status": "not_run",
             }
-            if visual_qa_required and _visual_qa_skipped(first_qa):
+            if _visual_qa_skipped(first_qa):
                 return _fallback_for_required_visual_qa(
                     safe_title=safe_title,
                     day_key=day_key,
@@ -1254,11 +1379,13 @@ def build_post_visual(
                     qa_attempts="1",
                     download_meta=download_meta,
                     rubric_id=rubric_id,
+                    pollinations_token=pollinations_token,
                 )
             if _visual_qa_passed(first_qa):
                 return buffer, first_meta
 
             retry_reason = str(first_qa.get("reason", "visual_quality_rejected"))
+            first_qa_result = first_qa
             retry_prompt = build_visual_retry_prompt(
                 prompt,
                 rubric_id=rubric_id,
@@ -1273,6 +1400,7 @@ def build_post_visual(
                 f"[VISUAL_RETRY] reason={_short_log_message(first_qa.get('reason'))} attempt=2",
                 flush=True,
             )
+            print(f"[VISUAL][HUMAN_RETRY] trigger={_short_log_message(retry_reason)}", flush=True)
             try:
                 retry_buffer, retry_download_meta = download_pollinations_image_with_meta(
                     prompt=retry_prompt,
@@ -1294,12 +1422,19 @@ def build_post_visual(
                     f"attempt=2 limit={_visual_people_limit(rubric_id)}",
                     flush=True,
                 )
+                print(
+                    f"[VISUAL][QA] attempt=2 status={retry_qa.get('status')} "
+                    f"reason={_short_log_message(retry_qa.get('reason'))}",
+                    flush=True,
+                )
                 retry_meta = {
                     **base_meta,
                     **retry_download_meta,
-                    "mode": "ai",
+                    "mode": "ai_human_retry",
+                    "visual_source": "human_ai_retry",
+                    "fallback_stage": "human_retry",
+                    "fallback_trigger": retry_reason,
                     "reason": f"ok:visual_retry:attempts={retry_download_meta.get('attempts_used', '1')}",
-                    "prompt": retry_prompt,
                     "visual_retry_used": "True",
                     "visual_qa": str(retry_qa.get("status", "skipped")),
                     "visual_qa_status": str(retry_qa.get("status", "skipped")),
@@ -1308,6 +1443,13 @@ def build_post_visual(
                     "visual_qa_adult_count": str(retry_qa.get("adult_count", "unknown")),
                     "visual_qa_child_count": str(retry_qa.get("child_count", "unknown")),
                     "visual_qa_attempts": "2",
+                    "human_qa_first_status": str(first_qa_result.get("status", "fail")),
+                    "human_qa_first_reason": str(first_qa_result.get("reason", retry_reason)),
+                    "human_qa_retry_status": str(retry_qa.get("status", "skipped")),
+                    "human_qa_retry_reason": str(retry_qa.get("reason", "ok")),
+                    "object_prompt_used": "False",
+                    "object_scene_category": "",
+                    "object_generation_status": "not_run",
                     "visual_retry_target_reason": retry_reason,
                     "visual_brief_roles": retry_visual_brief.role_rule if retry_visual_brief else base_meta["visual_brief_roles"],
                     "visual_brief_age": retry_visual_brief.age_descriptor if retry_visual_brief else base_meta["visual_brief_age"],
@@ -1319,7 +1461,7 @@ def build_post_visual(
                     ),
                     "compiled_prompt_len": str(len(retry_prompt)),
                 }
-                if visual_qa_required and _visual_qa_skipped(retry_qa):
+                if _visual_qa_skipped(retry_qa):
                     return _fallback_for_required_visual_qa(
                         safe_title=safe_title,
                         day_key=day_key,
@@ -1330,6 +1472,7 @@ def build_post_visual(
                         qa_attempts="2",
                         download_meta=retry_download_meta,
                         rubric_id=rubric_id,
+                        pollinations_token=pollinations_token,
                     )
                 if _visual_qa_passed(retry_qa):
                     return retry_buffer, retry_meta
@@ -1342,46 +1485,19 @@ def build_post_visual(
                     "people_count": "unknown",
                 }
 
-            fallback = build_fallback_cover_buffer(
-                title=safe_title,
+            return _build_object_visual_fallback(
+                safe_title=safe_title,
                 day_key=day_key,
                 fallback_title=fallback_title,
+                base_meta=base_meta,
+                title=title,
+                rubric_id=rubric_id,
+                pollinations_token=pollinations_token,
+                trigger=str(first_qa.get("reason", retry_reason)),
+                first_qa=first_qa_result,
+                retry_qa=locals().get("retry_qa"),
             )
-            reason = _short_log_message(first_qa.get("reason"), max_len=220)
-            return fallback, {
-                **base_meta,
-                "mode": "fallback",
-                "reason": reason,
-                "final_reason": reason,
-                "prompt": retry_prompt,
-                "visual_retry_used": "True",
-                "visual_qa": "fail",
-                "visual_qa_status": "fail",
-                "visual_qa_reason": reason,
-                "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
-                "visual_qa_adult_count": str(first_qa.get("adult_count", "unknown")),
-                "visual_qa_child_count": str(first_qa.get("child_count", "unknown")),
-                "visual_qa_attempts": "2",
-                "visual_retry_target_reason": retry_reason,
-                "visual_brief_roles": retry_visual_brief.role_rule if retry_visual_brief else base_meta["visual_brief_roles"],
-                "visual_brief_age": retry_visual_brief.age_descriptor if retry_visual_brief else base_meta["visual_brief_age"],
-                "visual_brief_action": retry_visual_brief.action if retry_visual_brief else base_meta["visual_brief_action"],
-                "visual_brief_props": (
-                    ", ".join(retry_visual_brief.props)
-                    if retry_visual_brief
-                    else base_meta["visual_brief_props"]
-                ),
-                "compiled_prompt_len": str(len(retry_prompt)),
-                "attempts_used": str(POLLINATIONS_MAX_RETRIES),
-                "retryable_error": "False",
-                "exception_type": "VisualQualityRejected",
-            }
         except Exception as e:
-            fallback = build_fallback_cover_buffer(
-                title=safe_title,
-                day_key=day_key,
-                fallback_title=fallback_title,
-            )
             exception_type = e.__class__.__name__
             retryable = str(_is_retryable_exception(e))
             reason = _short_log_message(e, max_len=220)
@@ -1389,29 +1505,24 @@ def build_post_visual(
                 exception_type = e.exception_type
                 retryable = str(bool(e.retryable))
                 reason = _short_log_message(e.reason, max_len=220)
-            return fallback, {
-                **base_meta,
-                "mode": "fallback",
-                "reason": reason,
-                "final_reason": reason,
-                "prompt": prompt,
-                "attempts_used": str(POLLINATIONS_MAX_RETRIES if retryable == "True" else 1),
-                "retryable_error": retryable,
-                "exception_type": exception_type,
-            }
+            return _build_object_visual_fallback(
+                safe_title=safe_title,
+                day_key=day_key,
+                fallback_title=fallback_title,
+                base_meta=base_meta,
+                title=title,
+                rubric_id=rubric_id,
+                pollinations_token=pollinations_token,
+                trigger=reason,
+            )
 
-    fallback = build_fallback_cover_buffer(
-        title=safe_title,
+    return _build_object_visual_fallback(
+        safe_title=safe_title,
         day_key=day_key,
         fallback_title=fallback_title,
+        base_meta=base_meta,
+        title=title,
+        rubric_id=rubric_id,
+        pollinations_token=pollinations_token,
+        trigger="empty_prompt",
     )
-    return fallback, {
-        **base_meta,
-        "mode": "fallback",
-        "reason": "empty_prompt",
-        "final_reason": "empty_prompt",
-        "prompt": "",
-        "attempts_used": "0",
-        "retryable_error": "False",
-        "exception_type": "",
-    }

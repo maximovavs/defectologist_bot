@@ -36,6 +36,7 @@ import os
 import random
 import re
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -678,6 +679,92 @@ PARENT_ORAL_SAFETY_FORMATS = {
 
 PARENT_RUSSIAN_PHONEME_FORMATS = set(PARENT_ORAL_SAFETY_FORMATS)
 
+
+@dataclass(frozen=True)
+class ParsedAgeRange:
+    min_months: int | None
+    max_months: int | None
+    raw_value: str
+
+
+def _parse_parent_age_range(text: str) -> ParsedAgeRange | None:
+    match = re.search(r"(?im)^\s*👶\s*Возраст\s*:\s*(?P<value>[^\r\n]+)", text or "")
+    if not match:
+        return None
+    raw_value = match.group("value").strip()
+    value = raw_value.lower().replace("ё", "е")
+    value = re.sub(r"[‐‑‒–—−]", "-", value)
+    value = re.sub(r"\s+", " ", value)
+    unit = r"(?:мес(?:яц(?:а|ев)?)?\.?|месяц(?:а|ев)?|год(?:а|лет)?|лет)"
+    range_match = re.search(rf"(?:(?:от\s*)?(\d+)\s*(?:до|-)?\s*(\d+))\s*({unit})", value)
+    if not range_match:
+        return ParsedAgeRange(None, None, raw_value)
+    minimum, maximum = int(range_match.group(1)), int(range_match.group(2))
+    if range_match.group(3).startswith(("год", "лет")):
+        minimum *= 12
+        maximum *= 12
+    if minimum > maximum:
+        minimum, maximum = maximum, minimum
+    return ParsedAgeRange(minimum, maximum, raw_value)
+
+
+PARENT_CONTENT_FORMATS = frozenset(PARENT_ORAL_SAFETY_FORMATS)
+PARENT_AGE_ACTION_RE = re.compile(
+    r"(?:реб[её]н(?:ок|ка)|малыш\w*).{0,100}(?:повтор\w*\s+слово|сказ\w*\s+слово|назва\w*\s+(?:предмет|слово)|"
+    r"ответ\w*\s+слов\w*|произнес\w*\s+слово|состав\w*\s+фраз|повтор\w*\s+фраз|попрос\w*\s+словами)",
+    re.IGNORECASE | re.DOTALL,
+)
+PARENT_INFANT_REQUIRED_WORD_RE = re.compile(
+    r"(?:реб[её]нок|малыш|ожидайте).{0,100}(?:скажет|повтор\w*\s+слово|назов\w*\s+слово|произнес\w*\s+слово|ответ\w*\s+слов\w*)",
+    re.IGNORECASE | re.DOTALL,
+)
+PARENT_OPEN_VERBAL_ANSWER_RE = re.compile(
+    r"(?:как\s+называется|что\s+ты\s+делаешь|куда\s+положим|расскажи,?\s+что\s+видишь|ответь\s+словами|"
+    r"реб[её]нок\w*\s+отвеча\w*\s+словами)",
+    re.IGNORECASE,
+)
+PARENT_PHRASE_TASK_RE = re.compile(
+    r"(?:реб[её]н(?:ок|ка)|малыш\w*|попрос\w*).{0,100}(?:состав\w*\s+фраз|повтор\w*\s+фраз|сказ\w*\s+фраз)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parent_body_without_age(text: str) -> str:
+    return "\n".join(
+        line for line in (text or "").replace("\r\n", "\n").split("\n")
+        if not re.match(r"^\s*👶\s*Возраст\s*:", line, flags=re.IGNORECASE)
+    )
+
+
+def _validate_parent_age_range_width(text: str) -> Tuple[bool, str]:
+    parsed = _parse_parent_age_range(text)
+    if not parsed or parsed.min_months is None or parsed.max_months is None:
+        return True, "ok"
+    concrete_action = re.search(
+        r"(?:попрос\w*|предлож\w*|поигра\w*|упражн\w*|играйте|дома|шаг\s+\d|"
+        r"покажите|выберите|составьте|повторите|назовите|сделайте)",
+        _parent_body_without_age(text),
+        flags=re.IGNORECASE,
+    )
+    if concrete_action and parsed.max_months - parsed.min_months > 36:
+        return False, "parent_age_range_too_broad"
+    return True, "ok"
+
+
+def _validate_parent_age_action_fit(text: str) -> Tuple[bool, str]:
+    parsed = _parse_parent_age_range(text)
+    if not parsed or parsed.min_months is None:
+        return True, "ok"
+    body = _parent_body_without_age(text)
+    if parsed.min_months < 12 and (PARENT_AGE_ACTION_RE.search(body) or PARENT_INFANT_REQUIRED_WORD_RE.search(body)):
+        return False, "parent_age_action_mismatch"
+    if parsed.min_months < 18 and PARENT_OPEN_VERBAL_ANSWER_RE.search(body):
+        if not re.search(r"(?:покаж\w*|выбер\w*|посмотр\w*|дай\w*|жест\w*|звук\w*|улыб\w*|поверн\w*)", body, re.IGNORECASE):
+            return False, "parent_age_action_mismatch"
+    if parsed.min_months < 24 and PARENT_PHRASE_TASK_RE.search(body):
+        return False, "parent_age_action_mismatch"
+    return True, "ok"
+
 PARENT_ORAL_ACTION_RE = re.compile(
     r"(?<!\w)\w*(?:фиксир|удержива|зажим|зажм|прижим|приж|нажим|нажм|надав|дав|тян|оттяг|"
     r"смещ|смест|сдвиг|двиг|массир|размин)\w*\b",
@@ -1206,6 +1293,105 @@ def _extract_section_after_header(text: str, header_pattern: str, stop_patterns:
     return " ".join(collected).strip()
 
 
+PARENT_BENEFIT_HEADER_RE = r"^💡\s*Что это да[её]т\s*[:：]?\s*"
+PARENT_OBSERVABLE_BENEFIT_RE = re.compile(
+    r"\b(?:повторя\w*|произнос\w*|называ\w*|выбира\w*|показыва\w*|различа\w*|отвеча\w*|"
+    r"составля\w*|пересказыва\w*|выполня\w*|указыва\w*|сортиру\w*|соединя\w*|наход\w*|"
+    r"замеча\w*|наблюд\w*|появля\w*|поддержива\w*|участв\w*|обраща\w*|слыш\w*|говор\w*|смотр\w*|"
+    r"реагир\w*|жест\w*|лепет\w*|принос\w*)\b",
+    re.IGNORECASE,
+)
+PARENT_NONOBSERVABLE_BENEFIT_RE = re.compile(
+    r"(?:развива\w*\s+(?:словар\w*|понимани\w*|речев\w*\s+развити\w*)|формир\w*\s+навык|"
+    r"стимулир\w*\s+речев\w*\s+развити\w*|активир\w*\s+речев\w*\s+центр|"
+    r"формир\w*\s+нейронн\w*\s+связ\w*|связыва\w*\s+(?:звук\w*\s+с\s+образ\w*|слово\w*\s+с\s+предмет\w*)|"
+    r"исправля\w*\s+(?:произношени\w*|нарушени\w*)|закрепля\w*\s+правильн\w*\s+произношени\w*|"
+    r"нормализ\w*\s+реч\w*|укрепля\w*\s+артикуляционн\w*\s+аппарат|"
+    r"(?:улучш\w*|удержива\w*)\s+внимани\w*)",
+    re.IGNORECASE,
+)
+
+
+def _extract_parent_benefit_section(text: str) -> str:
+    return _extract_section_after_header(
+        text,
+        PARENT_BENEFIT_HEADER_RE,
+        [
+            r"^Источник\s*:", r"^🔗", r"^#", r"^💬", r"^📊", r"^👶", r"^❓", r"^🧩", r"^🏠",
+            r"^🎲", r"^🌍", r"^🔴", r"^🧭", r"^Ориентиры\s*:",
+        ],
+    )
+
+
+def _validate_parent_observable_benefit_output(text: str, thematic: bool = False) -> Tuple[bool, str]:
+    benefit = _extract_parent_benefit_section(text)
+    if not benefit:
+        if re.search(PARENT_BENEFIT_HEADER_RE, text or "", flags=re.IGNORECASE | re.MULTILINE):
+            return False, "thematic_nonobservable_benefit" if thematic else "parent_nonobservable_benefit"
+        return True, "ok"
+    normalized = _normalize_scan_text(benefit)
+    if PARENT_NONOBSERVABLE_BENEFIT_RE.search(normalized):
+        return False, "thematic_nonobservable_benefit" if thematic else "parent_nonobservable_benefit"
+    if not PARENT_OBSERVABLE_BENEFIT_RE.search(normalized):
+        return False, "thematic_nonobservable_benefit" if thematic else "parent_nonobservable_benefit"
+    return True, "ok"
+
+
+PARENT_HEARING_INFERENCE_RE = re.compile(
+    r"(?:проверь\w*\s+слух|провер\w*\s+слух|тест\w*\s+слух|"
+    r"определ\w*\s+слух|если\s+неправильн\w*\s+произнош\w*\s*,?\s*(?:то\s+)?(?:плох\w*|слаб\w*)\s+слух|"
+    r"свидетельств\w*\s+(?:о|об)\s+развити\w*\s+слух\w*)",
+    re.IGNORECASE,
+)
+
+
+def _validate_parent_hearing_inference_output(text: str) -> Tuple[bool, str]:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if re.match(r"^🔴\s*Миф\s*:", stripped, re.IGNORECASE):
+            continue
+        if not PARENT_HEARING_INFERENCE_RE.search(stripped):
+            continue
+        if re.search(r"\b(?:не|нельзя|не заменя\w*|не свидетельству\w*)\b", stripped, re.IGNORECASE):
+            continue
+        return False, "parent_false_hearing_inference"
+    return True, "ok"
+
+
+def _evidence_is_predominantly_english(evidence_text: str) -> bool:
+    cleaned = re.sub(r"https?://\S+|www\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", " ", evidence_text or "", flags=re.IGNORECASE)
+    latin = len(re.findall(r"[A-Za-z]", cleaned))
+    cyrillic = len(re.findall(r"[А-Яа-яЁё]", cleaned))
+    return latin >= 80 and latin > max(20, cyrillic * 1.5)
+
+
+def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tuple[bool, str]:
+    if not _evidence_is_predominantly_english(evidence_text):
+        return True, "ok"
+    content = _parent_phoneme_content(text)
+    if re.search(r"(?:звук|фонем\w*|произнос\w*|повтор\w*)\s*\[[пбрсрлмткд]\]", content, re.IGNORECASE):
+        return False, "parent_cross_language_sound_norm"
+    russian_examples = ("папа", "пирог", "птица", "бабочка", "барабан", "бублик")
+    if any(example in content.lower() and example not in (evidence_text or "").lower() for example in russian_examples):
+        return False, "parent_cross_language_sound_norm"
+    if re.search(r"(?:почти\s+все\s+звуки|все\s+звуки).{0,50}(?:к\s*4|четыре\s+год|4\s*лет)", content, re.IGNORECASE):
+        return False, "parent_cross_language_sound_norm"
+    return True, "ok"
+
+
+def _validate_parent_numbered_steps(text: str) -> Tuple[bool, str]:
+    numbers = []
+    for line in (text or "").splitlines():
+        if re.match(r"^\s*👶\s*Возраст\s*:", line, re.IGNORECASE):
+            continue
+        match = re.match(r"^\s*(\d+)[.)]\s+", line)
+        if match:
+            numbers.append(match.group(1))
+    if len(numbers) > 4:
+        return False, "parent_too_many_numbered_steps"
+    return True, "ok"
+
+
 def _validate_question_week_output(text: str) -> Tuple[bool, str]:
     out = (text or "").strip()
     lines = _extract_nonempty_lines(out)
@@ -1303,6 +1489,18 @@ def _validate_output(
         if not ok:
             return False, reason
 
+    if rf in PARENT_CONTENT_FORMATS:
+        for validator in (
+            _validate_parent_age_range_width,
+            _validate_parent_age_action_fit,
+            _validate_parent_hearing_inference_output,
+            lambda value: _validate_cross_language_sound_output(value, evidence_text),
+            _validate_parent_numbered_steps,
+        ):
+            ok, reason = validator(out)
+            if not ok:
+                return False, reason
+
     ok, reason = _validate_politeness_title(out)
     if not ok:
         return False, reason
@@ -1342,19 +1540,34 @@ def _validate_output(
         return False, grounding_reason
 
     if dk == "MO" or rf == "tip_of_day":
-        return _validate_tip_of_day_output(out)
+        result = _validate_tip_of_day_output(out)
+        if not result[0]:
+            return result
+        return _validate_parent_observable_benefit_output(out)
 
     if rf == "thematic_parents":
-        return _validate_thematic_output(out, evidence_text, topic_id=topic_id)
+        result = _validate_thematic_output(out, evidence_text, topic_id=topic_id)
+        if not result[0]:
+            return result
+        return _validate_parent_observable_benefit_output(out, thematic=True)
 
     if dk == "TH" or rf == "bilingual_parents":
-        return _validate_bilingual_output(out, evidence_text)
+        result = _validate_bilingual_output(out, evidence_text)
+        if not result[0]:
+            return result
+        return _validate_parent_observable_benefit_output(out)
 
     if dk == "SU" or rf == "age_norms":
-        return _validate_age_norms_output(out)
+        result = _validate_age_norms_output(out)
+        if not result[0]:
+            return result
+        return _validate_parent_observable_benefit_output(out)
 
     if rf == "pro_friendly":
         return _validate_pro_output(out, evidence_text)
+
+    if rf in PARENT_CONTENT_FORMATS:
+        return _validate_parent_observable_benefit_output(out)
 
     return True, "ok"
 
@@ -1703,7 +1916,7 @@ def _common_rules(max_chars: int, allow_numbered_steps: bool = False) -> str:
         "Опирайся только на EVIDENCE ниже.\n"
         "Любое физиологическое, неврологическое, причинное, диагностическое или терапевтическое объяснение должно быть прямо поддержано EVIDENCE.\n"
         "Не придумывай, почему упражнение работает. Если механизм не объяснен в EVIDENCE, описывай только действие взрослого и наблюдаемую реакцию ребенка.\n"
-        "Предпочитай наблюдаемые результаты механизмам: ребенок повторяет слово, удерживает внимание, выбирает картинку, отвечает фразой.\n"
+        "Предпочитай наблюдаемые результаты механизмам: ребенок повторяет слово, выбирает картинку, показывает предмет или отвечает фразой.\n"
         "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.\n"
         "Упрощение фразы — временная подсказка, а не отказ от вежливости: взрослый может дать короткую модель и естественно показывать полную вежливую фразу.\n"
         "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
@@ -1776,6 +1989,8 @@ def _build_generation_prompt_raw(
     rules += _topic_instruction(topic_id, topic_title)
     if not is_pro_format and rf in PARENT_RUSSIAN_PHONEME_FORMATS:
         rules += "\n" + PARENT_RUSSIAN_PHONEME_PROMPT_RULE + "\n"
+    if not is_pro_format and rf in PARENT_CONTENT_FORMATS:
+        rules += "\n" + PARENT_EDITORIAL_PROMPT_RULE + "\n"
     if evidence_prevalidated:
         rules = _remove_general_no_data_rules_for_prevalidated_evidence(rules)
 
@@ -2673,6 +2888,23 @@ def build_pro_friendly_repair_prompt(
     )
 
 
+PARENT_CONTENT_REPAIR_REASONS = {
+    "parent_age_range_too_broad",
+    "parent_age_action_mismatch",
+    "parent_nonobservable_benefit",
+    "thematic_nonobservable_benefit",
+    "parent_false_hearing_inference",
+    "parent_cross_language_sound_norm",
+    "parent_too_many_numbered_steps",
+}
+
+PARENT_CONTENT_REPAIR_INSTRUCTION = (
+    "Исправь только указанную проблему, сохранив EVIDENCE и формат. Сузь возраст до подходящего конкретному действию; "
+    "не требуй от младенца слов, фраз или открытого ответа; замени обещания и механизмы на наблюдаемую реакцию; "
+    "не называй игру проверкой слуха; не переноси английские звуки, примеры или нормы в русский текст; "
+    "объедини близкие действия, чтобы осталось не более четырех нумерованных шагов. Не добавляй новых материалов, примеров, чисел или упражнений."
+)
+
 BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
     "no_data_in_source",
     "empty",
@@ -2687,6 +2919,7 @@ BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
     "bilingual_missing_family_action",
     "bilingual_false_causality",
     "bilingual_unsupported_mechanism",
+    *PARENT_CONTENT_REPAIR_REASONS,
 }
 
 BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS = (
@@ -2700,6 +2933,16 @@ PARENT_RUSSIAN_PHONEME_PROMPT_RULE = (
     "Не используй латинские символы /p/, /r/, /s/, [p], [r], [s] для обозначения русских звуков. "
     "Не копируй IPA-символ из англоязычного EVIDENCE в русский родительский текст без перевода в однозначную русскую запись. "
     "Если соответствие нельзя установить уверенно по EVIDENCE и русским примерам слов, убери буквенный символ и опиши упражнение словами. Не угадывай звук."
+)
+
+PARENT_EDITORIAL_PROMPT_RULE = (
+    "Для родительских рубрик выбирай узкий возраст из EVIDENCE, соответствующий именно этому упражнению или игре; "
+    "не переноси на весь пост самый широкий диапазон источника. Не требуй от младенца слова, фразы или открытого словесного ответа: "
+    "разрешены взгляд, улыбка, поворот, поиск глазами, жест, звук, лепет, показ и ожидание продолжения. "
+    "В блоке пользы описывай только наблюдаемое действие или реакцию ребенка, без обещаний развития, механизмов, слуховых проверок и диагнозов. "
+    "Не называй игру домашней проверкой слуха. Не переносись русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
+    "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
+    "с правильным согласованием, без длинной инструкции в H1."
 )
 
 PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION = (
@@ -2770,6 +3013,11 @@ def build_bilingual_parents_repair_prompt(
             if reason == "parent_ambiguous_latin_phoneme"
             else ""
         )
+        + (
+            "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            if reason in PARENT_CONTENT_REPAIR_REASONS
+            else ""
+        )
         + "Не используй Markdown, placeholders или служебные маркеры."
     )
 
@@ -2789,6 +3037,7 @@ THEMATIC_PARENTS_REPAIR_EXACT_REASONS = {
     "thematic_unsupported_mechanism",
     "thematic_missing_heading",
     "thematic_nonobservable_benefit",
+    *PARENT_CONTENT_REPAIR_REASONS,
 }
 
 
@@ -2830,6 +3079,11 @@ def build_thematic_parents_repair_prompt(
         + (
             "\n" + THEMATIC_OBSERVABLE_BENEFIT_REPAIR_INSTRUCTION
             if reason in {"thematic_nonobservable_benefit", "parent_risky_oral_manipulation"}
+            else ""
+        )
+        + (
+            "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            if reason in PARENT_CONTENT_REPAIR_REASONS
             else ""
         )
         + "Не используй Markdown, placeholders или служебные маркеры."
@@ -2956,6 +3210,8 @@ async def generate_post_plain_from_evidence_async(
             repair += "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
         if reason == "parent_ambiguous_latin_phoneme":
             repair += "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
+        if reason in PARENT_CONTENT_REPAIR_REASONS:
+            repair += "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
 
         if dk == "FR" or rf == "question_week":
             repair += (
@@ -3085,7 +3341,7 @@ async def generate_post_plain_from_evidence_async(
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
                     return "", False, f"invalid_gemini_retry:{reason2}"
 
-            elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"}:
+            elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
                 if gemini_repair_prompt:
                     out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))

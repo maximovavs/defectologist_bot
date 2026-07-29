@@ -134,7 +134,15 @@ EXCLUDE_SOURCES = _parse_csv_env(os.getenv("EXCLUDE_SOURCES", ""))
 RESET_TEST_DB = os.getenv("RESET_TEST_DB", "").strip().lower() in ("1", "true", "yes")
 
 POST_MAX_CHARS = int(os.getenv("POST_MAX_CHARS", "1000"))
-TG_CAPTION_MAX_BYTES = int(os.getenv("TG_CAPTION_MAX_BYTES", "950"))
+if "TG_CAPTION_MAX_UTF16_UNITS" in os.environ:
+    TG_CAPTION_MAX_UTF16_UNITS = int(os.getenv("TG_CAPTION_MAX_UTF16_UNITS", "1000"))
+elif "TG_CAPTION_MAX_BYTES" in os.environ:
+    TG_CAPTION_MAX_UTF16_UNITS = int(os.getenv("TG_CAPTION_MAX_BYTES", "1000"))
+    print("[WARN] TG_CAPTION_MAX_BYTES is deprecated; treating value as UTF-16 caption units", flush=True)
+else:
+    TG_CAPTION_MAX_UTF16_UNITS = 1000
+# Kept only for import compatibility; caption decisions use UTF-16 units.
+TG_CAPTION_MAX_BYTES = TG_CAPTION_MAX_UTF16_UNITS
 IMAGE_PROMPT_TIMEOUT_SECONDS = int(os.getenv("IMAGE_PROMPT_TIMEOUT_SECONDS", "60"))
 
 SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.95"))
@@ -167,12 +175,12 @@ TRY_TODAY_HEADING_RE = re.compile(r"^🧩\s*Что попробовать сег
 BILINGUAL_HEADING_RE = re.compile(r"^🌍\s*Что помогает в двуязычной семье\s*:?\s*$", re.IGNORECASE)
 HOME_HEADING_RE = re.compile(r"^🏠\s*Что можно попробовать дома\s*:?\s*$", re.IGNORECASE)
 EXAMPLE_HEADING_RE = re.compile(r"^👄\s*Пример\s*:?\s*$", re.IGNORECASE)
-BENEFIT_HEADING_RE = re.compile(r"^💡\s*Что это дает\s*:?\s*$", re.IGNORECASE)
+BENEFIT_HEADING_RE = re.compile(r"^💡\s*Что это да[её]т\s*:?\s*$", re.IGNORECASE)
 
 AGE_LINE_RE = re.compile(r"^👶\s*Возраст\s*:\s*.+\S$", re.IGNORECASE)
 AUDIENCE_LINE_RE = re.compile(r"^👩‍⚕️\s*Аудитория\s*:\s*.+\S$", re.IGNORECASE)
 SOURCE_LINE_RE = re.compile(r"^Источник:\s*\S.+$", re.IGNORECASE)
-BENEFIT_LINE_RE = re.compile(r"^💡\s*Что это дает\s*:\s*.+\S$", re.IGNORECASE)
+BENEFIT_LINE_RE = re.compile(r"^💡\s*Что это да[её]т\s*:\s*.+\S$", re.IGNORECASE)
 MYTH_LINE_RE = re.compile(r"^🔴\s*Миф\s*:\s*.+\S$", re.IGNORECASE)
 QUESTION_LINE_RE = re.compile(r"^❓\s*Вопрос недели\s*:\s*.+\S$", re.IGNORECASE)
 ORIENTIRS_LINE_RE = re.compile(r"^Ориентиры:\s*.+\S$", re.IGNORECASE)
@@ -238,6 +246,12 @@ SOFT_SKIP_REASONS = {
     "thematic_nonobservable_benefit",
     "parent_risky_oral_manipulation",
     "parent_ambiguous_latin_phoneme",
+    "parent_age_range_too_broad",
+    "parent_age_action_mismatch",
+    "parent_nonobservable_benefit",
+    "parent_false_hearing_inference",
+    "parent_cross_language_sound_norm",
+    "parent_too_many_numbered_steps",
     "missing_parent_safety_note",
     "blanket_reassurance",
     "misleading_politeness_framing",
@@ -277,6 +291,12 @@ VALIDATION_SKIP_REASONS = {
     "thematic_nonobservable_benefit",
     "parent_risky_oral_manipulation",
     "parent_ambiguous_latin_phoneme",
+    "parent_age_range_too_broad",
+    "parent_age_action_mismatch",
+    "parent_nonobservable_benefit",
+    "parent_false_hearing_inference",
+    "parent_cross_language_sound_norm",
+    "parent_too_many_numbered_steps",
     "pro_insufficient_evidence",
     "pro_empty",
     "pro_title_too_long",
@@ -1437,11 +1457,24 @@ def _photo_file_tuple(photo_buffer: BytesIO) -> tuple[str, bytes, str]:
     return (filename, photo_buffer.getvalue(), mime_type)
 
 
+def _telegram_utf16_units(text: str) -> int:
+    return len((text or "").encode("utf-16-le")) // 2
+
+
+def _telegram_caption_limit_units() -> int:
+    # Existing tests and integrations may still patch the deprecated name.
+    if TG_CAPTION_MAX_BYTES != TG_CAPTION_MAX_UTF16_UNITS:
+        return TG_CAPTION_MAX_BYTES
+    return TG_CAPTION_MAX_UTF16_UNITS
+
+
 def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, html_full_post: str) -> int:
-    plain_bytes = len((plain_post or "").encode("utf-8"))
+    caption_units = _telegram_utf16_units(plain_post)
+    caption_limit = _telegram_caption_limit_units()
     file_tuple = _photo_file_tuple(photo_buffer)
 
-    if plain_bytes <= TG_CAPTION_MAX_BYTES:
+    if caption_units <= caption_limit:
+        print(f"[TELEGRAM][CAPTION] mode=html units={caption_units}", flush=True)
         try:
             data: Dict[str, Any] = {
                 "chat_id": chat_id,
@@ -1452,11 +1485,31 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
             payload = tg_request("sendPhoto", data=data, files={"photo": file_tuple})
         except Exception as e:
             if _is_probably_parse_mode_error(e):
-                _log_telegram_html_fallback("send_photo_caption", html_full_post, e)
+                print(f"[TELEGRAM][CAPTION] mode=plain_fallback units={caption_units}", flush=True)
+                try:
+                    payload = tg_request(
+                        "sendPhoto",
+                        data={"chat_id": chat_id, "caption": plain_post},
+                        files={"photo": file_tuple},
+                    )
+                except Exception as plain_error:
+                    print(
+                        f"[TELEGRAM][SPLIT] reason=caption_send_failed units={caption_units} "
+                        f"error_type={plain_error.__class__.__name__}",
+                        flush=True,
+                    )
+                else:
+                    return _extract_telegram_message_id(payload)
             else:
-                print(f"[WARN] send_photo_with_caption_failed err={e}", flush=True)
+                print(
+                    f"[TELEGRAM][SPLIT] reason=caption_send_failed units={caption_units} "
+                    f"error_type={e.__class__.__name__}",
+                    flush=True,
+                )
         else:
             return _extract_telegram_message_id(payload)
+    else:
+        print(f"[TELEGRAM][SPLIT] reason=caption_too_long units={caption_units}", flush=True)
 
     tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
     return send_message(chat_id, html_full_post)
@@ -2384,9 +2437,19 @@ async def amain() -> None:
                     f"mode={log_field(visual_meta.get('mode'))} "
                     f"reason={log_field(visual_meta.get('reason'))} "
                     f"fallback_reason={log_field(visual_meta.get('fallback_reason'))} "
+                    f"fallback_stage={log_field(visual_meta.get('fallback_stage'))} "
+                    f"fallback_trigger={log_field(visual_meta.get('fallback_trigger'))} "
+                    f"visual_source={log_field(visual_meta.get('visual_source'))} "
                     f"visual_qa_required={log_field(visual_meta.get('visual_qa_required'))} "
                     f"visual_qa_status={log_field(visual_meta.get('visual_qa_status', visual_meta.get('visual_qa')))} "
                     f"visual_qa_reason={log_field(visual_meta.get('visual_qa_reason'))} "
+                    f"human_qa_first_status={log_field(visual_meta.get('human_qa_first_status'))} "
+                    f"human_qa_first_reason={log_field(visual_meta.get('human_qa_first_reason'))} "
+                    f"human_qa_retry_status={log_field(visual_meta.get('human_qa_retry_status'))} "
+                    f"human_qa_retry_reason={log_field(visual_meta.get('human_qa_retry_reason'))} "
+                    f"object_prompt_used={log_field(visual_meta.get('object_prompt_used'))} "
+                    f"object_scene_category={log_field(visual_meta.get('object_scene_category'))} "
+                    f"object_generation_status={log_field(visual_meta.get('object_generation_status'))} "
                     f"image_prompt_note={log_field(image_prompt_note)} "
                     f"prompt_len={visual_prompt_len} "
                     f"has_image_prompt={visual_has_prompt} "

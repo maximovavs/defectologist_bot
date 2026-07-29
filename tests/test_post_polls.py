@@ -89,10 +89,10 @@ class TelegramMessageIdTest(unittest.TestCase):
         ) as request:
             message_id = publisher.send_post_with_visual("chat", photo, "Пост", "<b>Пост</b>")
 
-        self.assertEqual(message_id, 606)
-        self.assertEqual(request.call_count, 3)
+        self.assertEqual(message_id, 505)
+        self.assertEqual(request.call_count, 2)
         self.assertEqual(request.call_args_list[1].args[0], "sendPhoto")
-        self.assertEqual(request.call_args_list[2].args[0], "sendMessage")
+        self.assertNotIn("parse_mode", request.call_args_list[1].kwargs["data"])
 
 
 class SendPostPollTest(unittest.TestCase):

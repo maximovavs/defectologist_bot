@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import hashlib
 import json
 from io import BytesIO
 import os
@@ -262,6 +263,7 @@ def _pollinations_request_once(
 
     encoded_prompt = quote(cleaned_prompt, safe="")
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    stable_seed = int(hashlib.sha256(cleaned_prompt.encode("utf-8")).hexdigest()[:8], 16)
 
     params = {
         "model": POLLINATIONS_MODEL,
@@ -270,6 +272,7 @@ def _pollinations_request_once(
         "safe": "true",
         "private": "true",
         "enhance": "false",
+        "seed": str(stable_seed),
     }
     if token:
         params["key"] = token
@@ -1228,6 +1231,15 @@ OBJECT_SCENE_CATEGORIES = {
     "default": "children’s picture book, picture cards, wooden toys",
 }
 
+OBJECT_SCENE_COMPOSITIONS = (
+    "asymmetrical tabletop arrangement with one clear focal object and generous negative space",
+    "diagonal flat-lay arrangement with objects separated and no overlap",
+    "small shelf vignette with layered depth and a calm uncluttered background",
+    "three-quarter tabletop view with one foreground object and two supporting objects",
+    "balanced semicircle arrangement with varied object sizes and soft shadows",
+    "top-down arrangement with a single accent object offset from center",
+)
+
 
 def _object_scene_category(title: str, rubric_id: str) -> str:
     value = (title or "").lower()
@@ -1246,8 +1258,9 @@ def _object_scene_category(title: str, rubric_id: str) -> str:
     if any(marker in value for marker in bilingual_markers):
         return "bilingual_languages"
     hearing_markers = (
-        "слух", "слышит", "слушает", "реакция на звук", "звуковая реакция", "музыка", "ритм",
-        "колокольчик", "барабан", "hearing", "listening", "music", "rhythm", "bell", "drum",
+        "слух", "слышит", "слушает", "реакция на звук", "звуковая реакция", "музыка", "ритм", "мелод",
+        "песн", "пой", "петь", "колокольчик", "барабан", "hearing", "listening", "music", "rhythm",
+        "melody", "song", "sing", "bell", "drum",
     )
     if any(marker in value for marker in hearing_markers):
         return "hearing_sounds_music"
@@ -1260,16 +1273,41 @@ def _object_scene_category(title: str, rubric_id: str) -> str:
     return "default"
 
 
-def build_object_only_visual_prompt(title: str, rubric_id: str, original_prompt: str = "") -> str:
-    """Build a deterministic, people-free prompt; title only selects the object category."""
+def _object_visual_variation_id(title: str, rubric_id: str, variation_key: str = "") -> str:
+    raw = "|".join(
+        part.strip().lower()
+        for part in (variation_key, rubric_id, title)
+        if part and part.strip()
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _object_scene_composition(category: str, variation_id: str) -> str:
+    digest = hashlib.sha256(f"{category}|{variation_id}".encode("utf-8")).hexdigest()
+    index = int(digest[:8], 16) % len(OBJECT_SCENE_COMPOSITIONS)
+    return OBJECT_SCENE_COMPOSITIONS[index]
+
+
+def build_object_only_visual_prompt(
+    title: str,
+    rubric_id: str,
+    original_prompt: str = "",
+    variation_key: str = "",
+) -> str:
+    """Build a people-free fallback prompt with stable per-publication variation."""
+    del original_prompt
     category = _object_scene_category(title, rubric_id)
     objects = OBJECT_SCENE_CATEGORIES[category]
+    variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
+    composition = _object_scene_composition(category, variation_id)
     return (
         "Object-only educational still life. No people. No adults. No children. No faces. No hands. "
         "No human figures. No silhouettes. No reflections of people. No text. No letters. No words. "
         "No logos. No watermarks. No medical tools. Warm soft editorial illustration, beige and pastel palette, "
-        "daylight, centered, child-friendly objects. 16:9 landscape. "
-        f"Scene category: {category}. Objects: {objects}."
+        "daylight, child-friendly objects. 16:9 landscape. "
+        f"Scene category: {category}. Objects: {objects}. Composition: {composition}. "
+        f"Internal visual variation cue: {variation_id}. Use this cue only to vary layout and object selection; "
+        "never render the cue, letters, numbers, labels, captions, or written symbols."
     )
 
 
@@ -1286,10 +1324,20 @@ def _build_object_visual_fallback(
     first_qa: Dict[str, object] | None = None,
     retry_qa: Dict[str, object] | None = None,
 ) -> Tuple[BytesIO, Dict[str, str]]:
-    object_prompt = build_object_only_visual_prompt(title, rubric_id)
+    variation_key = f"{day_key}|{rubric_id}|{title}|{trigger}"
+    variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
+    object_prompt = build_object_only_visual_prompt(
+        title,
+        rubric_id,
+        variation_key=variation_key,
+    )
     category = _object_scene_category(title, rubric_id)
     key_result = retry_qa or first_qa or {}
-    print(f"[VISUAL][OBJECT_FALLBACK] trigger={_short_log_message(trigger)} category={category}", flush=True)
+    print(
+        f"[VISUAL][OBJECT_FALLBACK] trigger={_short_log_message(trigger)} "
+        f"category={category} variation={variation_id}",
+        flush=True,
+    )
     try:
         buffer, object_meta = download_pollinations_image_with_meta(
             prompt=object_prompt,

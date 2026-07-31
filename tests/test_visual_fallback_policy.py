@@ -176,6 +176,57 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertNotIn("Русская игра", prompt)
         self.assertNotIn("raw Russian prompt", prompt)
 
+    def test_object_prompt_varies_by_publication_key_and_stays_deterministic(self):
+        first = build_object_only_visual_prompt(
+            "Мелодии и слова",
+            "bilingual_corner",
+            variation_key="2026-07-30",
+        )
+        repeated = build_object_only_visual_prompt(
+            "Мелодии и слова",
+            "bilingual_corner",
+            variation_key="2026-07-30",
+        )
+        next_day = build_object_only_visual_prompt(
+            "Мелодии и слова",
+            "bilingual_corner",
+            variation_key="2026-07-31",
+        )
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, next_day)
+        self.assertIn("Internal visual variation cue", first)
+        self.assertNotIn("Мелодии и слова", first)
+
+    def test_empty_prompt_object_fallback_varies_between_days(self):
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(b"object"), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ):
+            _, first_meta = build_post_visual(
+                title="Мелодии и слова",
+                day_key="2026-07-30",
+                image_prompt="",
+                rubric_id="bilingual_corner",
+            )
+            _, second_meta = build_post_visual(
+                title="Пойте и разговаривайте",
+                day_key="2026-07-31",
+                image_prompt="",
+                rubric_id="question_week",
+            )
+
+        self.assertEqual(len(prompts), 2)
+        self.assertNotEqual(prompts[0], prompts[1])
+        self.assertEqual(first_meta["object_scene_category"], "hearing_sounds_music")
+        self.assertEqual(second_meta["object_scene_category"], "hearing_sounds_music")
+
     def test_skipped_human_qa_uses_object_fallback_without_object_qa(self):
         qa_calls = []
 
@@ -243,6 +294,8 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             ("Игра с мячом дома", "bilingual_corner", "games_everyday_communication"),
             ("Положение языка при произнесении звука", "speech_sounds", "articulation_speech"),
             ("Реакция малыша на колокольчик", "hearing_and_speech", "hearing_sounds_music"),
+            ("Мелодии и слова", "bilingual_corner", "hearing_sounds_music"),
+            ("Пойте и разговаривайте", "question_week", "hearing_sounds_music"),
         )
         for title, rubric_id, expected in cases:
             with self.subTest(title=title, rubric_id=rubric_id):

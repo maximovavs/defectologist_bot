@@ -263,7 +263,7 @@ def _pollinations_request_once(
 
     encoded_prompt = quote(cleaned_prompt, safe="")
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-    stable_seed = int(hashlib.sha256(cleaned_prompt.encode("utf-8")).hexdigest()[:8], 16)
+    stable_seed = int(hashlib.sha256(cleaned_prompt.encode("utf-8")).hexdigest()[:8], 16) % 2147483647
 
     params = {
         "model": POLLINATIONS_MODEL,

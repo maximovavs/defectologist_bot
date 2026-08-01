@@ -61,9 +61,11 @@ HEADERS = {
 }
 
 VISUAL_STYLE_TAIL = (
-    "Warm soft editorial illustration, natural daylight, beige and warm pastel palette, natural human proportions, "
-    "simple naturally posed hands away from the camera. "
-    "No text, letters, logos, watermarks, duplicated figures, wide-angle distortion, stretched anatomy, or clutter."
+    "Warm soft editorial illustration, 2D hand-painted watercolor and gouache on subtle paper texture; warm muted pastels, "
+    "soft daylight, gentle educational mood, clean composition, natural human proportions. Ordinary casual professional indoor clothing; "
+    "no medical/industrial PPE, face shields, surgical masks, respirators, high-vis vests, hard hats, safety helmets or lab coats. "
+    "Simple naturally posed hands away from the camera. Not photorealistic; no 3D, anime, glossy art, text, logos, watermarks, "
+    "wide-angle distortion, stretched anatomy or clutter."
 )
 
 VISUAL_CAMERA_TEMPLATE = (
@@ -648,7 +650,6 @@ def _build_visual_qa_expected_brief(prompt: str, rubric_id: str) -> str:
 def _visual_people_rule(rubric_id: str) -> str:
     return build_visual_role_rule(rubric_id)
 
-
 def _visual_people_limit(rubric_id: str) -> int:
     return {
         "method_piggybank": 2,
@@ -689,6 +690,20 @@ def _visual_count_value(result: Dict[str, object], key: str) -> int | None:
     return _coerce_people_count(result.get(key))
 
 
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    return None
+
+
 VISUAL_QA_HARD_REASONS = frozenset(
     {
         "too_many_people",
@@ -710,6 +725,9 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "extra_limbs",
         "missing_limbs",
         "panoramic_distortion",
+        "unexpected_ppe",
+        "object_contains_person",
+        "object_counts_unknown",
     }
 )
 
@@ -726,6 +744,12 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
     if reason in VISUAL_QA_HARD_REASONS:
         normalized["status"] = "fail"
         normalized["pass"] = False
+
+    ppe_detected = _coerce_bool(result.get("ppe_detected"))
+    if ppe_detected is not None:
+        normalized["ppe_detected"] = ppe_detected
+    if ppe_detected is True:
+        normalized.update({"status": "fail", "pass": False, "reason": "unexpected_ppe"})
 
     people_count = _coerce_people_count(result.get("people_count"))
     if people_count is not None and people_count > _visual_people_limit(rubric_id):
@@ -756,7 +780,7 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
             }
         )
 
-    if normalized.get("reason") not in {"too_many_people", "character_counts_unknown"}:
+    if normalized.get("reason") not in {"too_many_people", "character_counts_unknown", "unexpected_ppe"}:
         requires_exact_adult_child = rubric == "method_piggybank" or rubric in PARENT_VISUAL_RUBRICS
         if requires_exact_adult_child and child_count == 0:
             normalized.update({"status": "fail", "pass": False, "reason": "missing_required_child"})
@@ -821,6 +845,11 @@ def build_visual_retry_prompt(
         correction = "Keep normal body width and a non-panoramic composition"
     elif reason == "deformed_hands":
         correction = "Keep hands simple and naturally posed, away from the camera and outside the main focal point"
+    elif reason == "unexpected_ppe":
+        correction = (
+            "Use ordinary casual indoor clothing only, with no mask, face shield, respirator, reflective vest, helmet, "
+            "lab coat, medical uniform, industrial PPE, or construction PPE"
+        )
     elif reason in {
         "too_many_people",
         "duplicate_figure",
@@ -880,6 +909,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            "ppe_detected": "unknown",
         }
     try:
         parsed = json.loads(match.group(0))
@@ -891,6 +921,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            "ppe_detected": "unknown",
         }
     if not isinstance(parsed, dict) or "pass" not in parsed:
         return {
@@ -900,6 +931,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            "ppe_detected": "unknown",
         }
     passed = parsed.get("pass")
     if isinstance(passed, str):
@@ -915,6 +947,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     child_count = parsed.get("child_count", "unknown")
     if not isinstance(child_count, (int, str)) or isinstance(child_count, bool):
         child_count = "unknown"
+    ppe_detected = _coerce_bool(parsed.get("ppe_detected"))
     return {
         "status": "pass" if passed else "fail",
         "pass": passed,
@@ -922,6 +955,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         "people_count": people_count,
         "adult_count": adult_count,
         "child_count": child_count,
+        "ppe_detected": ppe_detected if ppe_detected is not None else "unknown",
     }
 
 
@@ -983,6 +1017,7 @@ def evaluate_visual_quality(
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            "ppe_detected": "unknown",
             **_visual_qa_key_metadata(),
         }
 
@@ -991,17 +1026,21 @@ def evaluate_visual_quality(
     qa_prompt = (
         "You are a strict visual QA checker for a Telegram educational cover. "
         "Return JSON only with keys pass (boolean), reason (short string), people_count (integer or unknown), "
-        "adult_count (integer or unknown), and child_count (integer or unknown). "
+        "adult_count (integer or unknown), child_count (integer or unknown), and ppe_detected (boolean). "
         "Count adults, children, and all visible people separately. Count every visible human face, head, torso, "
         "reflection, background person, and partially visible person. "
         "A floating head, disconnected torso, silhouette, duplicate, ghosted, merged, or partially formed human figure counts as a person. "
         "Do not ignore small background figures. "
-        "Pass only when the image is a warm soft editorial illustration, child-friendly, uncluttered, medium-shot, "
-        "relevant to speech or developmental education, with natural proportions and coherent hands. "
+        "Pass only when the image is a 2D hand-painted watercolor and gouache editorial illustration with subtle paper texture, "
+        "warm muted pastel colors, soft natural daylight, a gentle educational mood, clean composition, natural proportions, "
+        "and a professional but approachable appearance. Reject photorealistic imagery, 3D renders, anime, glossy digital art, "
+        "or styles that do not match this watercolor-and-gouache direction. "
+        "Set ppe_detected=true and fail with reason unexpected_ppe if any person wears or the scene prominently contains "
+        "a face shield, surgical mask, respirator, hard hat, safety helmet, reflective vest, high-visibility clothing, medical PPE, "
+        "industrial PPE, hospital uniform, construction uniform, or lab coat. These items are never expected for this project. "
         "Fail for stretched faces, widened torsos, elongated arms, oversized or deformed hands, extra or missing limbs, "
         "stretched bodies, horizontal stretching, duplicate, ghosted, merged, or partially generated people, cropped main faces, "
-        "uncanny photorealistic faces, anime or 3D toy style, fish-eye or panoramic distortion, crowded scenes, "
-        "unrequired background people, text, letters, logos, or watermarks. "
+        "fish-eye or panoramic distortion, crowded scenes, unrequired background people, text, letters, logos, or watermarks. "
         "For parent rubrics tip_of_day, play_and_speak, question_week, myth_fact, bilingual_corner, and bilingual_parents, "
         "pass only with exactly one adult parent and exactly one clearly younger child, hard maximum 2 people. "
         "For method_piggybank, pass only with exactly one adult speech specialist and exactly one clearly younger child. "
@@ -1009,9 +1048,13 @@ def evaluate_visual_quality(
         "Use reason action_mismatch when the main visual action or object does not match the expected prompt. "
         "Use reason missing_required_child when a required child is absent, too_many_adults when more than one adult is visible, "
         "wrong_character_roles when the character composition does not match the rubric, and adult_only_scene when only adults are visible. "
+        "If Expected roles explicitly require zero people or an object-only still life, pass only when people_count=0, "
+        "adult_count=0, child_count=0, ppe_detected=false, and no face, head, body, hand, human silhouette, or human reflection is visible. "
+        "For that object-only case use reason object_contains_person for any visible human element and object_counts_unknown if the counts cannot be determined. "
         "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, action_mismatch, "
         "adult_only_scene, missing_required_child, too_many_adults, wrong_character_roles, stretched_face, widened_torso, "
-        "stretched_body, horizontal_stretch, deformed_hands, extra_limbs, missing_limbs, or panoramic_distortion when applicable. "
+        "stretched_body, horizontal_stretch, deformed_hands, extra_limbs, missing_limbs, panoramic_distortion, unexpected_ppe, "
+        "object_contains_person, or object_counts_unknown when applicable. "
         f"Rubric: {rubric_id or 'unknown'}. Audience: {audience or 'parents'}. {expected_roles} "
         f"Expected visual brief: {expected_prompt or 'not provided'}. "
         "Compare the image separately with Expected roles, Expected action, and Allowed props. "
@@ -1058,6 +1101,7 @@ def evaluate_visual_quality(
                 "people_count": "unknown",
                 "adult_count": "unknown",
                 "child_count": "unknown",
+                "ppe_detected": "unknown",
                 **_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger),
             }
         except requests.RequestException as exc:
@@ -1078,6 +1122,7 @@ def evaluate_visual_quality(
                 "people_count": "unknown",
                 "adult_count": "unknown",
                 "child_count": "unknown",
+                "ppe_detected": "unknown",
                 **_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger),
             }
         except Exception as exc:
@@ -1092,6 +1137,7 @@ def evaluate_visual_quality(
                 "people_count": "unknown",
                 "adult_count": "unknown",
                 "child_count": "unknown",
+                "ppe_detected": "unknown",
                 **_visual_qa_key_metadata(source_name, attempt, attempt > 1, "exception"),
             }
 
@@ -1117,6 +1163,7 @@ def evaluate_visual_quality(
                 "people_count": "unknown",
                 "adult_count": "unknown",
                 "child_count": "unknown",
+                "ppe_detected": "unknown",
                 **_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger),
             }
 
@@ -1130,6 +1177,7 @@ def evaluate_visual_quality(
                 "people_count": "unknown",
                 "adult_count": "unknown",
                 "child_count": "unknown",
+                "ppe_detected": "unknown",
                 **_visual_qa_key_metadata(source_name, attempt, attempt > 1, "invalid_response"),
             }
         normalized = _enforce_visual_qa_hard_failures(parsed, rubric_id)
@@ -1148,6 +1196,7 @@ def evaluate_visual_quality(
         "people_count": "unknown",
         "adult_count": "unknown",
         "child_count": "unknown",
+        "ppe_detected": "unknown",
         **_visual_qa_key_metadata(),
     }
 
@@ -1176,6 +1225,7 @@ def _safe_visual_qa(
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            "ppe_detected": "unknown",
         }
     if not isinstance(result, dict):
         return {
@@ -1185,6 +1235,7 @@ def _safe_visual_qa(
             "people_count": "unknown",
             "adult_count": "unknown",
             "child_count": "unknown",
+            "ppe_detected": "unknown",
         }
     normalized = {
         "status": str(result.get("status") or ("pass" if result.get("pass", True) else "fail")),
@@ -1193,6 +1244,7 @@ def _safe_visual_qa(
         "people_count": result.get("people_count", "unknown"),
         "adult_count": result.get("adult_count", "unknown"),
         "child_count": result.get("child_count", "unknown"),
+        "ppe_detected": result.get("ppe_detected", "unknown"),
         "human_qa_key_source": str(result.get("human_qa_key_source", "")),
         "human_qa_key_attempts": str(result.get("human_qa_key_attempts", "0")),
         "human_qa_key_fallback_used": str(result.get("human_qa_key_fallback_used", "False")),
@@ -1217,6 +1269,71 @@ def _visual_qa_skipped(result: Dict[str, object]) -> bool:
     return str(result.get("status", "")).strip().lower() == "skipped"
 
 
+def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
+    normalized = {**result}
+    reason = _normalize_visual_qa_reason(result.get("reason"))
+    normalized["reason"] = reason
+
+    people_count = _coerce_people_count(result.get("people_count"))
+    adult_count = _coerce_people_count(result.get("adult_count"))
+    child_count = _coerce_people_count(result.get("child_count"))
+    ppe_detected = _coerce_bool(result.get("ppe_detected"))
+
+    if people_count is not None:
+        normalized["people_count"] = people_count
+    if adult_count is not None:
+        normalized["adult_count"] = adult_count
+    if child_count is not None:
+        normalized["child_count"] = child_count
+    if ppe_detected is not None:
+        normalized["ppe_detected"] = ppe_detected
+
+    if ppe_detected is True:
+        normalized.update({"status": "fail", "pass": False, "reason": "unexpected_ppe"})
+        return normalized
+
+    if people_count is None or adult_count is None or child_count is None or ppe_detected is None:
+        normalized.update({"status": "fail", "pass": False, "reason": "object_counts_unknown"})
+        return normalized
+
+    if people_count != 0 or adult_count != 0 or child_count != 0:
+        normalized.update({"status": "fail", "pass": False, "reason": "object_contains_person"})
+        return normalized
+
+    if reason in VISUAL_QA_HARD_REASONS:
+        normalized.update({"status": "fail", "pass": False})
+        return normalized
+
+    if str(normalized.get("status", "")).strip().lower() != "pass" or not bool(normalized.get("pass", False)):
+        normalized.update({"status": "fail", "pass": False})
+    return normalized
+
+
+def _safe_object_visual_qa(
+    qa_fn: Callable[..., Dict[str, object]],
+    image_buffer: BytesIO,
+    *,
+    audience: str,
+    category: str,
+    visual_qa_api_key: str = "",
+) -> Dict[str, object]:
+    objects = OBJECT_SCENE_CATEGORIES.get(category, OBJECT_SCENE_CATEGORIES["default"])
+    expected_prompt = (
+        "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+        "Expected action: educational still-life objects only, no human elements, no PPE, no uniforms.\n"
+        f"Allowed props: {objects}"
+    )
+    result = _safe_visual_qa(
+        qa_fn,
+        image_buffer,
+        rubric_id="",
+        audience=audience,
+        expected_prompt=expected_prompt,
+        visual_qa_api_key=visual_qa_api_key,
+    )
+    return _enforce_object_visual_qa(result)
+
+
 OBJECT_SCENE_CATEGORIES = {
     "books_vocab_phrases_stories": (
         "children’s picture books, picture cards, small wooden toy objects"
@@ -1228,6 +1345,7 @@ OBJECT_SCENE_CATEGORIES = {
     "games_everyday_communication": "basket, ball, wooden blocks, picture cards",
     "bilingual_languages": "two differently colored children’s books, small globe, two empty speech-bubble shapes without text",
     "reading_prep": "picture cards, blank wooden letter-like blocks without readable letters, children’s book, pencil and blank paper",
+    "household_routines": "folded T-shirt, small laundry basket, simple cup and plate, kitchen towel, small home storage basket",
     "default": "children’s picture book, picture cards, wooden toys",
 }
 
@@ -1241,8 +1359,9 @@ OBJECT_SCENE_COMPOSITIONS = (
 )
 
 
-def _object_scene_category(title: str, rubric_id: str) -> str:
-    value = (title or "").lower()
+def _object_scene_category(title: str, rubric_id: str, context_hint: str = "") -> str:
+    del rubric_id
+    value = f"{title or ''} {context_hint or ''}".lower()
     articulation_markers = (
         "артикуля", "положение языка", "движение языка", "язык за зубами", "язык находится за", "губ", "произношение",
         "звукопроизнош", "речевой звук", "speech sound", "pronunciation", "articulation", "tongue position",
@@ -1264,6 +1383,13 @@ def _object_scene_category(title: str, rubric_id: str) -> str:
     )
     if any(marker in value for marker in hearing_markers):
         return "hearing_sounds_music"
+    household_markers = (
+        "бытов", "бытовые дела", "домашние дела", "домашних дел", "стир", "одежд", "посуд", "кухн",
+        "уборк", "повседневн", "washing machine", "laundry", "household chores", "household routine",
+        "kitchen", "cleaning", "folded t-shirt", "clothes",
+    )
+    if any(marker in value for marker in household_markers):
+        return "household_routines"
     if any(word in value for word in ("чита", "букв", "read", "letter")):
         return "reading_prep"
     if any(word in value for word in ("игр", "мяч", "game", "общен", "commun")):
@@ -1293,18 +1419,23 @@ def build_object_only_visual_prompt(
     rubric_id: str,
     original_prompt: str = "",
     variation_key: str = "",
+    context_hint: str = "",
 ) -> str:
     """Build a people-free fallback prompt with stable per-publication variation."""
     del original_prompt
-    category = _object_scene_category(title, rubric_id)
+    category = _object_scene_category(title, rubric_id, context_hint=context_hint)
     objects = OBJECT_SCENE_CATEGORIES[category]
     variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
     composition = _object_scene_composition(category, variation_id)
     return (
         "Object-only educational still life. No people. No adults. No children. No faces. No hands. "
         "No human figures. No silhouettes. No reflections of people. No text. No letters. No words. "
-        "No logos. No watermarks. No medical tools. Warm soft editorial illustration, beige and pastel palette, "
-        "daylight, child-friendly objects. 16:9 landscape. "
+        "No logos. No watermarks. No medical tools. No PPE. No face shield. No surgical mask. No respirator. "
+        "No hard hat. No safety helmet. No reflective vest. No high-visibility clothing. No medical, hospital, "
+        "industrial, or construction uniforms. Warm soft editorial illustration in a 2D hand-painted watercolor "
+        "and gouache style, subtle watercolor paper texture, warm muted pastel palette, soft natural daylight, "
+        "gentle friendly educational mood, clean simple composition, professional but approachable. "
+        "Not photorealistic. No 3D render. No anime. No glossy digital art. Child-friendly objects. 16:9 landscape. "
         f"Scene category: {category}. Objects: {objects}. Composition: {composition}. "
         f"Internal visual variation cue: {variation_id}. Use this cue only to vary layout and object selection; "
         "never render the cue, letters, numbers, labels, captions, or written symbols."
@@ -1321,82 +1452,163 @@ def _build_object_visual_fallback(
     rubric_id: str,
     pollinations_token: str,
     trigger: str,
+    audience: str = "",
+    visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
+    visual_qa_api_key: str = "",
+    context_hint: str = "",
     first_qa: Dict[str, object] | None = None,
     retry_qa: Dict[str, object] | None = None,
 ) -> Tuple[BytesIO, Dict[str, str]]:
-    variation_key = f"{day_key}|{rubric_id}|{title}|{trigger}"
-    variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
-    object_prompt = build_object_only_visual_prompt(
-        title,
-        rubric_id,
-        variation_key=variation_key,
-    )
-    category = _object_scene_category(title, rubric_id)
+    category = _object_scene_category(title, rubric_id, context_hint=context_hint)
     key_result = retry_qa or first_qa or {}
+    qa_fn = visual_qa_fn or evaluate_visual_quality
+    last_object_qa: Dict[str, object] = {}
+    last_reason = trigger
+    last_exception_type = ""
+    last_variation_id = ""
+    generation_attempts = 0
+
+    for object_attempt in range(1, 3):
+        generation_attempts = object_attempt
+        variation_key = f"{day_key}|{rubric_id}|{title}|{trigger}|object_attempt={object_attempt}"
+        variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
+        last_variation_id = variation_id
+        object_prompt = build_object_only_visual_prompt(
+            title,
+            rubric_id,
+            variation_key=variation_key,
+            context_hint=context_hint,
+        )
+        print(
+            f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} trigger={_short_log_message(trigger)} "
+            f"category={category} variation={variation_id}",
+            flush=True,
+        )
+        try:
+            buffer, object_meta = download_pollinations_image_with_meta(
+                prompt=object_prompt,
+                token=pollinations_token,
+            )
+        except Exception as exc:
+            last_exception_type = exc.__class__.__name__
+            last_reason = _short_log_message(getattr(exc, "reason", exc), max_len=220) or "object_generation_failed"
+            print(
+                f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} generation=failed "
+                f"reason={_short_log_message(last_reason)}",
+                flush=True,
+            )
+            continue
+
+        object_qa = _safe_object_visual_qa(
+            qa_fn,
+            buffer,
+            audience=audience,
+            category=category,
+            visual_qa_api_key=visual_qa_api_key,
+        )
+        last_object_qa = object_qa
+        last_reason = str(object_qa.get("reason", "object_qa_rejected"))
+        print(
+            f"[VISUAL][OBJECT_QA] attempt={object_attempt} status={object_qa.get('status', 'fail')} "
+            f"reason={_short_log_message(last_reason)} "
+            f"people_count={object_qa.get('people_count', 'unknown')} "
+            f"adult_count={object_qa.get('adult_count', 'unknown')} "
+            f"child_count={object_qa.get('child_count', 'unknown')} "
+            f"ppe_detected={object_qa.get('ppe_detected', 'unknown')}",
+            flush=True,
+        )
+        if _visual_qa_passed(object_qa):
+            return buffer, {
+                **base_meta,
+                **object_meta,
+                "mode": "ai_object_fallback",
+                "text_fallback_used": "False",
+                "visual_source": "object_ai",
+                "fallback_stage": "object",
+                "fallback_trigger": trigger,
+                "reason": "object_fallback_success",
+                "final_reason": "object_fallback_success",
+                "fallback_reason": trigger,
+                "object_prompt_used": "True",
+                "object_scene_category": category,
+                "object_generation_status": "generated",
+                "object_generation_attempts": str(object_attempt),
+                "object_visual_variation": variation_id,
+                "object_qa_attempts": str(object_attempt),
+                "object_qa_status": str(object_qa.get("status", "pass")),
+                "object_qa_reason": str(object_qa.get("reason", "ok")),
+                "object_qa_people_count": str(object_qa.get("people_count", "unknown")),
+                "object_qa_adult_count": str(object_qa.get("adult_count", "unknown")),
+                "object_qa_child_count": str(object_qa.get("child_count", "unknown")),
+                "object_qa_ppe_detected": str(object_qa.get("ppe_detected", "unknown")),
+                "object_qa_key_source": str(object_qa.get("qa_key_source", object_qa.get("human_qa_key_source", ""))),
+                "object_qa_key_attempts": str(object_qa.get("qa_key_attempts", object_qa.get("human_qa_key_attempts", "0"))),
+                "object_qa_key_fallback_used": str(object_qa.get("qa_key_fallback_used", object_qa.get("human_qa_key_fallback_used", "False"))),
+                "object_qa_key_fallback_trigger": str(object_qa.get("qa_key_fallback_trigger", object_qa.get("human_qa_key_fallback_trigger", ""))),
+                "visual_qa": str(object_qa.get("status", "pass")),
+                "visual_qa_status": str(object_qa.get("status", "pass")),
+                "visual_qa_reason": str(object_qa.get("reason", "ok")),
+                "visual_qa_people_count": str(object_qa.get("people_count", "0")),
+                "visual_qa_adult_count": str(object_qa.get("adult_count", "0")),
+                "visual_qa_child_count": str(object_qa.get("child_count", "0")),
+                "visual_qa_ppe_detected": str(object_qa.get("ppe_detected", "False")),
+                "visual_qa_attempts": str(object_attempt),
+                "human_qa_first_status": str((first_qa or {}).get("status", "not_run")),
+                "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
+                "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
+                "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
+                "human_qa_key_source": str(key_result.get("human_qa_key_source", "")),
+                "human_qa_key_attempts": str(key_result.get("human_qa_key_attempts", "0")),
+                "human_qa_key_fallback_used": str(key_result.get("human_qa_key_fallback_used", "False")),
+                "human_qa_key_fallback_trigger": str(key_result.get("human_qa_key_fallback_trigger", "")),
+            }
+
     print(
-        f"[VISUAL][OBJECT_FALLBACK] trigger={_short_log_message(trigger)} "
-        f"category={category} variation={variation_id}",
+        f"[VISUAL][TEXT_FALLBACK] trigger=object_qa_exhausted category={category} "
+        f"last_reason={_short_log_message(last_reason)}",
         flush=True,
     )
-    try:
-        buffer, object_meta = download_pollinations_image_with_meta(
-            prompt=object_prompt,
-            token=pollinations_token,
-        )
-        return buffer, {
-            **base_meta,
-            **object_meta,
-            "mode": "ai_object_fallback",
-            "text_fallback_used": "False",
-            "visual_source": "object_ai",
-            "fallback_stage": "object",
-            "fallback_trigger": trigger,
-            "reason": "object_fallback_success",
-            "final_reason": "object_fallback_success",
-            "fallback_reason": trigger,
-            "object_prompt_used": "True",
-            "object_scene_category": category,
-            "object_generation_status": "generated",
-            "visual_qa": "not_run",
-            "visual_qa_status": "not_run",
-            "visual_qa_reason": "object_only_no_human_qa",
-            "visual_qa_attempts": "2" if retry_qa is not None else ("1" if first_qa is not None else "0"),
-            "human_qa_first_status": str((first_qa or {}).get("status", "not_run")),
-            "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
-            "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
-            "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
-            "human_qa_key_source": str(key_result.get("human_qa_key_source", "")),
-            "human_qa_key_attempts": str(key_result.get("human_qa_key_attempts", "0")),
-            "human_qa_key_fallback_used": str(key_result.get("human_qa_key_fallback_used", "False")),
-            "human_qa_key_fallback_trigger": str(key_result.get("human_qa_key_fallback_trigger", "")),
-        }
-    except Exception as exc:
-        print(f"[VISUAL][TEXT_FALLBACK] trigger={_short_log_message(trigger)}", flush=True)
-        fallback = build_fallback_cover_buffer(title=safe_title, day_key=day_key, fallback_title=fallback_title)
-        return fallback, {
-            **base_meta,
-            "mode": "text_fallback",
-            "text_fallback_used": "True",
-            "visual_source": "text_card",
-            "fallback_stage": "text",
-            "fallback_trigger": trigger,
-            "reason": _short_log_message(getattr(exc, "reason", exc), max_len=220) or trigger,
-            "final_reason": "object_fallback_failed",
-            "fallback_reason": trigger,
-            "object_prompt_used": "True",
-            "object_scene_category": category,
-            "object_generation_status": "failed",
-            "visual_qa_attempts": "2" if retry_qa is not None else ("1" if first_qa is not None else "0"),
-            "exception_type": exc.__class__.__name__,
-            "human_qa_first_status": str((first_qa or {}).get("status", "not_run")),
-            "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
-            "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
-            "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
-            "human_qa_key_source": str(key_result.get("human_qa_key_source", "")),
-            "human_qa_key_attempts": str(key_result.get("human_qa_key_attempts", "0")),
-            "human_qa_key_fallback_used": str(key_result.get("human_qa_key_fallback_used", "False")),
-            "human_qa_key_fallback_trigger": str(key_result.get("human_qa_key_fallback_trigger", "")),
-        }
+    fallback = build_fallback_cover_buffer(title=safe_title, day_key=day_key, fallback_title=fallback_title)
+    return fallback, {
+        **base_meta,
+        "mode": "text_fallback",
+        "text_fallback_used": "True",
+        "visual_source": "text_card",
+        "fallback_stage": "text",
+        "fallback_trigger": trigger,
+        "reason": _short_log_message(last_reason, max_len=220) or trigger,
+        "final_reason": "object_fallback_rejected",
+        "fallback_reason": trigger,
+        "object_prompt_used": "True",
+        "object_scene_category": category,
+        "object_generation_status": "rejected" if last_object_qa else "failed",
+        "object_generation_attempts": str(generation_attempts),
+        "object_visual_variation": last_variation_id,
+        "object_qa_attempts": str(generation_attempts if last_object_qa else 0),
+        "object_qa_status": str(last_object_qa.get("status", "not_run")),
+        "object_qa_reason": str(last_object_qa.get("reason", last_reason)),
+        "object_qa_people_count": str(last_object_qa.get("people_count", "unknown")),
+        "object_qa_adult_count": str(last_object_qa.get("adult_count", "unknown")),
+        "object_qa_child_count": str(last_object_qa.get("child_count", "unknown")),
+        "object_qa_ppe_detected": str(last_object_qa.get("ppe_detected", "unknown")),
+        "visual_qa": str(last_object_qa.get("status", "not_run")),
+        "visual_qa_status": str(last_object_qa.get("status", "not_run")),
+        "visual_qa_reason": str(last_object_qa.get("reason", last_reason)),
+        "visual_qa_people_count": str(last_object_qa.get("people_count", "unknown")),
+        "visual_qa_adult_count": str(last_object_qa.get("adult_count", "unknown")),
+        "visual_qa_child_count": str(last_object_qa.get("child_count", "unknown")),
+        "visual_qa_ppe_detected": str(last_object_qa.get("ppe_detected", "unknown")),
+        "visual_qa_attempts": str(generation_attempts if last_object_qa else 0),
+        "exception_type": last_exception_type,
+        "human_qa_first_status": str((first_qa or {}).get("status", "not_run")),
+        "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
+        "human_qa_retry_status": str((retry_qa or {}).get("status", "not_run")),
+        "human_qa_retry_reason": str((retry_qa or {}).get("reason", "")),
+        "human_qa_key_source": str(key_result.get("human_qa_key_source", "")),
+        "human_qa_key_attempts": str(key_result.get("human_qa_key_attempts", "0")),
+        "human_qa_key_fallback_used": str(key_result.get("human_qa_key_fallback_used", "False")),
+        "human_qa_key_fallback_trigger": str(key_result.get("human_qa_key_fallback_trigger", "")),
+    }
 
 
 def _fallback_for_required_visual_qa(
@@ -1411,6 +1623,9 @@ def _fallback_for_required_visual_qa(
     download_meta: Dict[str, str] | None = None,
     rubric_id: str = "",
     pollinations_token: str = "",
+    audience: str = "",
+    visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
+    visual_qa_api_key: str = "",
 ) -> Tuple[BytesIO, Dict[str, str]]:
     qa_reason = _short_log_message(qa_result.get("reason"), max_len=220)
     print(
@@ -1427,6 +1642,10 @@ def _fallback_for_required_visual_qa(
         rubric_id=rubric_id,
         pollinations_token=pollinations_token,
         trigger="qa_unavailable_for_required_rubric",
+        audience=audience,
+        visual_qa_fn=visual_qa_fn,
+        visual_qa_api_key=visual_qa_api_key,
+        context_hint=prompt,
         first_qa=qa_result,
     )
 
@@ -1443,6 +1662,7 @@ def build_post_visual(
     visual_qa_api_key: str = "",
 ) -> Tuple[BytesIO, Dict[str, str]]:
     original_prompt = (image_prompt or "").strip()
+    qa_fn = visual_qa_fn or evaluate_visual_quality
     prompt = ""
     visual_brief: VisualBrief | None = None
     if original_prompt:
@@ -1502,6 +1722,7 @@ def build_post_visual(
         "visual_qa": "not_run",
         "visual_qa_status": "not_run",
         "visual_qa_attempts": "0",
+        "visual_qa_ppe_detected": "unknown",
         "visual_qa_required": str(visual_qa_required),
         "visual_retry_used": "False",
         "text_fallback_used": "False",
@@ -1519,6 +1740,15 @@ def build_post_visual(
         "object_prompt_used": "False",
         "object_scene_category": "",
         "object_generation_status": "not_run",
+        "object_generation_attempts": "0",
+        "object_visual_variation": "",
+        "object_qa_attempts": "0",
+        "object_qa_status": "not_run",
+        "object_qa_reason": "",
+        "object_qa_people_count": "unknown",
+        "object_qa_adult_count": "unknown",
+        "object_qa_child_count": "unknown",
+        "object_qa_ppe_detected": "unknown",
         "visual_brief_roles": visual_brief.role_rule if visual_brief else "",
         "visual_brief_age": visual_brief.age_descriptor if visual_brief else "",
         "visual_brief_action": visual_brief.action if visual_brief else "",
@@ -1542,7 +1772,6 @@ def build_post_visual(
                 token=pollinations_token,
             )
             print("[VISUAL][HUMAN] status=generated", flush=True)
-            qa_fn = visual_qa_fn or evaluate_visual_quality
             expected_brief = _build_visual_qa_expected_brief(prompt, rubric_id)
             first_qa = _safe_visual_qa(
                 qa_fn,
@@ -1557,6 +1786,7 @@ def build_post_visual(
                 f"people_count={first_qa.get('people_count', 'unknown')} "
                 f"adult_count={first_qa.get('adult_count', 'unknown')} "
                 f"child_count={first_qa.get('child_count', 'unknown')} "
+                f"ppe_detected={first_qa.get('ppe_detected', 'unknown')} "
                 f"attempt=1 limit={_visual_people_limit(rubric_id)}",
                 flush=True,
             )
@@ -1580,6 +1810,7 @@ def build_post_visual(
                 "visual_qa_people_count": str(first_qa.get("people_count", "unknown")),
                 "visual_qa_adult_count": str(first_qa.get("adult_count", "unknown")),
                 "visual_qa_child_count": str(first_qa.get("child_count", "unknown")),
+                "visual_qa_ppe_detected": str(first_qa.get("ppe_detected", "unknown")),
                 "visual_qa_attempts": "1",
                 "human_qa_first_status": str(first_qa.get("status", "skipped")),
                 "human_qa_first_reason": str(first_qa.get("reason", "ok")),
@@ -1605,6 +1836,9 @@ def build_post_visual(
                     download_meta=download_meta,
                     rubric_id=rubric_id,
                     pollinations_token=pollinations_token,
+                    audience=audience,
+                    visual_qa_fn=qa_fn,
+                    visual_qa_api_key=visual_qa_api_key,
                 )
             if _visual_qa_passed(first_qa):
                 return buffer, first_meta
@@ -1644,6 +1878,7 @@ def build_post_visual(
                     f"people_count={retry_qa.get('people_count', 'unknown')} "
                     f"adult_count={retry_qa.get('adult_count', 'unknown')} "
                     f"child_count={retry_qa.get('child_count', 'unknown')} "
+                    f"ppe_detected={retry_qa.get('ppe_detected', 'unknown')} "
                     f"attempt=2 limit={_visual_people_limit(rubric_id)}",
                     flush=True,
                 )
@@ -1668,6 +1903,7 @@ def build_post_visual(
                     "visual_qa_people_count": str(retry_qa.get("people_count", "unknown")),
                     "visual_qa_adult_count": str(retry_qa.get("adult_count", "unknown")),
                     "visual_qa_child_count": str(retry_qa.get("child_count", "unknown")),
+                    "visual_qa_ppe_detected": str(retry_qa.get("ppe_detected", "unknown")),
                     "visual_qa_attempts": "2",
                     "human_qa_first_status": str(first_qa_result.get("status", "fail")),
                     "human_qa_first_reason": str(first_qa_result.get("reason", retry_reason)),
@@ -1703,6 +1939,9 @@ def build_post_visual(
                         download_meta=retry_download_meta,
                         rubric_id=rubric_id,
                         pollinations_token=pollinations_token,
+                        audience=audience,
+                        visual_qa_fn=qa_fn,
+                        visual_qa_api_key=visual_qa_api_key,
                     )
                 if _visual_qa_passed(retry_qa):
                     return retry_buffer, retry_meta
@@ -1724,6 +1963,10 @@ def build_post_visual(
                 rubric_id=rubric_id,
                 pollinations_token=pollinations_token,
                 trigger=str(first_qa.get("reason", retry_reason)),
+                audience=audience,
+                visual_qa_fn=qa_fn,
+                visual_qa_api_key=visual_qa_api_key,
+                context_hint=retry_prompt,
                 first_qa=first_qa_result,
                 retry_qa=locals().get("retry_qa"),
             )
@@ -1744,6 +1987,10 @@ def build_post_visual(
                 rubric_id=rubric_id,
                 pollinations_token=pollinations_token,
                 trigger=reason,
+                audience=audience,
+                visual_qa_fn=qa_fn,
+                visual_qa_api_key=visual_qa_api_key,
+                context_hint=prompt,
             )
 
     return _build_object_visual_fallback(
@@ -1755,4 +2002,8 @@ def build_post_visual(
         rubric_id=rubric_id,
         pollinations_token=pollinations_token,
         trigger="empty_prompt",
+        audience=audience,
+        visual_qa_fn=qa_fn,
+        visual_qa_api_key=visual_qa_api_key,
+        context_hint=original_prompt,
     )

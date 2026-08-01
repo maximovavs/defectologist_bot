@@ -8,10 +8,13 @@ from unittest.mock import Mock, patch
 import requests
 
 from src.services.visual_pipeline import (
+    VISUAL_STYLE_TAIL,
+    _enforce_object_visual_qa,
     _object_scene_category,
     _visual_qa_key_candidates,
     build_object_only_visual_prompt,
     build_post_visual,
+    build_visual_role_rule,
     evaluate_visual_quality,
 )
 
@@ -19,9 +22,21 @@ from src.services.visual_pipeline import (
 def _qa_response(status_code, payload=None):
     response = Mock(status_code=status_code)
     response.json.return_value = payload or {
-        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1}'}]}}]
+        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false}'}]}}]
     }
     return response
+
+
+def _object_pass():
+    return {
+        "status": "pass",
+        "pass": True,
+        "reason": "ok",
+        "people_count": 0,
+        "adult_count": 0,
+        "child_count": 0,
+        "ppe_detected": False,
+    }
 
 
 class VisualFallbackPolicyTest(unittest.TestCase):
@@ -68,31 +83,33 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(result["human_qa_key_source"], "visual_qa")
         self.assertEqual(result["human_qa_key_attempts"], "1")
 
-    def test_two_403_responses_use_object_fallback(self):
-        with patch.dict(
-            os.environ,
-            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
-            clear=True,
-        ), patch(
-            "src.services.visual_pipeline.requests.post",
-            side_effect=[_qa_response(403), _qa_response(403)],
-        ) as request, patch(
+    def test_two_403_responses_use_qa_checked_object_fallback(self):
+        qa_results = iter([
+            {"status": "skipped", "pass": True, "reason": "qa_http_403"},
+            _object_pass(),
+        ])
+
+        def qa(*_args, **_kwargs):
+            return next(qa_results)
+
+        with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
             side_effect=[(BytesIO(b"human"), {}), (BytesIO(b"object"), {})],
-        ):
+        ) as download:
             buffer, meta = build_post_visual(
                 title="Speech activity",
                 day_key="MO",
                 image_prompt="adult and child practice speech",
                 rubric_id="tip_of_day",
+                visual_qa_fn=qa,
             )
 
         self.assertEqual(buffer.getvalue(), b"object")
         self.assertEqual(meta["mode"], "ai_object_fallback")
-        self.assertEqual(meta["human_qa_key_source"], "general")
-        self.assertEqual(meta["human_qa_key_attempts"], "2")
         self.assertEqual(meta["fallback_trigger"], "qa_unavailable_for_required_rubric")
-        self.assertEqual(request.call_count, 2)
+        self.assertEqual(meta["object_qa_status"], "pass")
+        self.assertEqual(meta["object_qa_people_count"], "0")
+        self.assertEqual(download.call_count, 2)
 
     def test_401_and_429_can_use_next_key_once(self):
         for first_status in (401, 429):
@@ -156,7 +173,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
 
     def test_key_fallback_does_not_weaken_hard_failure(self):
-        hard = _qa_response(200, {"candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ghosted_figure", "people_count": 2, "adult_count": 1, "child_count": 1}'}]}}]})
+        hard = _qa_response(200, {"candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ghosted_figure", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false}'}]}}]})
         with patch.dict(os.environ, {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET"}, clear=True), patch(
             "src.services.visual_pipeline.requests.post", return_value=hard
         ):
@@ -165,16 +182,42 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertFalse(result["pass"])
         self.assertEqual(result["reason"], "ghosted_figure")
 
-    def test_object_prompt_is_people_free_and_does_not_include_raw_title(self):
+    def test_unexpected_ppe_is_hard_failure(self):
+        ppe = _qa_response(200, {"candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": true}'}]}}]})
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=ppe
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "unexpected_ppe")
+
+    def test_object_prompt_is_people_free_styled_and_does_not_include_raw_title(self):
         prompt = build_object_only_visual_prompt(
             "Русская игра с мячом и ребёнком", "play_and_speak", "raw Russian prompt"
         )
         self.assertIn("Object-only educational still life", prompt)
         self.assertIn("No people", prompt)
-        self.assertIn("No text", prompt)
+        self.assertIn("No faces", prompt)
+        self.assertIn("No hands", prompt)
+        self.assertIn("No PPE", prompt)
+        self.assertIn("watercolor", prompt.lower())
+        self.assertIn("gouache", prompt.lower())
+        self.assertIn("Not photorealistic", prompt)
         self.assertIn("16:9 landscape", prompt)
         self.assertNotIn("Русская игра", prompt)
         self.assertNotIn("raw Russian prompt", prompt)
+
+    def test_human_style_and_role_prompt_have_watercolor_and_anti_ppe(self):
+        self.assertIn("watercolor", VISUAL_STYLE_TAIL.lower())
+        self.assertIn("gouache", VISUAL_STYLE_TAIL.lower())
+        self.assertIn("surgical masks", VISUAL_STYLE_TAIL.lower())
+        self.assertIn("high-vis vests", VISUAL_STYLE_TAIL.lower())
+        self.assertIn("not photorealistic", VISUAL_STYLE_TAIL.lower())
+        role = build_visual_role_rule("method_piggybank")
+        self.assertIn("speech specialist", role.lower())
+        self.assertIn("ordinary casual professional indoor clothing", VISUAL_STYLE_TAIL.lower())
+        self.assertIn("medical/industrial ppe", VISUAL_STYLE_TAIL.lower())
 
     def test_object_prompt_varies_by_publication_key_and_stays_deterministic(self):
         first = build_object_only_visual_prompt(
@@ -198,12 +241,17 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertIn("Internal visual variation cue", first)
         self.assertNotIn("Мелодии и слова", first)
 
-    def test_empty_prompt_object_fallback_varies_between_days(self):
+    def test_empty_prompt_object_fallback_varies_between_days_and_is_qa_checked(self):
         prompts = []
+        qa_calls = []
 
         def download(*, prompt, token):
             prompts.append(prompt)
             return BytesIO(b"object"), {"attempts_used": "1"}
+
+        def qa(*_args, **kwargs):
+            qa_calls.append(kwargs)
+            return _object_pass()
 
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
@@ -214,25 +262,102 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 day_key="2026-07-30",
                 image_prompt="",
                 rubric_id="bilingual_corner",
+                visual_qa_fn=qa,
             )
             _, second_meta = build_post_visual(
                 title="Пойте и разговаривайте",
                 day_key="2026-07-31",
                 image_prompt="",
                 rubric_id="question_week",
+                visual_qa_fn=qa,
             )
 
         self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(qa_calls), 2)
         self.assertNotEqual(prompts[0], prompts[1])
         self.assertEqual(first_meta["object_scene_category"], "hearing_sounds_music")
         self.assertEqual(second_meta["object_scene_category"], "hearing_sounds_music")
+        self.assertEqual(first_meta["object_qa_status"], "pass")
 
-    def test_skipped_human_qa_uses_object_fallback_without_object_qa(self):
+    def test_object_qa_rejects_detected_human_and_retries(self):
+        qa_results = iter([
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 1, "adult_count": 1, "child_count": 0, "ppe_detected": False},
+            _object_pass(),
+        ])
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"object-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        with patch("src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download):
+            buffer, meta = build_post_visual(
+                title="Разговоры во время бытовых дел",
+                day_key="2026-08-01",
+                image_prompt="",
+                rubric_id="method_piggybank",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        self.assertEqual(buffer.getvalue(), b"object-2")
+        self.assertEqual(len(prompts), 2)
+        self.assertNotEqual(prompts[0], prompts[1])
+        self.assertEqual(meta["object_qa_status"], "pass")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+
+    def test_object_qa_rejects_ppe_and_retries(self):
+        qa_results = iter([
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 0, "adult_count": 0, "child_count": 0, "ppe_detected": True},
+            _object_pass(),
+        ])
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"bad-ppe"), {}), (BytesIO(b"safe-object"), {})],
+        ):
+            buffer, meta = build_post_visual(
+                title="Разговоры во время бытовых дел",
+                day_key="2026-08-01",
+                image_prompt="",
+                rubric_id="method_piggybank",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+        self.assertEqual(buffer.getvalue(), b"safe-object")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_ppe_detected"], "False")
+
+    def test_two_object_qa_failures_use_text_fallback(self):
+        qa_results = iter([
+            {"status": "pass", "pass": True, "reason": "ok", "people_count": 1, "adult_count": 1, "child_count": 0, "ppe_detected": False},
+            {"status": "fail", "pass": False, "reason": "unexpected_ppe", "people_count": 0, "adult_count": 0, "child_count": 0, "ppe_detected": True},
+        ])
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"object-1"), {}), (BytesIO(b"object-2"), {})],
+        ):
+            buffer, meta = build_post_visual(
+                title="Разговоры во время бытовых дел",
+                day_key="2026-08-01",
+                image_prompt="",
+                rubric_id="method_piggybank",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+        self.assertEqual(buffer.getvalue(), b"text-fallback")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["fallback_stage"], "text")
+        self.assertEqual(meta["final_reason"], "object_fallback_rejected")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_reason"], "unexpected_ppe")
+
+    def test_skipped_human_qa_requires_object_qa_before_publish(self):
+        qa_results = iter([
+            {"status": "skipped", "pass": True, "reason": "qa_http_429"},
+            _object_pass(),
+        ])
         qa_calls = []
 
         def qa(*args, **kwargs):
             qa_calls.append(kwargs)
-            return {"status": "skipped", "pass": True, "reason": "qa_http_429"}
+            return next(qa_results)
 
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
@@ -254,19 +379,27 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(meta["visual_source"], "object_ai")
         self.assertEqual(meta["object_generation_status"], "generated")
         self.assertEqual(meta["human_qa_first_reason"], "qa_http_429")
-        self.assertEqual(len(qa_calls), 1)
+        self.assertEqual(meta["object_qa_status"], "pass")
+        self.assertEqual(len(qa_calls), 2)
         self.assertEqual(download.call_count, 2)
 
-    def test_two_human_failures_then_object_failure_use_text_fallback(self):
+    def test_two_human_failures_then_two_object_failures_use_text_fallback(self):
         qa_results = iter(
             [
-                {"status": "fail", "pass": False, "reason": "ghosted_figure"},
-                {"status": "fail", "pass": False, "reason": "action_mismatch"},
+                {"status": "fail", "pass": False, "reason": "ghosted_figure", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": False},
+                {"status": "fail", "pass": False, "reason": "action_mismatch", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": False},
+                {"status": "pass", "pass": True, "reason": "ok", "people_count": 1, "adult_count": 1, "child_count": 0, "ppe_detected": False},
+                {"status": "fail", "pass": False, "reason": "unexpected_ppe", "people_count": 0, "adult_count": 0, "child_count": 0, "ppe_detected": True},
             ]
         )
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
-            side_effect=[(BytesIO(b"human"), {}), (BytesIO(b"retry"), {}), RuntimeError("object failed")],
+            side_effect=[
+                (BytesIO(b"human"), {}),
+                (BytesIO(b"retry"), {}),
+                (BytesIO(b"object-1"), {}),
+                (BytesIO(b"object-2"), {}),
+            ],
         ):
             buffer, meta = build_post_visual(
                 title="Speech activity",
@@ -275,7 +408,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 rubric_id="tip_of_day",
                 visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
             )
-        self.assertNotIn(buffer.getvalue(), {b"human", b"retry"})
+        self.assertNotIn(buffer.getvalue(), {b"human", b"retry", b"object-1", b"object-2"})
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["fallback_stage"], "text")
         self.assertEqual(meta["human_qa_first_reason"], "ghosted_figure")
@@ -296,10 +429,49 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             ("Реакция малыша на колокольчик", "hearing_and_speech", "hearing_sounds_music"),
             ("Мелодии и слова", "bilingual_corner", "hearing_sounds_music"),
             ("Пойте и разговаривайте", "question_week", "hearing_sounds_music"),
+            ("Разговоры во время бытовых дел", "method_piggybank", "household_routines"),
+            ("Стирка и новые слова", "tip_of_day", "household_routines"),
         )
         for title, rubric_id, expected in cases:
             with self.subTest(title=title, rubric_id=rubric_id):
                 self.assertEqual(_object_scene_category(title, rubric_id), expected)
+
+    def test_household_category_can_use_safe_brief_context_without_leaking_it(self):
+        self.assertEqual(
+            _object_scene_category("Новые слова", "method_piggybank", "placing a T-shirt into the washing machine"),
+            "household_routines",
+        )
+        prompt = build_object_only_visual_prompt(
+            "Новые слова",
+            "method_piggybank",
+            context_hint="placing a T-shirt into the washing machine",
+            variation_key="2026-08-01",
+        )
+        self.assertIn("Scene category: household_routines", prompt)
+        self.assertNotIn("washing machine", prompt.lower())
+        self.assertNotIn("Новые слова", prompt)
+
+    def test_object_enforcement_rejects_people_ppe_and_unknown_counts(self):
+        person = _enforce_object_visual_qa({
+            "status": "pass", "pass": True, "reason": "ok",
+            "people_count": 1, "adult_count": 1, "child_count": 0, "ppe_detected": False,
+        })
+        self.assertEqual(person["reason"], "object_contains_person")
+        self.assertFalse(person["pass"])
+
+        ppe = _enforce_object_visual_qa({
+            "status": "pass", "pass": True, "reason": "ok",
+            "people_count": 0, "adult_count": 0, "child_count": 0, "ppe_detected": True,
+        })
+        self.assertEqual(ppe["reason"], "unexpected_ppe")
+        self.assertFalse(ppe["pass"])
+
+        unknown = _enforce_object_visual_qa({
+            "status": "pass", "pass": True, "reason": "ok",
+            "people_count": "unknown", "adult_count": 0, "child_count": 0, "ppe_detected": False,
+        })
+        self.assertEqual(unknown["reason"], "object_counts_unknown")
+        self.assertFalse(unknown["pass"])
 
     def test_legacy_bilingual_rubric_does_not_override_neutral_title(self):
         self.assertNotEqual(

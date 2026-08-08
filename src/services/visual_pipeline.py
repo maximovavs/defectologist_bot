@@ -207,7 +207,9 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
 
     The internal visual contract remains strict and verbose for deterministic
     parsing/tests. The image model receives a concise positive scene description
-    so prohibited PPE terms do not become accidental visual anchors.
+    so prohibited PPE terms do not become accidental visual anchors. The style
+    marker replacement also handles legacy compiled prompts truncated at 900
+    characters, where the complete VISUAL_STYLE_TAIL is no longer present.
     """
     cleaned = " ".join((prompt or "").split()).strip()
     if not cleaned:
@@ -228,8 +230,11 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
             provider_prompt = f"{provider_prompt} {scene_marker} {scene_tail}"
         return " ".join(provider_prompt.split())
 
-    if VISUAL_STYLE_TAIL in cleaned:
-        cleaned = cleaned.replace(VISUAL_STYLE_TAIL, POLLINATIONS_GENERATION_STYLE_TAIL)
+    style_marker = "Warm soft editorial illustration"
+    if style_marker in cleaned:
+        scene_prefix = cleaned.split(style_marker, 1)[0].rstrip(" .")
+        return " ".join(f"{scene_prefix}. {POLLINATIONS_GENERATION_STYLE_TAIL}".split())
+
     return " ".join(cleaned.split())
 
 

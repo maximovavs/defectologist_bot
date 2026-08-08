@@ -1524,7 +1524,7 @@ OBJECT_SCENE_CATEGORIES = {
 # state, so the provider prompt stays inside OBJECT_PROVIDER_PROMPT_MAX_CHARS.
 OBJECT_SCENE_GUARDS = {
     "books_vocab_phrases_stories": (
-        "No open pages, no printed words. No dolls, no human-shaped figurines, no characters."
+        "Book closed, cards blank; miniatures depict everyday objects only. No printed words."
     ),
 }
 

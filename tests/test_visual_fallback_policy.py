@@ -238,7 +238,8 @@ class VisualFallbackPolicyTest(unittest.TestCase):
 
         self.assertEqual(first, repeated)
         self.assertNotEqual(first, next_day)
-        self.assertIn("Internal visual variation cue", first)
+        self.assertNotIn("Internal visual variation cue", first)
+        self.assertRegex(first, r"\[object_scene:[a-z_]+\|[0-9a-f]+\]$")
         self.assertNotIn("Мелодии и слова", first)
 
     def test_empty_prompt_object_fallback_varies_between_days_and_is_qa_checked(self):

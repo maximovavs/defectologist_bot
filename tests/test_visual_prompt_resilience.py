@@ -54,8 +54,8 @@ class VisualPromptResilienceTest(unittest.TestCase):
         provider = _prepare_pollinations_prompt(internal)
         lower = provider.lower()
 
-        self.assertIn("people-free educational still life", lower)
-        self.assertIn("scene category: household_routines", lower)
+        self.assertIn("object-only still life", lower)
+        self.assertIn("laundry basket", lower)
         for phrase in ("surgical mask", "face shield", "reflective vest", "hard hat", "respirator"):
             with self.subTest(phrase=phrase):
                 self.assertNotIn(phrase, lower)

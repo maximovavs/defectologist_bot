@@ -87,6 +87,37 @@ VISUAL_CAMERA_TEMPLATE = (
     "eye-level {shot}, normal 50mm perspective, subjects centered with breathing room, clearly separated without overlap"
 )
 
+# Technical marker carried by the compiled object-only prompt. It keeps the scene
+# category and the per-publication variation id available to the provider layer
+# (seed selection, composition choice) without ever reaching the image model:
+# `_prepare_pollinations_prompt` strips it from every provider prompt.
+OBJECT_SCENE_MARKER_TEMPLATE = "[object_scene:{category}|{variation_id}]"
+OBJECT_SCENE_MARKER_RE = re.compile(r"\[object_scene:([a-z_]+)\|([0-9a-f]*)\]")
+
+# Compact provider-facing object style. The compiled prompt stays verbose for
+# deterministic parsing/tests; Pollinations only receives this short version.
+OBJECT_PROVIDER_STYLE = (
+    "2D hand-painted watercolor and gouache editorial illustration, subtle watercolor paper texture, "
+    "warm muted pastel palette, soft natural daylight, gentle friendly educational mood, "
+    "clean simple composition, not photorealistic, 16:9 landscape."
+)
+
+OBJECT_PROVIDER_NEGATIVES = (
+    "No people, no face, no hands, no human body, no text, no letters, no numbers, no watermark, "
+    "no PPE, no medical or industrial gear."
+)
+
+OBJECT_PROVIDER_COMPOSITIONS = (
+    "asymmetrical tabletop layout with generous negative space",
+    "diagonal flat-lay layout with objects separated",
+    "calm shelf vignette with an uncluttered background",
+    "three-quarter tabletop view with one focal object",
+    "balanced tabletop arrangement with soft shadows",
+    "top-down layout with one offset accent object",
+)
+
+OBJECT_PROVIDER_PROMPT_MAX_CHARS = 650
+
 
 @dataclass(frozen=True)
 class VisualBrief:
@@ -215,20 +246,21 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
     if not cleaned:
         return ""
 
-    if cleaned.startswith("Object-only educational still life."):
-        scene_marker = "Scene category:"
-        scene_tail = ""
-        if scene_marker in cleaned:
-            scene_tail = cleaned.split(scene_marker, 1)[1].strip()
-        provider_prompt = (
-            "People-free educational still life with ordinary household or educational objects only. "
-            "No human figures, faces, hands, silhouettes or human reflections. "
-            "No readable text, logos or watermarks. No medical or industrial context or equipment. "
-            f"{POLLINATIONS_GENERATION_STYLE_TAIL} 16:9 landscape."
-        )
-        if scene_tail:
-            provider_prompt = f"{provider_prompt} {scene_marker} {scene_tail}"
-        return " ".join(provider_prompt.split())
+    marker_match = OBJECT_SCENE_MARKER_RE.search(cleaned)
+    if marker_match:
+        # Technical fields never reach the provider.
+        cleaned = " ".join(OBJECT_SCENE_MARKER_RE.sub(" ", cleaned).split()).strip()
+
+    if marker_match or cleaned.startswith("Object-only educational still life."):
+        if marker_match:
+            category = marker_match.group(1)
+            variation_id = marker_match.group(2)
+        else:
+            # Legacy or truncated compiled prompt without the technical marker.
+            scene_match = re.search(r"Scene category:\s*([a-z_]+)", cleaned)
+            category = scene_match.group(1) if scene_match else "default"
+            variation_id = ""
+        return build_object_provider_prompt(category, variation_id)
 
     style_marker = "Warm soft editorial illustration"
     if style_marker in cleaned:
@@ -305,7 +337,11 @@ def _pollinations_request_once(
 
     encoded_prompt = quote(cleaned_prompt, safe="")
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-    stable_seed = int(hashlib.sha256(cleaned_prompt.encode("utf-8")).hexdigest()[:8], 16) % 2147483647
+    # The seed is derived from the internal prompt, which still carries the
+    # technical variation marker. That keeps retries visually different without
+    # leaking the marker into the provider prompt above.
+    seed_source = " ".join((prompt or "").split()).strip() or cleaned_prompt
+    stable_seed = int(hashlib.sha256(seed_source.encode("utf-8")).hexdigest()[:8], 16) % 2147483647
 
     params = {
         "model": POLLINATIONS_MODEL,
@@ -1465,8 +1501,12 @@ def _safe_object_visual_qa(
 
 
 OBJECT_SCENE_CATEGORIES = {
+    # Open books and printed cards are the main source of `object_contains_text`
+    # and `object_contains_person` rejections, so this category only allows a
+    # closed plain-cover book, blank cards and neutral wooden objects.
     "books_vocab_phrases_stories": (
-        "children’s picture books, picture cards, small wooden toy objects"
+        "one closed children’s book with a plain blank cover, blank color flashcards, "
+        "small wooden toy figurines"
     ),
     "hearing_sounds_music": (
         "toy drum, small bell, wooden rhythm instruments, simple sound-wave shapes without text"
@@ -1477,6 +1517,14 @@ OBJECT_SCENE_CATEGORIES = {
     "reading_prep": "picture cards, blank wooden letter-like blocks without readable letters, children’s book, pencil and blank paper",
     "household_routines": "folded T-shirt, small laundry basket, simple cup and plate, kitchen towel, small home storage basket",
     "default": "children’s picture book, picture cards, wooden toys",
+}
+
+# Extra per-category constraints appended to both the compiled and the provider
+# prompt. Kept short so the provider prompt stays inside its character budget.
+OBJECT_SCENE_GUARDS = {
+    "books_vocab_phrases_stories": (
+        "Book stays closed with a plain cover, cards stay blank, no open pages, no printed words."
+    ),
 }
 
 OBJECT_SCENE_COMPOSITIONS = (
@@ -1547,6 +1595,37 @@ def _object_scene_composition(category: str, variation_id: str) -> str:
     return OBJECT_SCENE_COMPOSITIONS[index]
 
 
+def _object_provider_composition(category: str, variation_id: str) -> str:
+    digest = hashlib.sha256(f"{category}|{variation_id}".encode("utf-8")).hexdigest()
+    index = int(digest[:8], 16) % len(OBJECT_PROVIDER_COMPOSITIONS)
+    return OBJECT_PROVIDER_COMPOSITIONS[index]
+
+
+def build_object_provider_prompt(category: str, variation_id: str = "") -> str:
+    """Build the short object-only prompt actually sent to the image provider.
+
+    Keeps the channel style and the hard object-only constraints, and stays well
+    below the compiled prompt length so the model is not diluted by repetitions
+    or internal bookkeeping fields.
+    """
+    resolved = category if category in OBJECT_SCENE_CATEGORIES else "default"
+    objects = OBJECT_SCENE_CATEGORIES[resolved]
+    guard = OBJECT_SCENE_GUARDS.get(resolved, "")
+    composition = _object_provider_composition(resolved, variation_id)
+
+    def _assemble(scene: str) -> str:
+        parts = [OBJECT_PROVIDER_STYLE, scene]
+        if guard:
+            parts.append(guard)
+        parts.append(OBJECT_PROVIDER_NEGATIVES)
+        return " ".join(" ".join(parts).split())
+
+    prompt = _assemble(f"Object-only still life: {objects}, {composition}.")
+    if len(prompt) > OBJECT_PROVIDER_PROMPT_MAX_CHARS:
+        prompt = _assemble(f"Object-only still life: {objects}.")
+    return prompt
+
+
 def build_object_only_visual_prompt(
     title: str,
     rubric_id: str,
@@ -1560,19 +1639,23 @@ def build_object_only_visual_prompt(
     objects = OBJECT_SCENE_CATEGORIES[category]
     variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
     composition = _object_scene_composition(category, variation_id)
-    return (
+    guard = OBJECT_SCENE_GUARDS.get(category, "")
+    marker = OBJECT_SCENE_MARKER_TEMPLATE.format(category=category, variation_id=variation_id)
+    compiled = (
         "Object-only educational still life. No people. No adults. No children. No faces. No hands. "
         "No human figures. No silhouettes. No reflections of people. No text. No letters. No words. "
-        "No logos. No watermarks. No medical tools. No PPE. No face shield. No surgical mask. No respirator. "
-        "No hard hat. No safety helmet. No reflective vest. No high-visibility clothing. No medical, hospital, "
-        "industrial, or construction uniforms. Warm soft editorial illustration in a 2D hand-painted watercolor "
-        "and gouache style, subtle watercolor paper texture, warm muted pastel palette, soft natural daylight, "
-        "gentle friendly educational mood, clean simple composition, professional but approachable. "
-        "Not photorealistic. No 3D render. No anime. No glossy digital art. Child-friendly objects. 16:9 landscape. "
-        f"Scene category: {category}. Objects: {objects}. Composition: {composition}. "
-        f"Internal visual variation cue: {variation_id}. Use this cue only to vary layout and object selection; "
-        "never render the cue, letters, numbers, labels, captions, or written symbols."
+        "No numbers. No logos. No watermarks. No medical tools. No PPE. No face shield. No surgical mask. "
+        "No respirator. No hard hat. No safety helmet. No reflective vest. No high-visibility clothing. "
+        "No medical, hospital, industrial, or construction uniforms. Warm soft editorial illustration in a "
+        "2D hand-painted watercolor and gouache style, subtle watercolor paper texture, warm muted pastel "
+        "palette, soft natural daylight, gentle friendly educational mood, clean simple composition, "
+        "professional but approachable. Not photorealistic. No 3D render. No anime. No glossy digital art. "
+        "Child-friendly objects. 16:9 landscape. "
+        f"Scene category: {category}. Objects: {objects}. Composition: {composition}."
     )
+    if guard:
+        compiled = f"{compiled} {guard}"
+    return f"{compiled} {marker}"
 
 
 def _build_object_visual_fallback(

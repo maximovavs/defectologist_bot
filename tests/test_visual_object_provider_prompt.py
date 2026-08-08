@@ -143,12 +143,25 @@ class ObjectProviderPromptTest(unittest.TestCase):
                 "no letters",
                 "no text",
                 "no people",
+                # Inanimate props only: "figurines" alone invited dolls/characters
+                # and produced object_contains_person rejections.
+                "miniatures of everyday objects",
+                "no dolls",
+                "no human-shaped figurines",
+                "no characters",
             ):
                 with self.subTest(phrase=phrase):
                     self.assertIn(phrase, text)
 
-        self.assertNotIn("open book", provider.lower())
-        self.assertNotIn("picture books", provider.lower())
+        for phrase in ("open book", "picture books", "toy figurines", "wooden figurines", "puppet"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, provider.lower())
+
+        # "figurines" and "dolls" may only survive inside the negative constraint,
+        # never as an allowed prop.
+        self.assertEqual(provider.lower().count("figurines"), 1)
+        self.assertEqual(provider.lower().count("doll"), 1)
+        self.assertNotIn("figurines", OBJECT_SCENE_CATEGORIES["books_vocab_phrases_stories"])
 
     def test_object_seed_varies_per_attempt_without_touching_provider_prompt(self):
         first = build_object_only_visual_prompt(

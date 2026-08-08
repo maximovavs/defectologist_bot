@@ -1506,7 +1506,7 @@ OBJECT_SCENE_CATEGORIES = {
     # closed plain-cover book, blank cards and neutral wooden objects.
     "books_vocab_phrases_stories": (
         "one closed children’s book with a plain blank cover, blank color flashcards, "
-        "small wooden toy figurines"
+        "small wooden miniatures of everyday objects such as a ball, cup, toy car and apple"
     ),
     "hearing_sounds_music": (
         "toy drum, small bell, wooden rhythm instruments, simple sound-wave shapes without text"
@@ -1520,10 +1520,11 @@ OBJECT_SCENE_CATEGORIES = {
 }
 
 # Extra per-category constraints appended to both the compiled and the provider
-# prompt. Kept short so the provider prompt stays inside its character budget.
+# prompt. The guard only carries what the category props above do not already
+# state, so the provider prompt stays inside OBJECT_PROVIDER_PROMPT_MAX_CHARS.
 OBJECT_SCENE_GUARDS = {
     "books_vocab_phrases_stories": (
-        "Book stays closed with a plain cover, cards stay blank, no open pages, no printed words."
+        "No open pages, no printed words. No dolls, no human-shaped figurines, no characters."
     ),
 }
 

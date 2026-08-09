@@ -542,9 +542,111 @@ def _clean_visual_props(props: Iterable[object]) -> tuple[str, ...]:
     return tuple(cleaned)
 
 
+# A child-only role rule forbids any adult, so an adult-directed instruction
+# ("Show the child ...", "Point to ... and wait for the child ...") contradicts
+# the scene: the illustration would have to contain the acting adult.
+_CHILD_ONLY_ROLE_RE = re.compile(r"^\s*exactly one\b(?!.*\badult\b).*\bno adults\b", re.IGNORECASE)
+
+_CHILD_SUBJECT_ACTION_RE = re.compile(
+    r"^\s*(?:the|a|an|one)\s+(?:[\w-]+\s+){0,3}?(?:child|toddler|baby|infant|preschooler|boy|girl)\b",
+    re.IGNORECASE,
+)
+
+_ADULT_MENTION_RE = re.compile(
+    r"\b(?:parent|adult|mother|father|mom|mum|dad|caregiver|grown-?up|teacher|specialist|therapist)\b",
+    re.IGNORECASE,
+)
+
+# Imperatives addressed to an adult, plus "... the child to ..." constructions.
+_ADULT_DIRECTED_ACTION_RE = re.compile(
+    r"\b(?:the\s+child|them|him|her)\s+to\b"
+    r"|\b(?:show|give|hand|offer|read|ask|tell|encourage|invite|prompt|help|praise|model|wait|repeat)\s+"
+    r"(?:the\s+child|them|him|her)\b"
+    r"|^\s*(?:point|show|give|hand|offer|read|ask|tell|encourage|invite|prompt|help|praise|model|name|hold|wait|"
+    r"repeat|say|place|put|sing|count|let)\b",
+    re.IGNORECASE,
+)
+
+# Ordered: the first intent found in the original action wins.
+_CHILD_ONLY_ACTION_VERBS = (
+    (re.compile(r"\bpoint(?:s|ing|ed)?\b", re.IGNORECASE), "points to"),
+    (re.compile(r"\b(?:stack|build|sort|arrange|nest)(?:s|ing|ed)?\b", re.IGNORECASE), "plays with"),
+    (re.compile(r"\b(?:read|look|watch|see|show)(?:s|ing|ed)?\b|\bpicture\b|\bbook\b", re.IGNORECASE), "looks at"),
+    (re.compile(r"\b(?:give|gives|giving|given|hand|hands|offer|offers|hold|holds|take|takes|bring|brings)\b", re.IGNORECASE), "holds"),
+)
+
+_CHILD_SPEECH_CUE_RE = re.compile(
+    r"\b(?:say|says|saying|said|name|names|naming|word|words|phrase|phrases|repeat|repeats|talk|talks|speak|speaks|"
+    r"tell|tells|answer|answers|babble|babbles)\b",
+    re.IGNORECASE,
+)
+
+_CHILD_ONLY_SPEECH_CLAUSE = "while saying a simple word or short two-word phrase"
+
+
+def _child_only_visual_subject(role_rule: str, age_descriptor: str) -> str:
+    descriptor = _clean_visual_brief_fragment(age_descriptor, 48)
+    if not descriptor:
+        match = re.search(r"exactly one\s+(.+?)\s*(?:,|$)", role_rule or "", flags=re.IGNORECASE)
+        descriptor = _clean_visual_brief_fragment(match.group(1) if match else "", 48)
+    return f"The {descriptor}" if descriptor else "The young child"
+
+
+def _child_only_visual_object(props: Iterable[str]) -> str:
+    for prop in props:
+        cleaned = _clean_visual_brief_fragment(prop, 32).lower()
+        if cleaned:
+            # Reuse an already validated prop so the rewrite cannot introduce a
+            # prop the post never mentioned.
+            return f"the {cleaned}"
+    return "a familiar everyday object"
+
+
+def _normalize_child_only_visual_action(
+    action: str,
+    *,
+    role_rule: str,
+    age_descriptor: str,
+    props: Iterable[str],
+) -> str:
+    """Rewrite an adult-directed instruction as the child's own visible action.
+
+    Only applies to child-only scenes, where the role rule forbids adults. The
+    result keeps the original intent (pointing, holding, looking, speaking) but
+    never asks for an adult, readable text, or a developmental claim.
+    """
+    cleaned = _clean_visual_brief_fragment(action, 280)
+    if not cleaned or not _CHILD_ONLY_ROLE_RE.search(role_rule or ""):
+        return cleaned
+
+    mentions_adult = bool(_ADULT_MENTION_RE.search(cleaned))
+    if _CHILD_SUBJECT_ACTION_RE.match(cleaned) and not mentions_adult:
+        return cleaned
+    if not mentions_adult and not _ADULT_DIRECTED_ACTION_RE.search(cleaned):
+        return cleaned
+
+    verb = "holds"
+    for pattern, child_verb in _CHILD_ONLY_ACTION_VERBS:
+        if pattern.search(cleaned):
+            verb = child_verb
+            break
+
+    subject = _child_only_visual_subject(role_rule, age_descriptor)
+    rewritten = f"{subject} {verb} {_child_only_visual_object(props)}"
+    if _CHILD_SPEECH_CUE_RE.search(cleaned):
+        rewritten = f"{rewritten} {_CHILD_ONLY_SPEECH_CLAUSE}"
+    return _clean_visual_brief_fragment(rewritten, 280)
+
+
 def _compile_visual_prompt(brief: VisualBrief) -> str:
     role_rule = _clean_visual_brief_fragment(brief.role_rule, 220)
-    action = _clean_visual_brief_fragment(brief.action, 280)
+    action = _normalize_child_only_visual_action(
+        brief.action,
+        role_rule=role_rule,
+        age_descriptor=brief.age_descriptor,
+        props=brief.props,
+    )
+    action = _clean_visual_brief_fragment(action, 280)
     setting = _clean_visual_brief_fragment(brief.setting, 120) or "simple uncluttered play area"
     props = _clean_visual_props(brief.props)
     if not role_rule or not action:
@@ -810,6 +912,8 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "object_counts_unknown",
         "object_contains_text",
         "object_text_unknown",
+        "object_style_mismatch",
+        "object_style_unknown",
     }
 )
 
@@ -1032,6 +1136,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         child_count = "unknown"
     ppe_detected = _coerce_bool(parsed.get("ppe_detected"))
     text_detected = _coerce_bool(parsed.get("text_detected"))
+    style_match = _coerce_bool(parsed.get("illustration_style_match"))
     return {
         "status": "pass" if passed else "fail",
         "pass": passed,
@@ -1041,6 +1146,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         "child_count": child_count,
         "ppe_detected": ppe_detected if ppe_detected is not None else "unknown",
         "text_detected": text_detected if text_detected is not None else "unknown",
+        "illustration_style_match": style_match if style_match is not None else "unknown",
     }
 
 
@@ -1138,13 +1244,21 @@ def evaluate_visual_quality(
         qa_prompt = (
             "Inspect this educational illustration. Return JSON only with keys pass (boolean), reason (short string), "
             "people_count (integer or unknown), adult_count (integer or unknown), child_count (integer or unknown), "
-            "ppe_detected (boolean), and text_detected (boolean). "
+            "ppe_detected (boolean), text_detected (boolean), and illustration_style_match (boolean). "
+            "Set illustration_style_match=true only when the image is visibly illustrated rather than photographed: "
+            "a 2D hand-painted watercolor and gouache editorial illustration with subtle watercolor paper texture, "
+            "warm muted pastel palette, soft natural light, a gentle child-friendly educational mood, and painterly "
+            "edges and illustrated shapes instead of photographic surfaces. "
+            "Set illustration_style_match=false for photorealistic photography, product or studio product photography, "
+            "realistic photographic still life, realistic 3D render, glossy CGI or glossy digital rendering, "
+            "stock-photo appearance, or any other clearly non-illustrative visual style. "
             "Pass only if people_count=0, adult_count=0, child_count=0; no human face, head, body, hand, silhouette, reflection, "
             "or partial human figure is visible; no medical or industrial protective equipment or unrelated uniform is visible; "
-            "and no readable text, logo, label, caption, or watermark is visible. "
+            "no readable text, logo, label, caption, or watermark is visible; and illustration_style_match=true. "
             "Use reason object_contains_person for any human element, unexpected_ppe for protective gear or unrelated uniform, "
-            "object_contains_text for readable text/logo/watermark, and object_counts_unknown if human counts cannot be determined. "
-            "Do not evaluate the educational topic or artistic style."
+            "object_contains_text for readable text/logo/watermark, object_style_mismatch when the artistic style does not "
+            "match, and object_counts_unknown if human counts cannot be determined. "
+            "Do not evaluate the educational topic."
         )
     else:
         qa_prompt = (
@@ -1391,6 +1505,8 @@ def _safe_visual_qa(
     }
     if "text_detected" in result:
         normalized["text_detected"] = result.get("text_detected", "unknown")
+    if "illustration_style_match" in result:
+        normalized["illustration_style_match"] = result.get("illustration_style_match", "unknown")
     return _enforce_visual_qa_hard_failures(normalized, rubric_id)
 
 
@@ -1413,6 +1529,8 @@ def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
     ppe_detected = _coerce_bool(result.get("ppe_detected"))
     has_text_field = "text_detected" in result
     text_detected = _coerce_bool(result.get("text_detected")) if has_text_field else None
+    # Absent or unverifiable style verdicts stay None so the check below fails closed.
+    style_match = _coerce_bool(result.get("illustration_style_match"))
 
     if people_count is not None:
         normalized["people_count"] = people_count
@@ -1424,6 +1542,7 @@ def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
         normalized["ppe_detected"] = ppe_detected
     if has_text_field and text_detected is not None:
         normalized["text_detected"] = text_detected
+    normalized["illustration_style_match"] = style_match if style_match is not None else "unknown"
 
     if ppe_detected is True:
         normalized.update({"status": "fail", "pass": False, "reason": "unexpected_ppe"})
@@ -1442,6 +1561,15 @@ def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
 
     if people_count != 0 or adult_count != 0 or child_count != 0:
         normalized.update({"status": "fail", "pass": False, "reason": "object_contains_person"})
+        return normalized
+
+    # The channel style is mandatory for object covers too: a photorealistic or
+    # CGI still life is safe on people/PPE/text and would otherwise publish.
+    if style_match is False:
+        normalized.update({"status": "fail", "pass": False, "reason": "object_style_mismatch"})
+        return normalized
+    if style_match is None:
+        normalized.update({"status": "fail", "pass": False, "reason": "object_style_unknown"})
         return normalized
 
     if reason in VISUAL_QA_HARD_REASONS:
@@ -1464,6 +1592,7 @@ def _safe_object_visual_qa(
     objects = OBJECT_SCENE_CATEGORIES.get(category, OBJECT_SCENE_CATEGORIES["default"])
     expected_prompt = (
         "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+        "Expected style: 2D hand-painted watercolor and gouache illustration, not photography or 3D render.\n"
         f"Allowed props: {objects}"
     )
 
@@ -1487,6 +1616,7 @@ def _safe_object_visual_qa(
                 "child_count": "unknown",
                 "ppe_detected": "unknown",
                 "text_detected": "unknown",
+                "illustration_style_match": "unknown",
             }
     else:
         result = _safe_visual_qa(
@@ -1733,7 +1863,8 @@ def _build_object_visual_fallback(
             f"adult_count={object_qa.get('adult_count', 'unknown')} "
             f"child_count={object_qa.get('child_count', 'unknown')} "
             f"ppe_detected={object_qa.get('ppe_detected', 'unknown')} "
-            f"text_detected={object_qa.get('text_detected', 'unknown')}",
+            f"text_detected={object_qa.get('text_detected', 'unknown')} "
+            f"illustration_style_match={object_qa.get('illustration_style_match', 'unknown')}",
             flush=True,
         )
         if _visual_qa_passed(object_qa):
@@ -1761,6 +1892,7 @@ def _build_object_visual_fallback(
                 "object_qa_child_count": str(object_qa.get("child_count", "unknown")),
                 "object_qa_ppe_detected": str(object_qa.get("ppe_detected", "unknown")),
                 "object_qa_text_detected": str(object_qa.get("text_detected", "unknown")),
+                "object_qa_style_match": str(object_qa.get("illustration_style_match", "unknown")),
                 "object_qa_key_source": str(object_qa.get("qa_key_source", object_qa.get("human_qa_key_source", ""))),
                 "object_qa_key_attempts": str(object_qa.get("qa_key_attempts", object_qa.get("human_qa_key_attempts", "0"))),
                 "object_qa_key_fallback_used": str(object_qa.get("qa_key_fallback_used", object_qa.get("human_qa_key_fallback_used", "False"))),
@@ -1813,6 +1945,7 @@ def _build_object_visual_fallback(
         "object_qa_child_count": str(last_object_qa.get("child_count", "unknown")),
         "object_qa_ppe_detected": str(last_object_qa.get("ppe_detected", "unknown")),
         "object_qa_text_detected": str(last_object_qa.get("text_detected", "unknown")),
+        "object_qa_style_match": str(last_object_qa.get("illustration_style_match", "unknown")),
         "visual_qa": str(last_object_qa.get("status", "not_run")),
         "visual_qa_status": str(last_object_qa.get("status", "not_run")),
         "visual_qa_reason": str(last_object_qa.get("reason", last_reason)),
@@ -1974,6 +2107,7 @@ def build_post_visual(
         "object_qa_child_count": "unknown",
         "object_qa_ppe_detected": "unknown",
         "object_qa_text_detected": "unknown",
+        "object_qa_style_match": "unknown",
         "visual_brief_roles": visual_brief.role_rule if visual_brief else "",
         "visual_brief_age": visual_brief.age_descriptor if visual_brief else "",
         "visual_brief_action": visual_brief.action if visual_brief else "",

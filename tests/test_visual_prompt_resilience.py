@@ -133,6 +133,7 @@ class VisualPromptResilienceTest(unittest.TestCase):
             "child_count": 0,
             "ppe_detected": False,
             "text_detected": False,
+            "illustration_style_match": True,
         }
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
             "src.services.visual_pipeline.requests.post",
@@ -142,9 +143,57 @@ class VisualPromptResilienceTest(unittest.TestCase):
 
         qa_prompt = request.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
         self.assertEqual(result["status"], "pass")
-        self.assertIn("do not evaluate the educational topic or artistic style", qa_prompt.lower())
+        self.assertTrue(result["illustration_style_match"])
+        # The topic stays out of scope, but the artistic style is now checked.
+        self.assertIn("do not evaluate the educational topic.", qa_prompt.lower())
+        self.assertNotIn("or artistic style", qa_prompt.lower())
         self.assertNotIn("for parent rubrics", qa_prompt.lower())
-        self.assertLess(len(qa_prompt), 1000)
+        # Still a short dedicated prompt, not the full human QA catalogue (~3900).
+        self.assertLess(len(qa_prompt), 2000)
+
+    def test_object_qa_prompt_requires_channel_illustration_style(self):
+        payload = {
+            "pass": True,
+            "reason": "ok",
+            "people_count": 0,
+            "adult_count": 0,
+            "child_count": 0,
+            "ppe_detected": False,
+            "text_detected": False,
+            "illustration_style_match": True,
+        }
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            return_value=_qa_response(payload),
+        ) as request:
+            evaluate_visual_quality(BytesIO(b"image"), qa_mode="object")
+
+        qa_prompt = request.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"].lower()
+
+        for phrase in (
+            "illustration_style_match",
+            "visibly illustrated rather than photographed",
+            "2d hand-painted watercolor and gouache editorial illustration",
+            "subtle watercolor paper texture",
+            "warm muted pastel palette",
+            "soft natural light",
+            "gentle child-friendly educational mood",
+            "painterly",
+        ):
+            with self.subTest(required=phrase):
+                self.assertIn(phrase, qa_prompt)
+
+        for phrase in (
+            "photorealistic photography",
+            "product or studio product photography",
+            "realistic photographic still life",
+            "realistic 3d render",
+            "glossy cgi",
+            "stock-photo appearance",
+            "object_style_mismatch",
+        ):
+            with self.subTest(rejected=phrase):
+                self.assertIn(phrase, qa_prompt)
 
 
 if __name__ == "__main__":

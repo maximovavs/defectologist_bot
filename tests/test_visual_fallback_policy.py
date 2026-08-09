@@ -36,6 +36,9 @@ def _object_pass():
         "adult_count": 0,
         "child_count": 0,
         "ppe_detected": False,
+        # Object QA only passes an image that is verifiably in the channel's
+        # watercolor/gouache illustration style.
+        "illustration_style_match": True,
     }
 
 

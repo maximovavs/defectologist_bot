@@ -38,6 +38,7 @@ def _object_pass():
         "child_count": 0,
         "ppe_detected": False,
         "text_detected": False,
+        "illustration_style_match": True,
     }
 
 

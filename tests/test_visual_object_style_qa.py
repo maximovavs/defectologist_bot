@@ -306,5 +306,51 @@ class AgeNormsChildOnlyActionTest(unittest.TestCase):
                 self.assertNotIn(marker, compiled.action.lower())
 
 
+class VisualShotSelectionTest(unittest.TestCase):
+    @staticmethod
+    def _compile(role_rule: str, rubric_id: str) -> str:
+        return _compile_visual_prompt(
+            VisualBrief(
+                rubric_id=rubric_id,
+                role_rule=role_rule,
+                age_descriptor="2-year-old toddler",
+                setting="simple home play area",
+                action="The toddler looks at a picture",
+                props=("picture",),
+            )
+        )
+
+    def test_age_norms_child_only_uses_medium_shot(self):
+        prompt = self._compile(
+            "Exactly one 2-year-old toddler, no adults and no other people.",
+            "age_norms",
+        )
+
+        self.assertIn("eye-level medium shot,", prompt)
+        self.assertNotIn("medium two-shot", prompt)
+
+    def test_age_norms_with_required_adult_uses_medium_two_shot(self):
+        role_rule = build_visual_role_rule(
+            "age_norms",
+            age_descriptor="2-year-old toddler",
+            adult_required=True,
+        )
+
+        self.assertIn("eye-level medium two-shot,", self._compile(role_rule, "age_norms"))
+
+    def test_parent_rubric_uses_medium_two_shot(self):
+        role_rule = build_visual_role_rule(
+            "tip_of_day",
+            age_descriptor="2-year-old toddler",
+        )
+
+        self.assertIn("eye-level medium two-shot,", self._compile(role_rule, "tip_of_day"))
+
+    def test_method_piggybank_uses_medium_two_shot(self):
+        role_rule = build_visual_role_rule("method_piggybank")
+
+        self.assertIn("eye-level medium two-shot,", self._compile(role_rule, "method_piggybank"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -659,7 +659,12 @@ def _compile_visual_prompt(brief: VisualBrief) -> str:
         descriptor in role_lower
         for descriptor in ("child", "toddler")
     )
-    shot = "medium two-shot" if "adult" in role_lower and has_child_subject else "medium shot"
+    requires_adult_and_child = (
+        role_lower.startswith("exactly one adult ")
+        and " and exactly one " in role_lower
+        and has_child_subject
+    )
+    shot = "medium two-shot" if requires_adult_and_child else "medium shot"
     camera = VISUAL_CAMERA_TEMPLATE.format(shot=shot)
     prompt = (
         f"{role_sentence} "

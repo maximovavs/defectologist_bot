@@ -21,7 +21,11 @@ from src.services.llm_generator import (
 from src.services.visual_pipeline import (
     POLLINATIONS_GEN_HEIGHT,
     POLLINATIONS_GEN_WIDTH,
+    VISUAL_ROLE_RULE_MAX_CHARS,
+    VISUAL_STYLE_RETRY_MARKER,
     VISUAL_STYLE_TAIL,
+    _prepare_pollinations_prompt,
+    _validate_compiled_visual_prompt,
     _build_visual_qa_expected_brief,
     _compile_visual_prompt,
     _enhance_image_prompt,
@@ -1325,6 +1329,204 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "visual_prompt_topic_mismatch")
+
+
+
+class VisualGenerationContractTest(unittest.TestCase):
+    """Regressions for the visual-generation contract fixes."""
+
+    @staticmethod
+    def _compiled(rubric_id, role_rule, action, props, age_descriptor=""):
+        return _compile_visual_prompt(
+            VisualBrief(
+                rubric_id=rubric_id,
+                role_rule=role_rule,
+                age_descriptor=age_descriptor,
+                setting="simple home play area",
+                action=action,
+                props=props,
+            )
+        )
+
+    def test_parent_role_age_descriptor_excludes_the_adult(self):
+        prompt = self._compiled(
+            "tip_of_day",
+            "Exactly one adult parent and exactly one 1-year-old toddler, "
+            "visibly different in age and height, no other people.",
+            "The parent rolls a ball while the child names it",
+            ("ball",),
+            "1-year-old toddler",
+        )
+        brief = _parse_compiled_visual_prompt(prompt, rubric_id="tip_of_day")
+
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.age_descriptor, "1-year-old toddler")
+
+    def test_every_producible_role_rule_parses_its_child_descriptor(self):
+        cases = (
+            ("Exactly one adult parent and exactly one toddler, no other people.", "toddler"),
+            ("Exactly one adult parent and exactly one preschool child, no other people.", "preschool child"),
+            ("Exactly one adult parent and exactly one school-age child, no other people.", "school-age child"),
+            ("Exactly one adult parent and exactly one young child, no other people.", "young child"),
+            (
+                "Exactly one adult parent and exactly one clearly younger child, no other people.",
+                "clearly younger child",
+            ),
+            (
+                "Exactly one adult speech specialist and exactly one clearly younger child, no other people.",
+                "clearly younger child",
+            ),
+            ("Exactly one 2-year-old toddler, no adults and no other people.", "2-year-old toddler"),
+        )
+        for role_rule, expected in cases:
+            with self.subTest(role_rule=role_rule):
+                rubric = "method_piggybank" if "specialist" in role_rule else "tip_of_day"
+                prompt = self._compiled(rubric, role_rule, "The child holds a ball", ("ball",))
+                brief = _parse_compiled_visual_prompt(prompt, rubric_id=rubric)
+                self.assertIsNotNone(brief)
+                self.assertEqual(brief.age_descriptor, expected)
+
+    def test_wrong_character_roles_parent_retry_sharpens_roles_not_action(self):
+        action = "The parent rolls a ball while the child names it"
+        prompt = self._compiled(
+            "tip_of_day",
+            build_visual_role_rule("tip_of_day", age_descriptor="1-year-old toddler"),
+            action,
+            ("ball",),
+            "1-year-old toddler",
+        )
+        retry = build_visual_retry_prompt(prompt, rubric_id="tip_of_day", qa_reason="wrong_character_roles")
+        brief = _parse_compiled_visual_prompt(retry, rubric_id="tip_of_day")
+        role = brief.role_rule.lower()
+
+        self.assertTrue(role.startswith("exactly one adult parent and exactly one 1-year-old toddler"))
+        self.assertIn("unmistakably mature", role)
+        self.assertIn("clearly smaller", role)
+        self.assertIn("childlike", role)
+        self.assertIn("face and body proportions", role)
+        self.assertTrue(role.endswith("no other people."))
+        self.assertLessEqual(len(brief.role_rule), VISUAL_ROLE_RULE_MAX_CHARS)
+        # The educational action must survive untouched.
+        self.assertEqual(brief.action, action)
+        self.assertEqual(brief.age_descriptor, "1-year-old toddler")
+        self.assertEqual(_validate_compiled_visual_prompt(retry, "tip_of_day"), (True, "ok"))
+        self.assertIn("eye-level medium two-shot,", retry)
+
+    def test_wrong_character_roles_method_retry_keeps_speech_specialist(self):
+        action = "The specialist rolls a toy car while the child names the action"
+        prompt = self._compiled(
+            "method_piggybank",
+            build_visual_role_rule("method_piggybank"),
+            action,
+            ("toy car",),
+        )
+        retry = build_visual_retry_prompt(prompt, rubric_id="method_piggybank", qa_reason="wrong_character_roles")
+        brief = _parse_compiled_visual_prompt(retry, rubric_id="method_piggybank")
+        role = brief.role_rule.lower()
+
+        self.assertIn("exactly one adult speech specialist", role)
+        self.assertIn("exactly one clearly younger child", role)
+        self.assertNotIn("parent", role)
+        self.assertIn("unmistakably mature", role)
+        self.assertIn("clearly smaller", role)
+        self.assertTrue(role.endswith("no other people."))
+        self.assertLessEqual(len(brief.role_rule), VISUAL_ROLE_RULE_MAX_CHARS)
+        self.assertEqual(brief.action, action)
+        self.assertEqual(_validate_compiled_visual_prompt(retry, "method_piggybank"), (True, "ok"))
+
+    def test_wrong_character_roles_child_only_retry_adds_no_adult(self):
+        action = "The 2-year-old toddler holds the cup"
+        prompt = self._compiled(
+            "age_norms",
+            build_visual_role_rule("age_norms", age_descriptor="2-year-old toddler"),
+            action,
+            ("cup",),
+            "2-year-old toddler",
+        )
+        retry = build_visual_retry_prompt(prompt, rubric_id="age_norms", qa_reason="wrong_character_roles")
+        brief = _parse_compiled_visual_prompt(retry, rubric_id="age_norms")
+        role = brief.role_rule.lower()
+
+        self.assertIn("no adults", role)
+        self.assertNotIn("adult parent", role)
+        self.assertNotIn("exactly one adult", role)
+        self.assertIn("childlike", role)
+        self.assertEqual(brief.action, action)
+        self.assertEqual(_validate_compiled_visual_prompt(retry, "age_norms"), (True, "ok"))
+        self.assertIn("eye-level medium shot,", retry)
+        self.assertNotIn("medium two-shot", retry)
+
+    def test_photorealistic_imagery_produces_style_targeted_retry(self):
+        action = "The parent rolls a ball while the child names it"
+        prompt = self._compiled(
+            "tip_of_day",
+            build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"),
+            action,
+            ("ball",),
+            "2-year-old toddler",
+        )
+        first_provider = _prepare_pollinations_prompt(prompt)
+        retry = build_visual_retry_prompt(prompt, rubric_id="tip_of_day", qa_reason="photorealistic_imagery")
+        retry_provider = _prepare_pollinations_prompt(retry)
+
+        self.assertIn(VISUAL_STYLE_RETRY_MARKER, retry)
+        self.assertNotEqual(retry_provider, first_provider)
+        # The technical flag never reaches the image provider.
+        self.assertNotIn("style_retry", retry_provider)
+        # The style correction stays out of the expected action.
+        self.assertEqual(_parse_compiled_visual_prompt(retry, "tip_of_day").action, action)
+
+        lower = retry_provider.lower()
+        for phrase in (
+            "unmistakably hand-painted",
+            "visible watercolor washes",
+            "opaque gouache brush shapes",
+            "matte textured watercolor paper",
+            "painterly edges",
+            "simplified painted surfaces",
+            "not photography",
+            "not photorealistic",
+            "not realistic 3d",
+            "not glossy cgi",
+            "not glossy digital rendering",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, lower)
+
+    def test_style_retry_covers_related_reasons_only(self):
+        prompt = self._compiled(
+            "tip_of_day",
+            build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"),
+            "The parent rolls a ball while the child names it",
+            ("ball",),
+            "2-year-old toddler",
+        )
+        for reason in ("photorealistic_imagery", "photographic style", "glossy_digital_art", "realistic_3d_render"):
+            with self.subTest(reason=reason, expected="style retry"):
+                self.assertIn(
+                    VISUAL_STYLE_RETRY_MARKER,
+                    build_visual_retry_prompt(prompt, rubric_id="tip_of_day", qa_reason=reason),
+                )
+        for reason in ("action_mismatch", "wrong_character_roles", "deformed_hands", "unexpected_ppe"):
+            with self.subTest(reason=reason, expected="plain retry"):
+                self.assertNotIn(
+                    VISUAL_STYLE_RETRY_MARKER,
+                    build_visual_retry_prompt(prompt, rubric_id="tip_of_day", qa_reason=reason),
+                )
+
+    def test_human_provider_style_states_painting_over_photography(self):
+        prompt = self._compiled(
+            "tip_of_day",
+            build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"),
+            "The parent rolls a ball while the child names it",
+            ("ball",),
+            "2-year-old toddler",
+        )
+        provider = _prepare_pollinations_prompt(prompt).lower()
+
+        for phrase in ("visible washes", "painterly edges", "simplified painted surfaces", "not photography"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, provider)
 
 
 if __name__ == "__main__":

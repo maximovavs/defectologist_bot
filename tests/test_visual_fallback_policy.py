@@ -487,5 +487,113 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertNotEqual(_object_scene_category("Положение языка", "tip_of_day"), "bilingual_languages")
 
 
+
+class VisualFallbackLadderTest(unittest.TestCase):
+    def test_ladder_is_human_human_retry_object_object_text(self):
+        """human -> human retry -> object #1 -> object #2 -> text, no extra attempts."""
+        human_fail = {
+            "status": "fail",
+            "pass": False,
+            "reason": "photorealistic_imagery",
+            "people_count": 2,
+            "adult_count": 1,
+            "child_count": 1,
+            "ppe_detected": False,
+        }
+        object_fail = {
+            "status": "fail",
+            "pass": False,
+            "reason": "object_style_mismatch",
+            "people_count": 0,
+            "adult_count": 0,
+            "child_count": 0,
+            "ppe_detected": False,
+            "text_detected": False,
+            "illustration_style_match": False,
+        }
+        qa_results = iter([human_fail, human_fail, object_fail, object_fail])
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ):
+            buffer, meta = build_post_visual(
+                title="Книги и новые слова",
+                day_key="2026-08-10",
+                image_prompt="an adult and child looking at a picture book together",
+                rubric_id="tip_of_day",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["fallback_stage"], "text")
+        self.assertNotIn(buffer.getvalue(), {b"image-1", b"image-2", b"image-3", b"image-4"})
+
+    def test_object_attempts_use_different_variation_and_seed(self):
+        qa_results = iter([
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "wrong_character_roles",
+                "people_count": 2,
+                "adult_count": 2,
+                "child_count": 0,
+                "ppe_detected": False,
+            },
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "wrong_character_roles",
+                "people_count": 2,
+                "adult_count": 2,
+                "child_count": 0,
+                "ppe_detected": False,
+            },
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "object_style_mismatch",
+                "people_count": 0,
+                "adult_count": 0,
+                "child_count": 0,
+                "ppe_detected": False,
+                "text_detected": False,
+                "illustration_style_match": False,
+            },
+            _object_pass(),
+        ])
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ):
+            _, meta = build_post_visual(
+                title="Книги и новые слова",
+                day_key="2026-08-10",
+                image_prompt="an adult and child looking at a picture book together",
+                rubric_id="tip_of_day",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        object_prompts = prompts[2:]
+        self.assertEqual(len(object_prompts), 2)
+        self.assertNotEqual(object_prompts[0], object_prompts[1])
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+
+
 if __name__ == "__main__":
     unittest.main()

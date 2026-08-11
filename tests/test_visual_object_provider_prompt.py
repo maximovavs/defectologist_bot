@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src.services.visual_pipeline import (
+    OBJECT_PROVIDER_PROMPT_MAX_CHARS,
     OBJECT_SCENE_CATEGORIES,
     OBJECT_SCENE_MARKER_TEMPLATE,
     PollinationsImageError,
@@ -17,7 +18,22 @@ from src.services.visual_pipeline import (
 
 
 PROVIDER_PROMPT_MIN_CHARS = 450
-PROVIDER_PROMPT_MAX_CHARS = 650
+# Bound to the module constant so the prompt budget cannot silently drift.
+PROVIDER_PROMPT_MAX_CHARS = OBJECT_PROVIDER_PROMPT_MAX_CHARS
+
+# Composition language that reads as product photography rather than painting.
+PHOTOGRAPHIC_COMPOSITION_PHRASES = (
+    "object-only still life",
+    "still life",
+    "flat-lay",
+    "tabletop layout",
+    "tabletop view",
+    "tabletop arrangement",
+    "shelf vignette",
+    "soft shadows",
+    "product photo",
+    "studio",
+)
 
 INTERNAL_ONLY_PHRASES = (
     "internal visual variation cue",
@@ -222,6 +238,60 @@ class ObjectProviderPromptTest(unittest.TestCase):
         self.assertEqual(meta["object_qa_status"], "pass")
         self.assertTrue(meta["object_visual_variation"])
         self.assertNotIn(meta["object_visual_variation"], _prepare_pollinations_prompt(prompts[0]))
+
+
+    def test_object_provider_prompt_has_no_photographic_composition_language(self):
+        for category in OBJECT_SCENE_CATEGORIES:
+            for variation_id in _variation_ids(12):
+                provider = build_object_provider_prompt(category, variation_id).lower()
+                for phrase in PHOTOGRAPHIC_COMPOSITION_PHRASES:
+                    with self.subTest(category=category, phrase=phrase):
+                        self.assertNotIn(phrase, provider)
+
+    def test_object_provider_prompt_uses_painterly_arrangement_language(self):
+        for category in OBJECT_SCENE_CATEGORIES:
+            for variation_id in _variation_ids(12):
+                provider = build_object_provider_prompt(category, variation_id).lower()
+                with self.subTest(category=category, variation_id=variation_id):
+                    self.assertIn("painted arrangement of objects only", provider)
+                    self.assertIn("watercolor", provider)
+                    self.assertIn("gouache", provider)
+                    for phrase in (
+                        "visible watercolor washes",
+                        "opaque gouache brush shapes",
+                        "painterly edges",
+                        "simplified illustrated surfaces",
+                        "matte and non-glossy",
+                        "warm muted pastel palette",
+                        "not photorealistic",
+                    ):
+                        self.assertIn(phrase, provider)
+
+    def test_physical_tabletop_prop_is_not_banned_as_composition_language(self):
+        provider = build_object_provider_prompt("articulation_speech", "abc123abc123").lower()
+
+        self.assertIn("tabletop mirror", provider)
+        for phrase in ("tabletop layout", "tabletop view", "tabletop arrangement"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, provider)
+
+    def test_default_and_books_categories_require_blank_unmarked_surfaces(self):
+        for category in ("default", "books_vocab_phrases_stories"):
+            provider = build_object_provider_prompt(category, "abc123abc123").lower()
+            with self.subTest(category=category):
+                for phrase in (
+                    "fully closed children",
+                    "completely plain unmarked cover",
+                    "solid-color blank cards",
+                    "no printed words",
+                    "no glyph-like marks",
+                    "no letters",
+                    "no text",
+                    "no people",
+                ):
+                    self.assertIn(phrase, provider)
+                self.assertNotIn("open book", provider)
+                self.assertNotIn("picture book", provider)
 
 
 if __name__ == "__main__":

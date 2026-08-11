@@ -198,6 +198,124 @@ class PublicationStore:
             ).fetchone()
         return row is not None
 
+    def has_url_since(self, canonical_url: str, since_iso: str) -> bool:
+        """True when this canonical URL was published within the cooldown window."""
+        if not since_iso:
+            return self.has_url(canonical_url)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM publications WHERE canonical_url = ? AND posted_at >= ? LIMIT 1",
+                (canonical_url, since_iso),
+            ).fetchone()
+        return row is not None
+
+    def has_evidence_hash_since(self, evidence_hash: str, since_iso: str) -> bool:
+        """True when this evidence hash was published within the cooldown window."""
+        if not since_iso:
+            return self.has_evidence_hash(evidence_hash)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM publications WHERE evidence_hash = ? AND posted_at >= ? LIMIT 1",
+                (evidence_hash, since_iso),
+            ).fetchone()
+        return row is not None
+
+    def recent_source_domains(self, limit: int = 3) -> List[str]:
+        """Most recently used source domains, newest first, de-duplicated."""
+        if limit <= 0:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_domain FROM publications
+                WHERE source_domain != ''
+                ORDER BY posted_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(limit * 5, limit),),
+            ).fetchall()
+        seen: List[str] = []
+        for row in rows:
+            domain = (row["source_domain"] or "").strip().lower()
+            if domain and domain not in seen:
+                seen.append(domain)
+            if len(seen) >= limit:
+                break
+        return seen
+
+    def find_editorial_core_duplicate(
+        self,
+        core_text: str,
+        threshold: float,
+        since_iso: Optional[str] = None,
+        limit: int = 200,
+        core_extractor=None,
+    ) -> Optional[SimilarPublication]:
+        """
+        Cross-rubric editorial-core freshness check over recent publications.
+
+        The stored body text is reduced with the same deterministic extractor as the
+        candidate, so two posts that give the same practical advice match even when
+        their wording, rubric or source differ. Nothing is persisted and the schema
+        is untouched: cores are derived from `body_norm` on the fly.
+
+        Fails open: when the semantic model is unavailable the candidate embedding is
+        empty and this returns None, leaving the exact URL/evidence/body protections
+        to do their work.
+        """
+        cleaned_core = normalize_publication_text(core_text)
+        if not cleaned_core:
+            return None
+        candidate_vec = text_to_embedding(cleaned_core)
+        if not candidate_vec:
+            return None
+
+        sql = """
+            SELECT canonical_url, body_norm, posted_at, audience, rubric_id
+            FROM publications
+            WHERE body_norm != ''
+        """
+        params: List[object] = []
+        if since_iso:
+            sql += " AND posted_at >= ?"
+            params.append(since_iso)
+        sql += " ORDER BY posted_at DESC LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return None
+
+        extract = core_extractor or (lambda text: text)
+        cores: List[str] = []
+        kept_rows: List[sqlite3.Row] = []
+        for row in rows:
+            stored_core = normalize_publication_text(extract(row["body_norm"] or ""))
+            if stored_core:
+                cores.append(stored_core)
+                kept_rows.append(row)
+        if not cores:
+            return None
+
+        best: Optional[SimilarPublication] = None
+        for row, vec in zip(kept_rows, text_batch_to_embeddings(cores)):
+            if not vec:
+                continue
+            score = cosine_similarity(candidate_vec, vec)
+            if score < threshold:
+                continue
+            if best is None or score > best.similarity:
+                best = SimilarPublication(
+                    canonical_url=row["canonical_url"],
+                    similarity=score,
+                    posted_at=row["posted_at"],
+                    audience=row["audience"],
+                    rubric_id=row["rubric_id"],
+                    match_field="editorial_core",
+                )
+        return best
+
     def _collect_vectors_for_rows(
         self,
         rows: Sequence[sqlite3.Row],

@@ -28,12 +28,20 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urljoin, urlparse
 from src.publisher.dedup_policy import (
+    EDITORIAL_CORE_COOLDOWN_DAYS,
+    RECENT_SOURCE_DOMAIN_WINDOW,
+    SEMANTIC_THRESHOLD_SOURCE,
+    SOURCE_COOLDOWN_DAYS,
+    extract_editorial_core,
+    semantic_editorial_core_threshold,
     semantic_post_threshold_for_rubric,
     should_bypass_duplicate_reason,
     should_bypass_source_semantic_dedup,
+    should_prefer_scientific_sources,
+    source_diversity_sort_key,
 )
 
 import feedparser
@@ -202,10 +210,13 @@ SOFT_SKIP_REASONS = {
     "skip_non_html_asset",
     "dup_url_same_run",
     "dup_url_db",
+    "dup_url_recent",
     "no_evidence_short",
     "dup_evidence_same_run",
     "dup_evidence_hash_db",
+    "dup_evidence_hash_recent",
     "dup_semantic_source",
+    "dup_editorial_core_recent",
     "dup_body_same_run",
     "dup_body_hash_db",
     "dup_semantic_post",
@@ -1027,6 +1038,49 @@ def load_sources() -> Dict[str, Source]:
     return {s["id"]: Source(**s) for s in (cfg.get("sources", []) or [])}
 
 
+def load_scientific_domains() -> List[str]:
+    """Read the existing quality.scientific_domains list. config/sources.yml is not modified."""
+    try:
+        cfg = load_yaml(CFG_DIR / "sources.yml")
+        quality = cfg.get("quality") or {}
+        return [str(d).strip().lower() for d in (quality.get("scientific_domains") or []) if str(d).strip()]
+    except Exception:
+        return []
+
+
+def apply_source_diversity_preference(
+    candidates: List[Dict[str, str]],
+    *,
+    recent_domains: Sequence[str],
+    scientific_domains: Sequence[str],
+    prefer_scientific: bool,
+) -> List[Dict[str, str]]:
+    """
+    Soft, stable reordering by source diversity.
+
+    A candidate from a freshly used domain sorts ahead of one from a recently used
+    domain, and for authority-driven rubrics a configured scientific domain sorts
+    ahead of a non-scientific one. Nothing is dropped: recent and non-scientific
+    domains remain available as fallbacks, and the incoming topic ranking is
+    preserved inside each preference group because the sort is stable.
+    """
+    if not candidates:
+        return candidates
+    if not recent_domains and not prefer_scientific:
+        return candidates
+
+    def _key(candidate: Dict[str, str]) -> tuple[int, int]:
+        link = (candidate.get("link") or "").strip()
+        return source_diversity_sort_key(
+            safe_domain(link),
+            recent_domains=recent_domains,
+            scientific_domains=scientific_domains,
+            prefer_scientific=prefer_scientific,
+        )
+
+    return sorted(candidates, key=_key)
+
+
 def fetch_rss(url: str) -> List[Dict[str, str]]:
     d = feedparser.parse(url)
     return [
@@ -1798,6 +1852,11 @@ async def amain() -> None:
     }
     store = PublicationStore(db_path)
     recent_since_iso = _start_recent_window(now).isoformat()
+    # Freshness cooldowns: a source may return, but only after the window passes.
+    source_cooldown_since_iso = (now - timedelta(days=SOURCE_COOLDOWN_DAYS)).isoformat()
+    editorial_core_since_iso = (now - timedelta(days=EDITORIAL_CORE_COOLDOWN_DAYS)).isoformat()
+    recent_domains = store.recent_source_domains(RECENT_SOURCE_DOMAIN_WINDOW)
+    scientific_domains = load_scientific_domains()
 
     audiences_cfg = rub_cfg.get("audiences", {}) or {}
     aud_list = (
@@ -1917,6 +1976,12 @@ async def amain() -> None:
                 topic_plan.preferred_topic_id,
                 topic_source_ids.get(topic_plan.preferred_topic_id, set()),
             )
+            all_items = apply_source_diversity_preference(
+                all_items,
+                recent_domains=recent_domains,
+                scientific_domains=scientific_domains,
+                prefer_scientific=should_prefer_scientific_sources(rubric_id),
+            )
 
             print(
                 f"[RUBRIC] rubric={rubric_id} audience={aud} candidates_total={len(all_items)} max_scan={MAX_CANDIDATES_PER_RUBRIC}",
@@ -1985,10 +2050,31 @@ async def amain() -> None:
                     continue
 
                 if store.has_url(canon):
-                    if should_bypass_duplicate_reason(rubric_id, "dup_url_db"):
+                    url_within_cooldown = store.has_url_since(canon, source_cooldown_since_iso)
+                    evergreen_url_reuse = should_bypass_duplicate_reason(rubric_id, "dup_url_db")
+                    if url_within_cooldown:
+                        # Inside the cooldown the URL is blocked for every rubric,
+                        # including evergreen ones.
+                        kind = note("dup_url_recent", canon)
+                        print(
+                            f"[SKIP][{kind}] dup_url_recent source={candidate_source_id} url={canon} "
+                            f"cooldown_days={SOURCE_COOLDOWN_DAYS}",
+                            flush=True,
+                        )
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
+                    if evergreen_url_reuse:
+                        # Cooldown elapsed: an allowed evergreen source is usable again
+                        # instead of being blocked permanently.
                         print(
                             f"[WARN] dup_url_db_ignored evergreen_reuse rubric={rubric_id} "
-                            f"source={candidate_source_id} url={canon}",
+                            f"source={candidate_source_id} url={canon} "
+                            f"cooldown_days={SOURCE_COOLDOWN_DAYS}",
                             flush=True,
                         )
                     else:
@@ -2091,10 +2177,28 @@ async def amain() -> None:
                     continue
 
                 if store.has_evidence_hash(evidence_hash):
+                    evidence_within_cooldown = store.has_evidence_hash_since(
+                        evidence_hash, source_cooldown_since_iso
+                    )
+                    if evidence_within_cooldown:
+                        kind = note("dup_evidence_hash_recent", canon)
+                        print(
+                            f"[SKIP][{kind}] dup_evidence_hash_recent source={candidate_source_id} "
+                            f"url={canon} cooldown_days={SOURCE_COOLDOWN_DAYS}",
+                            flush=True,
+                        )
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
                     if should_bypass_duplicate_reason(rubric_id, "dup_evidence_hash_db"):
                         print(
                             f"[WARN] dup_evidence_hash_db_ignored evergreen_reuse rubric={rubric_id} "
-                            f"source={candidate_source_id} url={canon}",
+                            f"source={candidate_source_id} url={canon} "
+                            f"cooldown_days={SOURCE_COOLDOWN_DAYS}",
                             flush=True,
                         )
                     else:
@@ -2114,7 +2218,7 @@ async def amain() -> None:
 
                 sem_source_hit = store.find_semantic_duplicate(
                     evidence,
-                    threshold=SEMANTIC_THRESHOLD,
+                    threshold=SEMANTIC_THRESHOLD_SOURCE,
                     since_iso=None,
                     limit=500,
                     compare="evidence",
@@ -2419,6 +2523,39 @@ async def amain() -> None:
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                         break
                     continue
+
+                # Cross-rubric editorial freshness. Runs after LLM generation and the
+                # deterministic content validation above, and before any visual work, so a
+                # rejected candidate never spends image generation. Fails open when the
+                # semantic model is unavailable: the exact URL/evidence/body checks above
+                # have already run and stay authoritative.
+                editorial_core = extract_editorial_core(plain)
+                if editorial_core:
+                    core_threshold = semantic_editorial_core_threshold()
+                    core_hit = store.find_editorial_core_duplicate(
+                        editorial_core,
+                        threshold=core_threshold,
+                        since_iso=editorial_core_since_iso,
+                        limit=200,
+                        core_extractor=extract_editorial_core,
+                    )
+                    if core_hit:
+                        kind = note("dup_editorial_core_recent", canon)
+                        print(
+                            f"[SKIP][{kind}] dup_editorial_core_recent source={candidate_source_id} "
+                            f"url={canon} matched={core_hit.canonical_url} "
+                            f"matched_rubric={core_hit.rubric_id} "
+                            f"score={core_hit.similarity:.3f} threshold={core_threshold:.3f} "
+                            f"cooldown_days={EDITORIAL_CORE_COOLDOWN_DAYS}",
+                            flush=True,
+                        )
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                 h1_title = _extract_cover_title_from_plain_post(
                     plain,

@@ -54,7 +54,10 @@ class VisualPromptResilienceTest(unittest.TestCase):
         provider = _prepare_pollinations_prompt(internal)
         lower = provider.lower()
 
-        self.assertIn("object-only still life", lower)
+        # "still life" is photographic composition language; the provider prompt
+        # now names a painted arrangement instead.
+        self.assertNotIn("still life", lower)
+        self.assertIn("painted arrangement of objects only", lower)
         self.assertIn("laundry basket", lower)
         for phrase in ("surgical mask", "face shield", "reflective vest", "hard hat", "respirator"):
             with self.subTest(phrase=phrase):

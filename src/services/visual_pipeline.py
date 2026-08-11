@@ -76,12 +76,31 @@ VISUAL_STYLE_TAIL = (
 # long negative-token catalogue above so we do not accidentally prime the model
 # with masks, helmets, vests, etc. QA remains responsible for hard rejection.
 POLLINATIONS_GENERATION_STYLE_TAIL = (
-    "Warm soft editorial illustration, 2D hand-painted watercolor and gouache on subtle watercolor paper; "
+    "Warm soft editorial illustration, 2D hand-painted watercolor and gouache with visible washes, painterly edges "
+    "and simplified painted surfaces on matte watercolor paper; "
     "warm muted pastel palette, soft natural daylight, gentle friendly educational mood, clean simple composition, "
-    "natural human proportions, professional but approachable. Ordinary home or educational environment and simple casual indoor clothing. "
-    "No medical or industrial context or equipment. Not photorealistic, not 3D, not anime, not glossy digital art. "
+    "natural human proportions. Ordinary home or educational environment and simple casual indoor clothing. "
+    "No medical or industrial context or equipment. Not photography, not photorealistic, not 3D, not anime, not glossy digital art. "
     "No readable text, logos or watermarks."
 )
+
+# Provider style used only by the single human retry when QA rejected the first
+# image as photographic / not an illustration. Same scene, much louder painting
+# instructions, so the retry prompt and its seed really differ.
+POLLINATIONS_STYLE_RETRY_TAIL = (
+    "Unmistakably hand-painted 2D watercolor and gouache editorial illustration on matte textured watercolor paper. "
+    "Visible watercolor washes with soft bleeding edges, opaque gouache brush shapes, clearly painterly edges, "
+    "simplified painted surfaces and visible brush strokes; warm muted pastel palette, soft natural daylight, "
+    "gentle friendly educational mood, clean simple composition, natural human proportions. "
+    "Ordinary home or educational environment and simple casual indoor clothing. "
+    "No medical or industrial context or equipment. This is a painting, not photography: "
+    "not photorealistic, no photographic lighting or depth of field, not realistic 3D, not glossy CGI, "
+    "not glossy digital rendering, not anime. No readable text, logos or watermarks."
+)
+
+# Compiled role rules are clipped to this length; retry clarifiers must fit
+# so the trailing "no other people" constraint is never cut off.
+VISUAL_ROLE_RULE_MAX_CHARS = 220
 
 VISUAL_CAMERA_TEMPLATE = (
     "eye-level {shot}, normal 50mm perspective, subjects centered with breathing room, clearly separated without overlap"
@@ -94,12 +113,21 @@ VISUAL_CAMERA_TEMPLATE = (
 OBJECT_SCENE_MARKER_TEMPLATE = "[object_scene:{category}|{variation_id}]"
 OBJECT_SCENE_MARKER_RE = re.compile(r"\[object_scene:([a-z_]+)\|([0-9a-f]*)\]")
 
+# Same idea for the style retry: a technical flag on the compiled retry prompt
+# that swaps the provider style tail and is stripped before the request.
+VISUAL_STYLE_RETRY_MARKER = "[style_retry]"
+VISUAL_STYLE_RETRY_MARKER_RE = re.compile(r"\[style_retry\]")
+
 # Compact provider-facing object style. The compiled prompt stays verbose for
 # deterministic parsing/tests; Pollinations only receives this short version.
+# Wording is deliberately painterly: photographic composition vocabulary here
+# ("still life", "flat-lay", "tabletop view", "soft shadows") was pulling the
+# generator towards product photography.
 OBJECT_PROVIDER_STYLE = (
-    "2D hand-painted watercolor and gouache editorial illustration, subtle watercolor paper texture, "
-    "warm muted pastel palette, soft natural daylight, gentle friendly educational mood, "
-    "clean simple composition, not photorealistic, 16:9 landscape."
+    "2D hand-painted watercolor and gouache editorial illustration, subtle watercolor paper texture, matte and non-glossy, "
+    "visible watercolor washes, opaque gouache brush shapes, painterly edges, simplified illustrated surfaces, "
+    "warm muted pastel palette, soft natural daylight, gentle friendly educational mood, clean simple composition, "
+    "not photorealistic, 16:9 landscape."
 )
 
 OBJECT_PROVIDER_NEGATIVES = (
@@ -107,16 +135,20 @@ OBJECT_PROVIDER_NEGATIVES = (
     "no PPE, no medical or industrial gear."
 )
 
+OBJECT_PROVIDER_SCENE_PREFIX = "Painted arrangement of objects only:"
+
 OBJECT_PROVIDER_COMPOSITIONS = (
-    "asymmetrical tabletop layout with generous negative space",
-    "diagonal flat-lay layout with objects separated",
-    "calm shelf vignette with an uncluttered background",
-    "three-quarter tabletop view with one focal object",
-    "balanced tabletop arrangement with soft shadows",
-    "top-down layout with one offset accent object",
+    "painted arrangement with generous blank paper space",
+    "illustrated arrangement with clearly separated objects",
+    "calm painted grouping on a plain pastel background",
+    "clear illustrated focal object with smaller painted objects beside it",
+    "balanced painted arrangement with soft watercolor shading",
+    "loosely painted arrangement with one offset accent object",
 )
 
-OBJECT_PROVIDER_PROMPT_MAX_CHARS = 650
+# Raised from 650: the painterly style block and the blank/unmarked surface
+# guards below need the room. Still shorter than the compiled prompt.
+OBJECT_PROVIDER_PROMPT_MAX_CHARS = 880
 
 
 @dataclass(frozen=True)
@@ -246,6 +278,10 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
     if not cleaned:
         return ""
 
+    style_retry = bool(VISUAL_STYLE_RETRY_MARKER_RE.search(cleaned))
+    if style_retry:
+        cleaned = " ".join(VISUAL_STYLE_RETRY_MARKER_RE.sub(" ", cleaned).split()).strip()
+
     marker_match = OBJECT_SCENE_MARKER_RE.search(cleaned)
     if marker_match:
         # Technical fields never reach the provider.
@@ -262,10 +298,15 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
             variation_id = ""
         return build_object_provider_prompt(category, variation_id)
 
+    provider_style = POLLINATIONS_STYLE_RETRY_TAIL if style_retry else POLLINATIONS_GENERATION_STYLE_TAIL
+
     style_marker = "Warm soft editorial illustration"
     if style_marker in cleaned:
         scene_prefix = cleaned.split(style_marker, 1)[0].rstrip(" .")
-        return " ".join(f"{scene_prefix}. {POLLINATIONS_GENERATION_STYLE_TAIL}".split())
+        return " ".join(f"{scene_prefix}. {provider_style}".split())
+
+    if style_retry:
+        return " ".join(f"{cleaned.rstrip(' .')}. {provider_style}".split())
 
     return " ".join(cleaned.split())
 
@@ -639,7 +680,7 @@ def _normalize_child_only_visual_action(
 
 
 def _compile_visual_prompt(brief: VisualBrief) -> str:
-    role_rule = _clean_visual_brief_fragment(brief.role_rule, 220)
+    role_rule = _clean_visual_brief_fragment(brief.role_rule, VISUAL_ROLE_RULE_MAX_CHARS)
     action = _normalize_child_only_visual_action(
         brief.action,
         role_rule=role_rule,
@@ -684,6 +725,16 @@ def _compile_visual_prompt(brief: VisualBrief) -> str:
     )[:900].rstrip()
 
 
+# The child descriptors production can actually build (see build_visual_role_rule
+# and the age extraction in llm_generator). Bounded on purpose: an open ".+?"
+# span between "exactly one" and the descriptor swallowed the adult role.
+VISUAL_AGE_DESCRIPTOR_RE = re.compile(
+    r"exactly one\s+(?P<age>(?:\d{1,2}-year-old\s+)?"
+    r"(?:toddler|preschool child|school-age child|young child|clearly younger child|child))\b",
+    flags=re.IGNORECASE,
+)
+
+
 def _parse_compiled_visual_prompt(prompt: str, rubric_id: str = "") -> VisualBrief | None:
     cleaned = " ".join((prompt or "").split()).strip()
     marker = "Warm soft editorial illustration"
@@ -699,12 +750,11 @@ def _parse_compiled_visual_prompt(prompt: str, rubric_id: str = "") -> VisualBri
     props_raw = match.group("props").strip()
     props = () if props_raw.lower() == "none" else _clean_visual_props(props_raw.split(","))
     role_rule = match.group("role").strip()
-    age_match = re.search(
-        r"(?:and exactly one|^exactly one)\s+(.+?(?:toddler|preschool child|school-age child|young child|clearly younger child|child))",
-        role_rule,
-        flags=re.IGNORECASE,
-    )
-    age_descriptor = age_match.group(1).strip() if age_match else ""
+    # Take the last "exactly one <child descriptor>": in a parent role the first
+    # "exactly one" introduces the adult, and a greedy span between them used to
+    # swallow "adult parent and exactly one ..." into the descriptor.
+    age_matches = list(VISUAL_AGE_DESCRIPTOR_RE.finditer(role_rule))
+    age_descriptor = age_matches[-1].group("age").strip() if age_matches else ""
     setting = match.group("setting").split(", eye-level", 1)[0].strip()
     return VisualBrief(
         rubric_id=(rubric_id or "").strip().lower(),
@@ -991,6 +1041,85 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
     return normalized
 
 
+# QA reasons that mean "the picture is not a hand-painted illustration".
+# The single human retry stays a retry: only its style contract is sharpened.
+VISUAL_STYLE_RETRY_REASONS = frozenset(
+    {
+        "photorealistic_imagery",
+        "photorealistic",
+        "photorealistic_image",
+        "photorealistic_style",
+        "photographic_style",
+        "stock_photo_style",
+        "wrong_art_style",
+        "style_mismatch",
+        "object_style_mismatch",
+        "glossy_digital_art",
+        "realistic_3d_render",
+    }
+)
+
+_STYLE_RETRY_REASON_HINTS = ("photoreal", "photograph", "stock_photo", "style_mismatch", "3d_render", "cgi", "glossy")
+
+
+def _is_visual_style_retry_reason(reason: str) -> bool:
+    normalized = _normalize_visual_qa_reason(reason)
+    if not normalized:
+        return False
+    if normalized in VISUAL_STYLE_RETRY_REASONS:
+        return True
+    return any(hint in normalized for hint in _STYLE_RETRY_REASON_HINTS)
+
+
+def _insert_role_clarifier(base: str, clarifier: str) -> str:
+    for tail in (", no adults and no other people", ", no other people"):
+        index = base.lower().rfind(tail)
+        if index != -1:
+            return f"{base[:index]}, {clarifier}{base[index:]}."
+    return f"{base}, {clarifier}."
+
+
+def _role_rule_for_wrong_character_roles(role_rule: str, rubric_id: str) -> str:
+    """Sharpen the role rule itself instead of polluting the educational action.
+
+    Keeps the prefixes `_validate_compiled_visual_prompt` and the shot selector
+    rely on, and never adds an adult to a child-only scene.
+    """
+    del rubric_id
+    base = " ".join((role_rule or "").split()).strip().rstrip(".")
+    if not base:
+        return role_rule
+
+    if "no adults" in base.lower():
+        candidates = ("clearly childlike height and body proportions",)
+    else:
+        base = re.sub(
+            r"visibly different in age and height",
+            "visibly different in age, height, face and body proportions",
+            base,
+            flags=re.IGNORECASE,
+        )
+        pair = "the adult unmistakably mature and the child clearly smaller and childlike"
+        if "visibly different in age," in base.lower():
+            candidates = (pair,)
+        else:
+            # Longest first; the compiled role rule is clipped at
+            # VISUAL_ROLE_RULE_MAX_CHARS and must keep its "no other people" tail.
+            candidates = (
+                f"{pair}, visibly different in age, height, face and body proportions",
+                "the adult unmistakably mature, the child clearly smaller and childlike, "
+                "differing in age, height, face and body proportions",
+                pair,
+            )
+
+    strengthened = _insert_role_clarifier(base, candidates[-1])
+    for clarifier in candidates:
+        candidate = _insert_role_clarifier(base, clarifier)
+        if len(candidate) <= VISUAL_ROLE_RULE_MAX_CHARS:
+            return candidate
+    return strengthened
+
+
 def build_visual_retry_prompt(
     prompt: str,
     rubric_id: str = "",
@@ -1029,8 +1158,6 @@ def build_visual_retry_prompt(
     elif reason in {"too_many_adults", "adult_only_scene"}:
         subject = "specialist" if (rubric_id or "").strip().lower() == "method_piggybank" else "parent"
         correction = f"Remove every additional adult so only one adult {subject} is visible"
-    elif reason == "wrong_character_roles":
-        correction = "Make the adult and child visibly different in age, height, face and body proportions"
     elif reason == "character_counts_unknown":
         correction = "Show both unobstructed figures separately with visible heads and upper bodies"
     elif reason in {"horizontal_stretch", "stretched_body", "widened_torso"}:
@@ -1057,15 +1184,24 @@ def build_visual_retry_prompt(
     else:
         retry_action = action
 
+    # Role problems are corrected in the role rule; style problems are corrected
+    # in the provider style tail. Neither rewrites the educational action.
+    retry_role_rule = brief.role_rule
+    if reason == "wrong_character_roles":
+        retry_role_rule = _role_rule_for_wrong_character_roles(brief.role_rule, brief.rubric_id or rubric_id)
+
     retry_brief = VisualBrief(
         rubric_id=brief.rubric_id,
-        role_rule=brief.role_rule,
+        role_rule=retry_role_rule,
         age_descriptor=brief.age_descriptor,
         setting=brief.setting,
         action=retry_action,
         props=brief.props[:3],
     )
-    return _compile_visual_prompt(retry_brief)
+    retry_prompt = _compile_visual_prompt(retry_brief)
+    if retry_prompt and _is_visual_style_retry_reason(reason):
+        retry_prompt = f"{retry_prompt} {VISUAL_STYLE_RETRY_MARKER}"
+    return retry_prompt
 
 
 def _visual_qa_text(payload: Dict[str, object]) -> str:
@@ -1640,7 +1776,7 @@ OBJECT_SCENE_CATEGORIES = {
     # and `object_contains_person` rejections, so this category only allows a
     # closed plain-cover book, blank cards and neutral wooden objects.
     "books_vocab_phrases_stories": (
-        "one closed children’s book with a plain blank cover, blank color flashcards, "
+        "one fully closed children’s book with a completely plain unmarked cover, solid-color blank cards, "
         "small wooden miniatures of everyday objects such as a ball, cup, toy car and apple"
     ),
     "hearing_sounds_music": (
@@ -1651,7 +1787,10 @@ OBJECT_SCENE_CATEGORIES = {
     "bilingual_languages": "two differently colored children’s books, small globe, two empty speech-bubble shapes without text",
     "reading_prep": "picture cards, blank wooden letter-like blocks without readable letters, children’s book, pencil and blank paper",
     "household_routines": "folded T-shirt, small laundry basket, simple cup and plate, kitchen towel, small home storage basket",
-    "default": "children’s picture book, picture cards, wooden toys",
+    "default": (
+        "one fully closed children’s book with a completely plain unmarked cover, solid-color blank cards, "
+        "simple wooden toys"
+    ),
 }
 
 # Extra per-category constraints appended to both the compiled and the provider
@@ -1659,7 +1798,11 @@ OBJECT_SCENE_CATEGORIES = {
 # state, so the provider prompt stays inside OBJECT_PROVIDER_PROMPT_MAX_CHARS.
 OBJECT_SCENE_GUARDS = {
     "books_vocab_phrases_stories": (
-        "Book closed, cards blank; miniatures depict everyday objects only. No printed words."
+        "Book closed, cards blank; miniatures depict everyday objects only. "
+        "All surfaces unmarked, no printed words, no glyph-like marks."
+    ),
+    "default": (
+        "Book closed, cards blank; all surfaces unmarked, no printed words, no glyph-like marks."
     ),
 }
 
@@ -1756,9 +1899,9 @@ def build_object_provider_prompt(category: str, variation_id: str = "") -> str:
         parts.append(OBJECT_PROVIDER_NEGATIVES)
         return " ".join(" ".join(parts).split())
 
-    prompt = _assemble(f"Object-only still life: {objects}, {composition}.")
+    prompt = _assemble(f"{OBJECT_PROVIDER_SCENE_PREFIX} {objects}, {composition}.")
     if len(prompt) > OBJECT_PROVIDER_PROMPT_MAX_CHARS:
-        prompt = _assemble(f"Object-only still life: {objects}.")
+        prompt = _assemble(f"{OBJECT_PROVIDER_SCENE_PREFIX} {objects}.")
     return prompt
 
 

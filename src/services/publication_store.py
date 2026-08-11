@@ -221,26 +221,29 @@ class PublicationStore:
         return row is not None
 
     def recent_source_domains(self, limit: int = 3) -> List[str]:
-        """Most recently used source domains, newest first, de-duplicated."""
+        """
+        Domains of the last `limit` actual publications, newest first, de-duplicated.
+
+        The window is the rows, not the distinct domains: three publications from
+        `d1, d1, d2` yield `{d1, d2}` and must not reach further back for a third
+        distinct domain.
+        """
         if limit <= 0:
             return []
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT source_domain FROM publications
-                WHERE source_domain != ''
                 ORDER BY posted_at DESC, id DESC
                 LIMIT ?
                 """,
-                (max(limit * 5, limit),),
+                (limit,),
             ).fetchall()
         seen: List[str] = []
         for row in rows:
             domain = (row["source_domain"] or "").strip().lower()
             if domain and domain not in seen:
                 seen.append(domain)
-            if len(seen) >= limit:
-                break
         return seen
 
     def find_editorial_core_duplicate(

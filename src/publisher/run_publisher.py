@@ -1048,35 +1048,64 @@ def load_scientific_domains() -> List[str]:
         return []
 
 
+def topic_relevance_tier(
+    candidate: Dict[str, str],
+    preferred_topic_id: str,
+    topic_source_ids: Sequence[str] | set,
+) -> int:
+    """
+    Coarse topic-relevance tier, lower is more relevant.
+
+    Mirrors the signals `rank_candidates_for_topic` already uses — a source
+    dedicated to the topic, then a keyword match in title/summary — without
+    touching the rotation algorithm itself. It exists so source diversity can
+    reorder candidates *within* one relevance level and never across levels.
+    """
+    topic_id = (preferred_topic_id or "").strip().lower()
+    if not topic_id:
+        return 0
+    source_id = str(candidate.get("source_id", "") or "").strip().lower()
+    if source_id and source_id in {str(item).strip().lower() for item in (topic_source_ids or set())}:
+        return 0
+    text = " ".join(str(candidate.get(field, "") or "") for field in ("title", "summary"))
+    return 1 if topic_matches_text(text, topic_id) else 2
+
+
 def apply_source_diversity_preference(
     candidates: List[Dict[str, str]],
     *,
     recent_domains: Sequence[str],
     scientific_domains: Sequence[str],
     prefer_scientific: bool,
+    preferred_topic_id: str = "",
+    topic_source_ids: Sequence[str] | set = (),
 ) -> List[Dict[str, str]]:
     """
-    Soft, stable reordering by source diversity.
+    Soft, stable reordering by source diversity, subordinate to topic relevance.
 
-    A candidate from a freshly used domain sorts ahead of one from a recently used
-    domain, and for authority-driven rubrics a configured scientific domain sorts
-    ahead of a non-scientific one. Nothing is dropped: recent and non-scientific
-    domains remain available as fallbacks, and the incoming topic ranking is
-    preserved inside each preference group because the sort is stable.
+    Topic relevance is the stronger signal and sorts first: a fresh domain never
+    lifts an off-topic candidate above a topic-relevant one. Inside a relevance
+    tier a candidate from a freshly used domain sorts ahead of one from a recently
+    used domain, and for authority-driven rubrics a configured scientific domain
+    sorts ahead of a non-scientific one. Nothing is dropped: recent and
+    non-scientific domains remain usable fallbacks, and the incoming topic ranking
+    is preserved inside each group because the sort is stable.
     """
     if not candidates:
         return candidates
     if not recent_domains and not prefer_scientific:
         return candidates
 
-    def _key(candidate: Dict[str, str]) -> tuple[int, int]:
+    def _key(candidate: Dict[str, str]) -> tuple[int, int, int]:
         link = (candidate.get("link") or "").strip()
-        return source_diversity_sort_key(
+        recent_rank, science_rank = source_diversity_sort_key(
             safe_domain(link),
             recent_domains=recent_domains,
             scientific_domains=scientific_domains,
             prefer_scientific=prefer_scientific,
         )
+        tier = topic_relevance_tier(candidate, preferred_topic_id, topic_source_ids)
+        return (tier, recent_rank, science_rank)
 
     return sorted(candidates, key=_key)
 
@@ -1981,6 +2010,8 @@ async def amain() -> None:
                 recent_domains=recent_domains,
                 scientific_domains=scientific_domains,
                 prefer_scientific=should_prefer_scientific_sources(rubric_id),
+                preferred_topic_id=topic_plan.preferred_topic_id,
+                topic_source_ids=topic_source_ids.get(topic_plan.preferred_topic_id, set()),
             )
 
             print(
@@ -2216,10 +2247,13 @@ async def amain() -> None:
                             break
                         continue
 
+                # Scoped to the same 28-day window as the exact URL/evidence
+                # cooldowns. Comparing against the whole history would block an
+                # allowed evergreen source forever on one old semantic match.
                 sem_source_hit = store.find_semantic_duplicate(
                     evidence,
                     threshold=SEMANTIC_THRESHOLD_SOURCE,
-                    since_iso=None,
+                    since_iso=source_cooldown_since_iso,
                     limit=500,
                     compare="evidence",
                 )

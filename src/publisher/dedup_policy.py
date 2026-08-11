@@ -256,6 +256,75 @@ _SERVICE_HEADING_WORDS = frozenset(
 )
 
 
+# Wrapper labels used by the live Telegram templates. They structure a post but
+# carry no editorial meaning, so the same advice has to compare equal whichever
+# wrapper delivered it — parent or pro, one rubric or another.
+#
+# Only the label itself is removed. Content that shares the line with its label
+# ("💡 Что это дает: ребёнок выбирает картинку") is kept.
+_WRAPPER_LABEL_WORDS = (
+    # Parent templates.
+    "возраст",
+    "что попробовать сегодня",
+    "что попробовать",
+    "пример",
+    "что это дает",
+    "что это даёт",
+    "как играть",
+    "миф",
+    "факт",
+    "вопрос недели",
+    "подсказка",
+    "навык",
+    # Pro templates.
+    "аудитория",
+    "цель",
+    "материалы",
+    "как провести",
+    "на что смотреть",
+    "вариант усложнения",
+    # Apparatus.
+    "источник",
+    "источники",
+    "ссылка",
+    "ссылки",
+    "теги",
+)
+
+# An emoji prefix such as "👶", "✅" or the ZWJ sequence "👩‍⚕️". Letters, digits
+# and punctuation are excluded, so neither a real word nor the full stop closing
+# the previous sentence is ever swallowed as decoration.
+_LABEL_PREFIX_PUNCTUATION = ".,;:!?…()[]{}«»\"'`*_#/\\|-–—+=<>@%&~^$"
+_LABEL_EMOJI_PREFIX = (
+    r"[^\w\s" + re.escape(_LABEL_PREFIX_PUNCTUATION) + r"]{1,3}"
+    r"(?:‍[^\w\s" + re.escape(_LABEL_PREFIX_PUNCTUATION) + r"]{1,3})*[️‍]*"
+)
+_LABEL_ALTERNATION = "|".join(
+    re.escape(word) for word in sorted(_WRAPPER_LABEL_WORDS, key=len, reverse=True)
+)
+_LABEL_INLINE_RE = re.compile(
+    rf"(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_LABEL_ALTERNATION})\s*:",
+    re.IGNORECASE,
+)
+_LABEL_PREFIX_RE = re.compile(
+    rf"^(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_LABEL_ALTERNATION})\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _resegment_stored_body(text: str) -> str:
+    """
+    Restore line structure that `normalize_publication_text` collapsed away.
+
+    `body_norm` is stored as a single line, so line-anchored cleanup (source
+    lines, label-only headings, bullet prefixes) would silently do nothing on
+    stored rows while working fine on a freshly generated post. Re-inserting a
+    break before every wrapper label makes both paths behave identically.
+    """
+    value = str(text or "").replace("\r\n", "\n")
+    return _LABEL_INLINE_RE.sub(lambda match: "\n" + match.group(0), value)
+
+
 def _is_service_heading(line: str) -> bool:
     """
     True for short label-only lines such as 'Источник:', '## Приём' or '**Совет дня**'.
@@ -283,7 +352,7 @@ def extract_editorial_core(post_text: str) -> str:
     or genuinely different. No LLM and no network access are involved.
     """
     lines_out: list[str] = []
-    for raw_line in str(post_text or "").replace("\r\n", "\n").split("\n"):
+    for raw_line in _resegment_stored_body(post_text).split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -301,6 +370,8 @@ def extract_editorial_core(post_text: str) -> str:
         line = _HASHTAG_TOKEN_RE.sub(" ", line)
         line = _BOLD_MARKS_RE.sub("", line)
         line = _BULLET_PREFIX_RE.sub("", line)
+        # Drop the wrapper label, keep whatever it introduced on the same line.
+        line = _LABEL_PREFIX_RE.sub("", line)
         line = " ".join(line.split()).strip()
         # Drop separator-only leftovers.
         if not line or not re.search(r"[A-Za-zА-Яа-яЁё0-9]", line):

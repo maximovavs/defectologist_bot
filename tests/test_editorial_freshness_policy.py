@@ -693,7 +693,8 @@ class SourceDiversityTest(unittest.TestCase):
     def test_recent_domain_window_is_three(self):
         self.assertEqual(RECENT_SOURCE_DOMAIN_WINDOW, 3)
 
-    def test_recent_source_domains_returns_last_three_distinct_newest_first(self):
+    def test_recent_source_domains_covers_the_last_three_publications(self):
+        """The window is the last three rows, not the last three distinct domains."""
         now = datetime.now(timezone.utc)
         rows = [
             ("https://d1.example/1", "d1.example", 1),
@@ -705,7 +706,9 @@ class SourceDiversityTest(unittest.TestCase):
         with _StoreFixture() as store:
             for url, domain, days_ago in rows:
                 _insert(store, canonical_url=url, source_domain=domain, posted_at=_iso(now, days_ago))
-            self.assertEqual(store.recent_source_domains(3), ["d1.example", "d2.example", "d3.example"])
+            # Last three publications are d1, d1, d2 — d3 is already outside the window.
+            self.assertEqual(store.recent_source_domains(3), ["d1.example", "d2.example"])
+            self.assertEqual(store.recent_source_domains(4), ["d1.example", "d2.example", "d3.example"])
             self.assertEqual(store.recent_source_domains(0), [])
 
     def test_normalize_domain_handles_scheme_www_and_path(self):
@@ -993,6 +996,329 @@ class EditorialFixtureMatrixTest(unittest.TestCase):
                     set(_TOKEN_RE.findall(core_a.lower())),
                     set(_TOKEN_RE.findall(core_b.lower())),
                 )
+
+
+
+# ---------------------------------------------------------------------------
+# Corrective pass — production-realistic editorial core, real Telegram wrappers,
+# windowed source semantics, exact recent-domain window, relevance over diversity
+# ---------------------------------------------------------------------------
+
+
+# The same advice, once in the parent wrapper and once in the pro wrapper. Only
+# the wrappers differ; the action and the observable reaction are identical.
+PARENT_POST = (
+    "Повторяем звук [п]\n"
+    "👶 Возраст: 3–4 года\n"
+    "🧩 Что попробовать сегодня: Попросите ребёнка назвать картинку и повторить слово папа.\n"
+    "💡 Что это дает: Ребёнок повторяет звук [п] в слогах.\n"
+    "Источник: https://example.org/parent\n"
+    "#логопед #речь"
+)
+
+PRO_POST = (
+    "Приём из копилки\n"
+    "👩‍⚕️ Аудитория: логопеды\n"
+    "🔁 Как провести: Попросите ребёнка назвать картинку и повторить слово папа.\n"
+    "✅ На что смотреть: Ребёнок повторяет звук [п] в слогах.\n"
+    "Источник: https://example.org/pro"
+)
+
+PLAY_POST = (
+    "Играем и говорим\n"
+    "👶 Возраст: 3–4 года\n"
+    "🎲 Как играть: Попросите ребёнка назвать картинку и повторить слово папа.\n"
+    "💡 Что это дает: Ребёнок повторяет звук [п] в слогах.\n"
+    "Источник: https://example.org/play"
+)
+
+OTHER_ADVICE_POST = (
+    "Пауза в диалоге\n"
+    "👶 Возраст: 3–4 года\n"
+    "🧩 Что попробовать сегодня: Задайте вопрос и молча подождите пять секунд, не подсказывая.\n"
+    "💡 Что это дает: Ребёнок успевает начать фразу сам.\n"
+    "Источник: https://example.org/other"
+)
+
+
+def _store_body(store: PublicationStore, *, url: str, post: str, posted_at: str,
+                rubric_id: str, audience: str = "parents", domain: str = "example.org") -> None:
+    """Store through the production write path, so body_norm is really one line."""
+    store.record_publication(
+        canonical_url=url,
+        body_hash=url + "-body",
+        body_text=post,
+        evidence_hash=url + "-ev",
+        evidence_text="evidence for " + url,
+        posted_at=posted_at,
+        audience=audience,
+        rubric_id=rubric_id,
+        rubric_title=rubric_id,
+        source_domain=domain,
+    )
+
+
+class ProductionEditorialCoreTest(unittest.TestCase):
+    """The core must behave identically on a live post and on stored body_norm."""
+
+    def test_stored_one_line_body_yields_the_same_core_as_the_live_post(self):
+        for label, post in (("parent", PARENT_POST), ("pro", PRO_POST), ("play", PLAY_POST)):
+            with self.subTest(post=label):
+                stored = store_module.normalize_publication_text(post)
+                # Storage really does collapse the newlines.
+                self.assertNotIn("\n", stored)
+                self.assertEqual(extract_editorial_core(post), extract_editorial_core(stored))
+
+    def test_stored_core_drops_wrappers_and_apparatus(self):
+        core = extract_editorial_core(store_module.normalize_publication_text(PARENT_POST))
+        for noise in ("Возраст", "Что попробовать", "Что это дает", "Источник", "#логопед", "https://"):
+            with self.subTest(noise=noise):
+                self.assertNotIn(noise, core)
+        self.assertIn("Попросите ребёнка назвать картинку", core)
+        self.assertIn("Ребёнок повторяет звук", core)
+
+    def test_wrapper_label_is_dropped_but_its_content_survives(self):
+        cases = (
+            ("💡 Что это дает: ребёнок выбирает нужную картинку", "ребёнок выбирает нужную картинку"),
+            ("👶 Возраст: 3–4 года", "3–4 года"),
+            ("🧩 Что попробовать сегодня: назовите предмет вслух", "назовите предмет вслух"),
+            ("👄 Пример: мама, ма-ма", "мама, ма-ма"),
+            ("🎲 Как играть: катите мяч по очереди", "катите мяч по очереди"),
+            ("🔴 Миф: ребёнок заговорит сам", "ребёнок заговорит сам"),
+            ("👩‍⚕️ Аудитория: логопеды и дефектологи", "логопеды и дефектологи"),
+            ("🎯 Цель: закрепить звук в слогах", "закрепить звук в слогах"),
+            ("🧰 Материалы: картинки и зеркало", "картинки и зеркало"),
+            ("🔁 Как провести: повторите приём три раза", "повторите приём три раза"),
+            ("✅ На что смотреть: ребёнок держит паузу", "ребёнок держит паузу"),
+            ("💡 Вариант усложнения: добавьте третий слог", "добавьте третий слог"),
+        )
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertEqual(extract_editorial_core(line), expected)
+
+    def test_label_only_line_disappears_entirely(self):
+        for line in ("👶 Возраст:", "🎯 Цель:", "Источник:", "Приём из копилки", "## Совет дня"):
+            with self.subTest(line=line):
+                self.assertEqual(extract_editorial_core(line), "")
+
+
+class CrossWrapperDuplicateTest(unittest.TestCase):
+    """Same advice must collide across parent/pro wrappers and across rubrics."""
+
+    def _duplicate(self, stored_post, stored_rubric, candidate_post, *, days_ago=2.0):
+        now = datetime.now(timezone.utc)
+        with _StoreFixture() as store:
+            _store_body(
+                store,
+                url="https://example.org/stored",
+                post=stored_post,
+                posted_at=_iso(now, days_ago),
+                rubric_id=stored_rubric,
+                audience="pros" if stored_rubric == "method_piggybank" else "parents",
+            )
+            return store.find_editorial_core_duplicate(
+                extract_editorial_core(candidate_post),
+                threshold=semantic_editorial_core_threshold(),
+                since_iso=_iso(now, EDITORIAL_CORE_COOLDOWN_DAYS),
+                core_extractor=extract_editorial_core,
+            )
+
+    def test_parent_wrapper_and_pro_wrapper_are_the_same_advice(self):
+        hit = self._duplicate(PARENT_POST, "tip_of_day", PRO_POST)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.canonical_url, "https://example.org/stored")
+
+    def test_tip_of_day_and_play_and_speak_are_the_same_advice(self):
+        hit = self._duplicate(PARENT_POST, "tip_of_day", PLAY_POST)
+        self.assertIsNotNone(hit)
+
+    def test_different_advice_on_the_same_topic_stays_distinct(self):
+        self.assertIsNone(self._duplicate(PARENT_POST, "tip_of_day", OTHER_ADVICE_POST))
+
+    def test_exact_body_protection_is_not_weakened(self):
+        now = datetime.now(timezone.utc)
+        with _StoreFixture() as store:
+            _store_body(
+                store,
+                url="https://example.org/stored",
+                post=PARENT_POST,
+                posted_at=_iso(now, 1.0),
+                rubric_id="tip_of_day",
+            )
+            self.assertTrue(store.has_body_hash("https://example.org/stored-body"))
+            self.assertTrue(store.has_evidence_hash("https://example.org/stored-ev"))
+            self.assertTrue(
+                store.has_url_since("https://example.org/stored", _iso(now, SOURCE_COOLDOWN_DAYS))
+            )
+
+    def test_semantic_layer_still_fails_open_without_a_model(self):
+        now = datetime.now(timezone.utc)
+        with _StoreFixture() as store:
+            _store_body(
+                store,
+                url="https://example.org/stored",
+                post=PARENT_POST,
+                posted_at=_iso(now, 1.0),
+                rubric_id="tip_of_day",
+            )
+            encoded = []
+
+            def _no_model(text):
+                encoded.append(text)
+                return []
+
+            original = store_module.text_to_embedding
+            store_module.text_to_embedding = _no_model
+            try:
+                hit = store.find_editorial_core_duplicate(
+                    extract_editorial_core(PRO_POST),
+                    threshold=semantic_editorial_core_threshold(),
+                    core_extractor=extract_editorial_core,
+                )
+            finally:
+                store_module.text_to_embedding = original
+
+        self.assertIsNone(hit)
+        # Short circuit: stored rows are never encoded once the candidate vector is empty.
+        self.assertEqual(len(encoded), 1)
+
+
+class SourceSemanticWindowTest(unittest.TestCase):
+    """Source-level semantic dedup must honour the 28-day freshness contract."""
+
+    def test_call_site_uses_the_cooldown_window(self):
+        source = inspect.getsource(publisher.amain)
+        call = source.split("sem_source_hit = store.find_semantic_duplicate(", 1)[1]
+        call = call.split("\n                )", 1)[0]
+        self.assertIn("since_iso=source_cooldown_since_iso", call)
+        self.assertNotIn("since_iso=None", call)
+
+    def test_match_older_than_the_window_does_not_block_evergreen_reuse(self):
+        now = datetime.now(timezone.utc)
+        evidence = "речь ребёнка словарь игра повторение"
+        with _StoreFixture() as store:
+            _insert(
+                store,
+                canonical_url="https://old.example.org/a",
+                evidence_norm=evidence,
+                posted_at=_iso(now, SOURCE_COOLDOWN_DAYS + 12),
+                rubric_id="tip_of_day",
+            )
+            hit = store.find_semantic_duplicate(
+                evidence,
+                threshold=SEMANTIC_THRESHOLD_SOURCE,
+                since_iso=_iso(now, SOURCE_COOLDOWN_DAYS),
+                limit=500,
+                compare="evidence",
+            )
+        self.assertIsNone(hit)
+
+    def test_match_inside_the_window_still_blocks_an_ordinary_rubric(self):
+        now = datetime.now(timezone.utc)
+        evidence = "речь ребёнка словарь игра повторение"
+        with _StoreFixture() as store:
+            _insert(
+                store,
+                canonical_url="https://recent.example.org/a",
+                evidence_norm=evidence,
+                posted_at=_iso(now, 3),
+                rubric_id="tip_of_day",
+            )
+            hit = store.find_semantic_duplicate(
+                evidence,
+                threshold=SEMANTIC_THRESHOLD_SOURCE,
+                since_iso=_iso(now, SOURCE_COOLDOWN_DAYS),
+                limit=500,
+                compare="evidence",
+            )
+        self.assertIsNotNone(hit)
+        self.assertFalse(should_bypass_source_semantic_dedup("tip_of_day"))
+        self.assertTrue(should_bypass_source_semantic_dedup("method_piggybank"))
+
+
+class RecentDomainWindowTest(unittest.TestCase):
+    def test_window_is_the_last_three_rows_not_the_last_three_domains(self):
+        now = datetime.now(timezone.utc)
+        with _StoreFixture() as store:
+            for index, domain in enumerate(("d3.com", "d2.com", "d1.com", "d1.com")):
+                _store_body(
+                    store,
+                    url=f"https://{domain}/{index}",
+                    post=OTHER_ADVICE_POST,
+                    posted_at=_iso(now, 4 - index),
+                    rubric_id="tip_of_day",
+                    domain=domain,
+                )
+            self.assertEqual(store.recent_source_domains(3), ["d1.com", "d2.com"])
+            self.assertEqual(store.recent_source_domains(0), [])
+
+
+TOPIC_ID = "vocabulary_phrase"
+
+
+class DiversityUnderTopicRelevanceTest(unittest.TestCase):
+    RECENT = ["recent.example.org"]
+
+    def _apply(self, candidates, *, topic_id=TOPIC_ID, topic_sources=(), prefer_scientific=False,
+               scientific=()):
+        return publisher.apply_source_diversity_preference(
+            candidates,
+            recent_domains=self.RECENT,
+            scientific_domains=scientific,
+            prefer_scientific=prefer_scientific,
+            preferred_topic_id=topic_id,
+            topic_source_ids=set(topic_sources),
+        )
+
+    def test_topic_relevant_recent_domain_beats_irrelevant_fresh_domain(self):
+        relevant = {"link": "https://recent.example.org/a", "source_id": "topic_src",
+                    "title": "фразовая речь и словарь", "summary": ""}
+        irrelevant = {"link": "https://fresh.example.org/b", "source_id": "other",
+                      "title": "прогноз погоды на выходные", "summary": ""}
+        ordered = self._apply([relevant, irrelevant], topic_sources={"topic_src"})
+
+        self.assertEqual(ordered[0]["link"], relevant["link"])
+        self.assertEqual(len(ordered), 2)
+
+    def test_fresh_domain_wins_at_equal_topic_relevance(self):
+        recent = {"link": "https://recent.example.org/a", "source_id": "same",
+                  "title": "прогноз погоды", "summary": ""}
+        fresh = {"link": "https://fresh.example.org/b", "source_id": "same",
+                 "title": "прогноз погоды", "summary": ""}
+        ordered = self._apply([recent, fresh])
+
+        self.assertEqual(ordered[0]["link"], fresh["link"])
+        self.assertEqual(ordered[1]["link"], recent["link"])
+
+    def test_recent_domain_candidate_stays_a_fallback(self):
+        only_recent = [{"link": "https://recent.example.org/a", "source_id": "s", "title": "t", "summary": ""}]
+        self.assertEqual(len(self._apply(only_recent)), 1)
+
+        mixed = [
+            {"link": "https://recent.example.org/a", "source_id": "s", "title": "t", "summary": ""},
+            {"link": "https://fresh.example.org/b", "source_id": "s", "title": "t", "summary": ""},
+        ]
+        ordered = self._apply(mixed)
+        self.assertEqual({c["link"] for c in ordered}, {c["link"] for c in mixed})
+
+    def test_relevance_tiers_follow_the_topic_signals(self):
+        by_source = {"source_id": "topic_src", "title": "погода", "summary": ""}
+        by_keyword = {"source_id": "other", "title": "фразовая речь и словарь", "summary": ""}
+        unrelated = {"source_id": "other", "title": "погода", "summary": ""}
+
+        self.assertEqual(publisher.topic_relevance_tier(by_source, TOPIC_ID, {"topic_src"}), 0)
+        self.assertEqual(publisher.topic_relevance_tier(by_keyword, TOPIC_ID, set()), 1)
+        self.assertEqual(publisher.topic_relevance_tier(unrelated, TOPIC_ID, set()), 2)
+
+    def test_age_norms_scientific_preference_stays_soft(self):
+        self.assertTrue(should_prefer_scientific_sources("age_norms"))
+        plain = {"link": "https://fresh.example.org/a", "source_id": "s", "title": "t", "summary": ""}
+        science = {"link": "https://who.int/b", "source_id": "s", "title": "t", "summary": ""}
+        ordered = self._apply([plain, science], prefer_scientific=True, scientific=["who.int"])
+
+        self.assertEqual(ordered[0]["link"], science["link"])
+        self.assertEqual(len(ordered), 2)
+
 
 
 if __name__ == "__main__":

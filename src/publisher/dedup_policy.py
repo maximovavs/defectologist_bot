@@ -318,7 +318,7 @@ _APPARATUS_ALTERNATION = _label_alternation(_APPARATUS_LABEL_WORDS)
 # Structural template signature: emoji + label + colon. The emoji is mandatory.
 _WRAPPER_LABEL_PATTERN = rf"{_LABEL_EMOJI_PREFIX}\s*(?:{_WRAPPER_ALTERNATION})\s*:"
 # Apparatus footer: emoji optional, but the label set is limited to real apparatus.
-_APPARATUS_LABEL_PATTERN = rf"(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_APPARATUS_ALTERNATION})\s*:"
+_APPARATUS_LABEL_PATTERN = rf"(?<!\w)(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_APPARATUS_ALTERNATION})\s*:"
 
 # A bare apparatus label only starts a new segment when links or hashtags follow
 # it; otherwise the sentence continues and must not be cut apart.

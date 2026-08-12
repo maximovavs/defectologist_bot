@@ -262,6 +262,11 @@ _SERVICE_HEADING_WORDS = frozenset(
 #
 # Only the label itself is removed. Content that shares the line with its label
 # ("💡 Что это дает: ребёнок выбирает картинку") is kept.
+#
+# The emoji is part of the signature and is REQUIRED. A bare word before a colon
+# is ordinary Russian prose, not structure: "Это важный факт: ребёнок уже
+# понимает просьбу" and "Наша цель: помочь ребёнку начать фразу" must survive
+# intact, so nothing here is matched without its template emoji.
 _WRAPPER_LABEL_WORDS = (
     # Parent templates.
     "возраст",
@@ -272,10 +277,6 @@ _WRAPPER_LABEL_WORDS = (
     "что это даёт",
     "как играть",
     "миф",
-    "факт",
-    "вопрос недели",
-    "подсказка",
-    "навык",
     # Pro templates.
     "аудитория",
     "цель",
@@ -283,7 +284,12 @@ _WRAPPER_LABEL_WORDS = (
     "как провести",
     "на что смотреть",
     "вариант усложнения",
-    # Apparatus.
+)
+
+# Footer/apparatus labels. These may appear without an emoji, because the line
+# they introduce is verifiably apparatus rather than a sentence — it is handled
+# by the source-line, bare-link, hashtag and label-only-heading rules below.
+_APPARATUS_LABEL_WORDS = (
     "источник",
     "источники",
     "ссылка",
@@ -299,17 +305,23 @@ _LABEL_EMOJI_PREFIX = (
     r"[^\w\s" + re.escape(_LABEL_PREFIX_PUNCTUATION) + r"]{1,3}"
     r"(?:‍[^\w\s" + re.escape(_LABEL_PREFIX_PUNCTUATION) + r"]{1,3})*[️‍]*"
 )
-_LABEL_ALTERNATION = "|".join(
-    re.escape(word) for word in sorted(_WRAPPER_LABEL_WORDS, key=len, reverse=True)
-)
+def _label_alternation(words) -> str:
+    return "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+
+
+_WRAPPER_ALTERNATION = _label_alternation(_WRAPPER_LABEL_WORDS)
+_APPARATUS_ALTERNATION = _label_alternation(_APPARATUS_LABEL_WORDS)
+
+# Structural template signature: emoji + label + colon. The emoji is mandatory.
+_WRAPPER_LABEL_PATTERN = rf"{_LABEL_EMOJI_PREFIX}\s*(?:{_WRAPPER_ALTERNATION})\s*:"
+# Apparatus footer: emoji optional, but the label set is limited to real apparatus.
+_APPARATUS_LABEL_PATTERN = rf"(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_APPARATUS_ALTERNATION})\s*:"
+
 _LABEL_INLINE_RE = re.compile(
-    rf"(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_LABEL_ALTERNATION})\s*:",
+    rf"(?:{_WRAPPER_LABEL_PATTERN}|{_APPARATUS_LABEL_PATTERN})",
     re.IGNORECASE,
 )
-_LABEL_PREFIX_RE = re.compile(
-    rf"^(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_LABEL_ALTERNATION})\s*:\s*",
-    re.IGNORECASE,
-)
+_LABEL_PREFIX_RE = re.compile(rf"^{_WRAPPER_LABEL_PATTERN}\s*", re.IGNORECASE)
 
 
 def _resegment_stored_body(text: str) -> str:

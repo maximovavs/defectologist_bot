@@ -1048,27 +1048,29 @@ def load_scientific_domains() -> List[str]:
         return []
 
 
-def topic_relevance_tier(
-    candidate: Dict[str, str],
-    preferred_topic_id: str,
-    topic_source_ids: Sequence[str] | set,
-) -> int:
+def _source_round_numbers(candidates: Sequence[Dict[str, str]]) -> List[int]:
     """
-    Coarse topic-relevance tier, lower is more relevant.
+    Per-source occurrence index of every candidate — the same notion of a
+    "source round" that `rank_candidates_for_topic` reconstructs downstream.
 
-    Mirrors the signals `rank_candidates_for_topic` already uses — a source
-    dedicated to the topic, then a keyword match in title/summary — without
-    touching the rotation algorithm itself. It exists so source diversity can
-    reorder candidates *within* one relevance level and never across levels.
+    With fewer than two distinct sources there is no round-robin interleaving to
+    protect, so every candidate is reported as round 0 and the diversity
+    preference stays free to order them.
     """
-    topic_id = (preferred_topic_id or "").strip().lower()
-    if not topic_id:
-        return 0
-    source_id = str(candidate.get("source_id", "") or "").strip().lower()
-    if source_id and source_id in {str(item).strip().lower() for item in (topic_source_ids or set())}:
-        return 0
-    text = " ".join(str(candidate.get(field, "") or "") for field in ("title", "summary"))
-    return 1 if topic_matches_text(text, topic_id) else 2
+    source_ids = [
+        str(candidate.get("source_id", "") or "").strip().lower() or "unknown"
+        for candidate in candidates
+    ]
+    if len(set(source_ids)) < 2:
+        return [0] * len(candidates)
+
+    seen: Dict[str, int] = {}
+    rounds: List[int] = []
+    for source_id in source_ids:
+        round_number = seen.get(source_id, 0)
+        seen[source_id] = round_number + 1
+        rounds.append(round_number)
+    return rounds
 
 
 def apply_source_diversity_preference(
@@ -1077,26 +1079,29 @@ def apply_source_diversity_preference(
     recent_domains: Sequence[str],
     scientific_domains: Sequence[str],
     prefer_scientific: bool,
-    preferred_topic_id: str = "",
-    topic_source_ids: Sequence[str] | set = (),
 ) -> List[Dict[str, str]]:
     """
-    Soft, stable reordering by source diversity, subordinate to topic relevance.
+    Soft, stable pre-ordering by source diversity — a tie-break, never a ranking.
 
-    Topic relevance is the stronger signal and sorts first: a fresh domain never
-    lifts an off-topic candidate above a topic-relevant one. Inside a relevance
-    tier a candidate from a freshly used domain sorts ahead of one from a recently
-    used domain, and for authority-driven rubrics a configured scientific domain
-    sorts ahead of a non-scientific one. Nothing is dropped: recent and
-    non-scientific domains remain usable fallbacks, and the incoming topic ranking
-    is preserved inside each group because the sort is stable.
+    This runs *before* `rank_candidates_for_topic`, which stays the single
+    authoritative topic scorer and has the final word: a stronger topic match
+    always ends up above a weaker one, so a fresh domain can only win among
+    candidates the canonical scorer rates equally.
+
+    The source round is the primary key, so the publisher's source round-robin
+    survives and the list is never regrouped by domain. Same-source candidates
+    keep their relative order, which keeps the rounds themselves identical.
+    Nothing is dropped: recent and non-scientific domains remain fallbacks.
     """
     if not candidates:
         return candidates
     if not recent_domains and not prefer_scientific:
         return candidates
 
-    def _key(candidate: Dict[str, str]) -> tuple[int, int, int]:
+    rounds = _source_round_numbers(candidates)
+
+    def _key(item: tuple[int, Dict[str, str]]) -> tuple[int, int, int]:
+        index, candidate = item
         link = (candidate.get("link") or "").strip()
         recent_rank, science_rank = source_diversity_sort_key(
             safe_domain(link),
@@ -1104,10 +1109,9 @@ def apply_source_diversity_preference(
             scientific_domains=scientific_domains,
             prefer_scientific=prefer_scientific,
         )
-        tier = topic_relevance_tier(candidate, preferred_topic_id, topic_source_ids)
-        return (tier, recent_rank, science_rank)
+        return (rounds[index], recent_rank, science_rank)
 
-    return sorted(candidates, key=_key)
+    return [candidate for _index, candidate in sorted(enumerate(candidates), key=_key)]
 
 
 def fetch_rss(url: str) -> List[Dict[str, str]]:
@@ -2000,18 +2004,18 @@ async def amain() -> None:
             seed = int(hashlib.sha1(f"{now.date()}|{rubric_id}|{aud}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(seed)
             all_items = order_candidates_for_rubric(rubric_id, all_items, rng)
-            all_items = rank_candidates_for_topic(
-                all_items,
-                topic_plan.preferred_topic_id,
-                topic_source_ids.get(topic_plan.preferred_topic_id, set()),
-            )
+            # Diversity is only a stable pre-order/tie-break inside the source
+            # rounds; the canonical topic scorer runs last and stays authoritative.
             all_items = apply_source_diversity_preference(
                 all_items,
                 recent_domains=recent_domains,
                 scientific_domains=scientific_domains,
                 prefer_scientific=should_prefer_scientific_sources(rubric_id),
-                preferred_topic_id=topic_plan.preferred_topic_id,
-                topic_source_ids=topic_source_ids.get(topic_plan.preferred_topic_id, set()),
+            )
+            all_items = rank_candidates_for_topic(
+                all_items,
+                topic_plan.preferred_topic_id,
+                topic_source_ids.get(topic_plan.preferred_topic_id, set()),
             )
 
             print(

@@ -10,6 +10,7 @@ Everything here is offline and deterministic:
 
 import inspect
 import math
+import random
 import re
 import sqlite3
 import tempfile
@@ -47,6 +48,7 @@ from src.publisher.dedup_policy import (
 )
 from src.services import publication_store as store_module
 from src.services.publication_store import PublicationStore
+from src.services.topic_policy import rank_candidates_for_topic
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -821,11 +823,14 @@ class SourceDiversityTest(unittest.TestCase):
                 self.assertNotIn(forbidden, publisher_src)
         self.assertNotIn("scientific_domains", (ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
 
-    def test_diversity_preference_is_applied_after_topic_ranking(self):
+    def test_diversity_preference_is_applied_before_topic_ranking(self):
+        """Diversity only pre-orders; the canonical topic scorer has the final word."""
         source = inspect.getsource(publisher.amain)
-        rank_at = source.index("rank_candidates_for_topic(")
+        round_robin_at = source.index("order_candidates_for_rubric(")
         diversity_at = source.index("apply_source_diversity_preference(")
-        self.assertLess(rank_at, diversity_at)
+        rank_at = source.index("rank_candidates_for_topic(")
+        self.assertLess(round_robin_at, diversity_at)
+        self.assertLess(diversity_at, rank_at)
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1101,39 @@ class ProductionEditorialCoreTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(extract_editorial_core(line), expected)
 
+    def test_ordinary_prose_with_a_word_before_a_colon_is_kept(self):
+        """A generic word before a colon is prose, not a structural wrapper."""
+        for line in (
+            "Это важный факт: ребёнок уже понимает просьбу.",
+            "Наша цель: помочь ребёнку самому начать фразу.",
+            "Вот пример: положите мяч рядом с коробкой.",
+            "Артефакт: это слово является частью обычного текста.",
+            "Материалы: всё, что уже лежит на кухонном столе.",
+            "Возраст: тут важен не он, а темп ребёнка.",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(extract_editorial_core(line), line)
+
+    def test_prose_survives_inside_a_stored_one_line_body(self):
+        post = (
+            "Короткая пауза\n"
+            "🧩 Что попробовать сегодня: Задайте вопрос и подождите пять секунд.\n"
+            "Это важный факт: ребёнок уже понимает просьбу.\n"
+            "Источник: https://example.org/x"
+        )
+        core = extract_editorial_core(store_module.normalize_publication_text(post))
+
+        self.assertIn("Это важный факт: ребёнок уже понимает просьбу.", core)
+        self.assertIn("Задайте вопрос и подождите пять секунд.", core)
+        self.assertNotIn("Что попробовать", core)
+        self.assertNotIn("Источник", core)
+
+    def test_only_emoji_prefixed_template_labels_are_structural(self):
+        for word in ("Цель", "Пример", "Материалы", "Возраст", "Миф", "Аудитория"):
+            with self.subTest(word=word):
+                bare = f"{word}: содержательный текст остаётся"
+                self.assertEqual(extract_editorial_core(bare), bare)
+
     def test_label_only_line_disappears_entirely(self):
         for line in ("👶 Возраст:", "🎯 Цель:", "Источник:", "Приём из копилки", "## Совет дня"):
             with self.subTest(line=line):
@@ -1257,68 +1295,122 @@ TOPIC_ID = "vocabulary_phrase"
 
 
 class DiversityUnderTopicRelevanceTest(unittest.TestCase):
+    """
+    Diversity is a pre-order/tie-break; `rank_candidates_for_topic` has the final
+    word. The pipeline under test is the production one:
+    round-robin -> diversity pre-order -> canonical topic ranking.
+    """
+
     RECENT = ["recent.example.org"]
 
-    def _apply(self, candidates, *, topic_id=TOPIC_ID, topic_sources=(), prefer_scientific=False,
-               scientific=()):
+    def _diversity(self, candidates, *, prefer_scientific=False, scientific=()):
         return publisher.apply_source_diversity_preference(
             candidates,
             recent_domains=self.RECENT,
             scientific_domains=scientific,
             prefer_scientific=prefer_scientific,
-            preferred_topic_id=topic_id,
-            topic_source_ids=set(topic_sources),
         )
 
-    def test_topic_relevant_recent_domain_beats_irrelevant_fresh_domain(self):
-        relevant = {"link": "https://recent.example.org/a", "source_id": "topic_src",
-                    "title": "фразовая речь и словарь", "summary": ""}
-        irrelevant = {"link": "https://fresh.example.org/b", "source_id": "other",
+    def _pipeline(self, candidates, *, topic_id=TOPIC_ID, topic_sources=()):
+        return rank_candidates_for_topic(self._diversity(candidates), topic_id, set(topic_sources))
+
+    @staticmethod
+    def _rounds(candidates):
+        seen, out = {}, []
+        for candidate in candidates:
+            source_id = candidate["source_id"]
+            index = seen.get(source_id, 0)
+            seen[source_id] = index + 1
+            out.append(index)
+        return out
+
+    def test_strong_topic_match_on_a_recent_domain_beats_weak_fresh_match(self):
+        strong_recent = {"link": "https://recent.example.org/a", "source_id": "topic_src",
+                         "title": "фразовая речь и словарь", "summary": "словар"}
+        weak_fresh = {"link": "https://fresh.example.org/b", "source_id": "other",
                       "title": "прогноз погоды на выходные", "summary": ""}
-        ordered = self._apply([relevant, irrelevant], topic_sources={"topic_src"})
 
-        self.assertEqual(ordered[0]["link"], relevant["link"])
-        self.assertEqual(len(ordered), 2)
+        for incoming in ([weak_fresh, strong_recent], [strong_recent, weak_fresh]):
+            with self.subTest(incoming=[c["source_id"] for c in incoming]):
+                ordered = self._pipeline(incoming, topic_sources={"topic_src"})
+                self.assertEqual(ordered[0]["link"], strong_recent["link"])
+                self.assertEqual(len(ordered), 2)
 
-    def test_fresh_domain_wins_at_equal_topic_relevance(self):
-        recent = {"link": "https://recent.example.org/a", "source_id": "same",
+    def test_keyword_match_on_a_recent_domain_still_beats_an_unrelated_fresh_one(self):
+        keyword_recent = {"link": "https://recent.example.org/a", "source_id": "s1",
+                          "title": "фразовая речь и словарь", "summary": ""}
+        unrelated_fresh = {"link": "https://fresh.example.org/b", "source_id": "s2",
+                           "title": "прогноз погоды", "summary": ""}
+        ordered = self._pipeline([unrelated_fresh, keyword_recent])
+
+        self.assertEqual(ordered[0]["link"], keyword_recent["link"])
+
+    def test_fresh_domain_wins_only_at_equal_topic_score(self):
+        recent = {"link": "https://recent.example.org/a", "source_id": "s1",
                   "title": "прогноз погоды", "summary": ""}
-        fresh = {"link": "https://fresh.example.org/b", "source_id": "same",
+        fresh = {"link": "https://fresh.example.org/b", "source_id": "s2",
                  "title": "прогноз погоды", "summary": ""}
-        ordered = self._apply([recent, fresh])
+        ordered = self._pipeline([recent, fresh])
 
         self.assertEqual(ordered[0]["link"], fresh["link"])
         self.assertEqual(ordered[1]["link"], recent["link"])
 
-    def test_recent_domain_candidate_stays_a_fallback(self):
+    def test_source_rounds_are_preserved_and_the_list_is_not_grouped_by_domain(self):
+        for rubric_id in ("method_piggybank", "bilingual_corner"):
+            with self.subTest(rubric_id=rubric_id):
+                items = [
+                    {"link": f"https://{domain}/{index}", "source_id": source,
+                     "title": "прогноз погоды", "summary": ""}
+                    for source, domain in (
+                        ("s1", "recent.example.org"),
+                        ("s2", "fresh.example.org"),
+                        ("s3", "other.example.org"),
+                    )
+                    for index in range(2)
+                ]
+                round_robin = publisher.order_candidates_for_rubric(rubric_id, items, random.Random(7))
+                ordered = self._diversity(round_robin)
+
+                # Rounds themselves are untouched...
+                self.assertEqual(self._rounds(ordered), self._rounds(round_robin))
+                self.assertEqual(self._rounds(ordered), [0, 0, 0, 1, 1, 1])
+                # ...and each round still holds one candidate per source, so the
+                # list was not collapsed into per-domain or per-source blocks.
+                self.assertEqual({c["source_id"] for c in ordered[:3]}, {"s1", "s2", "s3"})
+                self.assertEqual({c["source_id"] for c in ordered[3:]}, {"s1", "s2", "s3"})
+                self.assertEqual(len(ordered), len(items))
+
+    def test_diversity_is_a_stable_preorder_that_drops_nothing(self):
         only_recent = [{"link": "https://recent.example.org/a", "source_id": "s", "title": "t", "summary": ""}]
-        self.assertEqual(len(self._apply(only_recent)), 1)
+        self.assertEqual(len(self._diversity(only_recent)), 1)
 
         mixed = [
-            {"link": "https://recent.example.org/a", "source_id": "s", "title": "t", "summary": ""},
-            {"link": "https://fresh.example.org/b", "source_id": "s", "title": "t", "summary": ""},
+            {"link": "https://recent.example.org/a", "source_id": "s1", "title": "t", "summary": ""},
+            {"link": "https://fresh.example.org/b", "source_id": "s2", "title": "t", "summary": ""},
         ]
-        ordered = self._apply(mixed)
+        ordered = self._diversity(mixed)
         self.assertEqual({c["link"] for c in ordered}, {c["link"] for c in mixed})
 
-    def test_relevance_tiers_follow_the_topic_signals(self):
-        by_source = {"source_id": "topic_src", "title": "погода", "summary": ""}
-        by_keyword = {"source_id": "other", "title": "фразовая речь и словарь", "summary": ""}
-        unrelated = {"source_id": "other", "title": "погода", "summary": ""}
+    def test_no_second_topic_scorer_exists(self):
+        self.assertFalse(hasattr(publisher, "topic_relevance_tier"))
+        signature = inspect.signature(publisher.apply_source_diversity_preference)
+        self.assertNotIn("preferred_topic_id", signature.parameters)
+        self.assertNotIn("topic_source_ids", signature.parameters)
 
-        self.assertEqual(publisher.topic_relevance_tier(by_source, TOPIC_ID, {"topic_src"}), 0)
-        self.assertEqual(publisher.topic_relevance_tier(by_keyword, TOPIC_ID, set()), 1)
-        self.assertEqual(publisher.topic_relevance_tier(unrelated, TOPIC_ID, set()), 2)
+    def test_canonical_ranking_runs_after_the_diversity_preorder(self):
+        source = inspect.getsource(publisher.amain)
+        diversity_at = source.index("apply_source_diversity_preference(")
+        ranking_at = source.index("rank_candidates_for_topic(")
+        self.assertLess(diversity_at, ranking_at)
 
     def test_age_norms_scientific_preference_stays_soft(self):
         self.assertTrue(should_prefer_scientific_sources("age_norms"))
-        plain = {"link": "https://fresh.example.org/a", "source_id": "s", "title": "t", "summary": ""}
-        science = {"link": "https://who.int/b", "source_id": "s", "title": "t", "summary": ""}
-        ordered = self._apply([plain, science], prefer_scientific=True, scientific=["who.int"])
+        plain = {"link": "https://fresh.example.org/a", "source_id": "s1", "title": "t", "summary": ""}
+        science = {"link": "https://who.int/b", "source_id": "s2", "title": "t", "summary": ""}
+        ordered = self._diversity([plain, science], prefer_scientific=True, scientific=["who.int"])
 
         self.assertEqual(ordered[0]["link"], science["link"])
         self.assertEqual(len(ordered), 2)
-
 
 
 if __name__ == "__main__":

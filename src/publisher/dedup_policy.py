@@ -201,7 +201,6 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
 # Editorial core extraction (deterministic, no LLM)
 # ---------------------------------------------------------------------------
 
-_SOURCE_LINE_RE = re.compile(r"^\s*источник\s*:", re.IGNORECASE)
 _LINK_LINE_RE = re.compile(r"^\s*(?:https?://|www\.)\S+\s*$", re.IGNORECASE)
 _URL_INLINE_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _HASHTAG_ONLY_LINE_RE = re.compile(r"^\s*(?:#[^\s#]+\s*)+$")
@@ -286,9 +285,10 @@ _WRAPPER_LABEL_WORDS = (
     "вариант усложнения",
 )
 
-# Footer/apparatus labels. These may appear without an emoji, because the line
-# they introduce is verifiably apparatus rather than a sentence — it is handled
-# by the source-line, bare-link, hashtag and label-only-heading rules below.
+# Footer/apparatus labels. These may appear without an emoji, but only where the
+# structure proves they are apparatus: the label has to introduce links or
+# hashtags, nothing else. "Наш источник: мама описывает действия ребёнка" is an
+# ordinary sentence and must survive whole.
 _APPARATUS_LABEL_WORDS = (
     "источник",
     "источники",
@@ -296,6 +296,9 @@ _APPARATUS_LABEL_WORDS = (
     "ссылки",
     "теги",
 )
+
+# What an apparatus label is allowed to introduce: links and/or hashtags.
+_APPARATUS_PAYLOAD_TOKEN = r"(?:(?:https?://|www\.)\S+|#[^\s#]+)"
 
 # An emoji prefix such as "👶", "✅" or the ZWJ sequence "👩‍⚕️". Letters, digits
 # and punctuation are excluded, so neither a real word nor the full stop closing
@@ -317,11 +320,22 @@ _WRAPPER_LABEL_PATTERN = rf"{_LABEL_EMOJI_PREFIX}\s*(?:{_WRAPPER_ALTERNATION})\s
 # Apparatus footer: emoji optional, but the label set is limited to real apparatus.
 _APPARATUS_LABEL_PATTERN = rf"(?:{_LABEL_EMOJI_PREFIX}\s*)?(?:{_APPARATUS_ALTERNATION})\s*:"
 
+# A bare apparatus label only starts a new segment when links or hashtags follow
+# it; otherwise the sentence continues and must not be cut apart.
+_APPARATUS_SPLIT_PATTERN = rf"{_APPARATUS_LABEL_PATTERN}(?=\s*{_APPARATUS_PAYLOAD_TOKEN})"
+
 _LABEL_INLINE_RE = re.compile(
-    rf"(?:{_WRAPPER_LABEL_PATTERN}|{_APPARATUS_LABEL_PATTERN})",
+    rf"(?:{_WRAPPER_LABEL_PATTERN}|{_APPARATUS_SPLIT_PATTERN})",
     re.IGNORECASE,
 )
 _LABEL_PREFIX_RE = re.compile(rf"^{_WRAPPER_LABEL_PATTERN}\s*", re.IGNORECASE)
+
+# A whole line that is an apparatus label followed by nothing but links and/or
+# hashtags. Anything else after the label is editorial text and is kept.
+_APPARATUS_LINE_RE = re.compile(
+    rf"^{_APPARATUS_LABEL_PATTERN}\s*(?:{_APPARATUS_PAYLOAD_TOKEN}[\s,;]*)*$",
+    re.IGNORECASE,
+)
 
 
 def _resegment_stored_body(text: str) -> str:
@@ -368,7 +382,7 @@ def extract_editorial_core(post_text: str) -> str:
         line = raw_line.strip()
         if not line:
             continue
-        if _SOURCE_LINE_RE.match(line):
+        if _APPARATUS_LINE_RE.match(line):
             continue
         if _LINK_LINE_RE.match(line):
             continue

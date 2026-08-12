@@ -1128,6 +1128,67 @@ class ProductionEditorialCoreTest(unittest.TestCase):
         self.assertNotIn("Что попробовать", core)
         self.assertNotIn("Источник", core)
 
+    def test_narrative_source_and_link_sentences_are_kept(self):
+        """A footer label only counts as apparatus when links/hashtags follow it."""
+        for line in (
+            "Наш источник: мама регулярно описывает действия ребёнка.",
+            "Главный источник: наблюдение родителей.",
+            "Источники: родители и воспитатель замечают разные реакции ребёнка.",
+            "Ссылка: это слово используется здесь как часть обычного предложения.",
+            "Ссылки: между словом и действием ребёнок строит сам.",
+            "Теги: мы называем так короткие подписи к картинкам.",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(extract_editorial_core(line), line)
+
+    def test_real_apparatus_footers_are_removed(self):
+        for line in (
+            "Источник: https://example.org/article",
+            "Источники: https://example.org/a https://example.org/b",
+            "Ссылка: https://example.org/a",
+            "Ссылки: https://example.org/a",
+            "Источник: www.example.org/a",
+            "https://example.org/a",
+            "www.example.org/a",
+            "#логопед #речь",
+            "Теги: #логопед #речь",
+            "Источник:",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(extract_editorial_core(line), "")
+
+    def test_narrative_and_apparatus_can_share_one_stored_body(self):
+        post = (
+            "Короткая пауза\n"
+            "🧩 Что попробовать сегодня: Задайте вопрос и подождите пять секунд.\n"
+            "Наш источник: мама регулярно описывает действия ребёнка.\n"
+            "Источник: https://example.org/a\n"
+            "#логопед #речь"
+        )
+        live = extract_editorial_core(post)
+        stored = extract_editorial_core(store_module.normalize_publication_text(post))
+
+        self.assertEqual(live, stored)
+        for text in (live, stored):
+            self.assertIn("Наш источник: мама регулярно описывает действия ребёнка.", text)
+            self.assertIn("Задайте вопрос и подождите пять секунд.", text)
+            self.assertNotIn("https://", text)
+            self.assertNotIn("#логопед", text)
+            self.assertNotIn("Что попробовать", text)
+
+    def test_apparatus_label_never_survives_as_a_bare_leftover(self):
+        """Stripping the URL must not leave the label behind as pseudo-content."""
+        for line in (
+            "Источники: https://example.org/a https://example.org/b",
+            "Ссылка: https://example.org/a",
+            "Ссылки: https://example.org/a",
+            "Теги: #логопед #речь",
+        ):
+            with self.subTest(line=line):
+                core = extract_editorial_core(line)
+                for label in ("Источник", "Источники", "Ссылка", "Ссылки", "Теги"):
+                    self.assertNotIn(label, core)
+
     def test_only_emoji_prefixed_template_labels_are_structural(self):
         for word in ("Цель", "Пример", "Материалы", "Возраст", "Миф", "Аудитория"):
             with self.subTest(word=word):

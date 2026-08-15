@@ -1042,6 +1042,8 @@ def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) 
     return normalized
 
 
+# QA reasons that mean "the picture is not a hand-painted illustration".
+# The single human retry stays a retry: only its style contract is sharpened.
 VISUAL_STYLE_RETRY_REASONS = frozenset(
     {
         "photorealistic_imagery",
@@ -1079,6 +1081,11 @@ def _insert_role_clarifier(base: str, clarifier: str) -> str:
 
 
 def _role_rule_for_wrong_character_roles(role_rule: str, rubric_id: str) -> str:
+    """Sharpen the role rule itself instead of polluting the educational action.
+
+    Keeps the prefixes `_validate_compiled_visual_prompt` and the shot selector
+    rely on, and never adds an adult to a child-only scene.
+    """
     del rubric_id
     base = " ".join((role_rule or "").split()).strip().rstrip(".")
     if not base:
@@ -1097,9 +1104,12 @@ def _role_rule_for_wrong_character_roles(role_rule: str, rubric_id: str) -> str:
         if "visibly different in age," in base.lower():
             candidates = (pair,)
         else:
+            # Longest first; the compiled role rule is clipped at
+            # VISUAL_ROLE_RULE_MAX_CHARS and must keep its "no other people" tail.
             candidates = (
                 f"{pair}, visibly different in age, height, face and body proportions",
-                "the adult unmistakably mature, the child clearly smaller and childlike, differing in age, height, face and body proportions",
+                "the adult unmistakably mature, the child clearly smaller and childlike, "
+                "differing in age, height, face and body proportions",
                 pair,
             )
 
@@ -1175,6 +1185,8 @@ def build_visual_retry_prompt(
     else:
         retry_action = action
 
+    # Role problems are corrected in the role rule; style problems are corrected
+    # in the provider style tail. Neither rewrites the educational action.
     retry_role_rule = brief.role_rule
     if reason == "wrong_character_roles":
         retry_role_rule = _role_rule_for_wrong_character_roles(brief.role_rule, brief.rubric_id or rubric_id)
@@ -1303,6 +1315,13 @@ def _visual_qa_key_candidates(explicit_key: str = "") -> tuple[tuple[str, str], 
 
 
 def _runtime_visual_qa_key_candidates(explicit_key: str = "") -> tuple[tuple[str, str], ...]:
+    """Prefer the general key when run_publisher passed the same known dedicated QA key explicitly.
+
+    Production currently passes GEMINI_VISUAL_QA_API_KEY as the explicit key. If
+    that value is also the dedicated env key, trying it first only adds a known
+    403 before the general key. Direct callers without an explicit key retain the
+    historical order and test contract.
+    """
     candidates = list(_visual_qa_key_candidates(explicit_key))
     explicit = (explicit_key or "").strip()
     dedicated = os.getenv("GEMINI_VISUAL_QA_API_KEY", "").strip()
@@ -1569,7 +1588,8 @@ def evaluate_visual_quality(
         normalized = _enforce_visual_qa_hard_failures(parsed, rubric_id)
         normalized.update(_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger))
         print(
-            f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={normalized.get('status', 'skipped')}",
+            f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} "
+            f"status={normalized.get('status', 'skipped')}",
             flush=True,
         )
         return normalized
@@ -1672,6 +1692,7 @@ def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
     ppe_detected = _coerce_bool(result.get("ppe_detected"))
     has_text_field = "text_detected" in result
     text_detected = _coerce_bool(result.get("text_detected")) if has_text_field else None
+    # Absent or unverifiable style verdicts stay None so the check below fails closed.
     style_match = _coerce_bool(result.get("illustration_style_match"))
     has_topic_field = "object_topic_match" in result
     topic_match = _coerce_bool(result.get("object_topic_match")) if has_topic_field else None
@@ -1709,6 +1730,8 @@ def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
         normalized.update({"status": "fail", "pass": False, "reason": "object_contains_person"})
         return normalized
 
+    # The channel style is mandatory for object covers too: a photorealistic or
+    # CGI still life is safe on people/PPE/text and would otherwise publish.
     if style_match is False:
         normalized.update({"status": "fail", "pass": False, "reason": "object_style_mismatch"})
         return normalized
@@ -1716,6 +1739,9 @@ def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
         normalized.update({"status": "fail", "pass": False, "reason": "object_style_unknown"})
         return normalized
 
+    # Production object QA supplies this field whenever an expected object brief
+    # exists. Custom/offline legacy QA callables that omit the field keep their
+    # historical contract; an explicit false or unknown verdict fails closed.
     if has_topic_field and topic_match is not True:
         normalized.update({"status": "fail", "pass": False, "reason": "object_topic_mismatch"})
         return normalized
@@ -1781,6 +1807,9 @@ def _safe_object_visual_qa(
 
 
 OBJECT_SCENE_CATEGORIES = {
+    # Open books and printed cards are the main source of `object_contains_text`
+    # and `object_contains_person` rejections, so this category only allows a
+    # closed plain-cover book, blank cards and neutral wooden objects.
     "books_vocab_phrases_stories": (
         "one fully closed children’s book with a completely plain unmarked cover, solid-color blank cards, "
         "small wooden miniatures of everyday objects such as a ball, cup, toy car and apple"
@@ -1799,9 +1828,13 @@ OBJECT_SCENE_CATEGORIES = {
     ),
 }
 
+# Extra per-category constraints appended to both the compiled and the provider
+# prompt. The guard only carries what the category props above do not already
+# state, so the provider prompt stays inside OBJECT_PROVIDER_PROMPT_MAX_CHARS.
 OBJECT_SCENE_GUARDS = {
     "books_vocab_phrases_stories": (
-        "Book closed, cards blank; miniatures depict everyday objects only. All surfaces unmarked, no printed words, no glyph-like marks."
+        "Book closed, cards blank; miniatures depict everyday objects only. "
+        "All surfaces unmarked, no printed words, no glyph-like marks."
     ),
     "default": (
         "Book closed, cards blank; all surfaces unmarked, no printed words, no glyph-like marks."
@@ -1830,7 +1863,8 @@ def _object_scene_category(title: str, rubric_id: str, context_hint: str = "") -
         return "articulation_speech"
     bilingual_markers = (
         "билингв", "двуязыч", "два языка", "двух языках", "двух языков", "на двух языках", "домашний язык",
-        "родной язык и", "multilingual", "bilingual", "two languages", "home language",
+        "родной язык и",
+        "multilingual", "bilingual", "two languages", "home language",
     )
     if any(marker in value for marker in bilingual_markers):
         return "bilingual_languages"
@@ -1882,6 +1916,12 @@ def _object_provider_composition(category: str, variation_id: str) -> str:
 
 
 def build_object_provider_prompt(category: str, variation_id: str = "") -> str:
+    """Build the short object-only prompt actually sent to the image provider.
+
+    Keeps the channel style and the hard object-only constraints, and stays well
+    below the compiled prompt length so the model is not diluted by repetitions
+    or internal bookkeeping fields.
+    """
     resolved = category if category in OBJECT_SCENE_CATEGORIES else "default"
     objects = OBJECT_SCENE_CATEGORIES[resolved]
     guard = OBJECT_SCENE_GUARDS.get(resolved, "")
@@ -1907,6 +1947,7 @@ def build_object_only_visual_prompt(
     variation_key: str = "",
     context_hint: str = "",
 ) -> str:
+    """Build a people-free fallback prompt with stable per-publication variation."""
     del original_prompt
     category = _object_scene_category(title, rubric_id, context_hint=context_hint)
     objects = OBJECT_SCENE_CATEGORIES[category]
@@ -2028,7 +2069,8 @@ def _build_object_visual_fallback(
         )
         provider_prompt_len = len(_prepare_pollinations_prompt(object_prompt))
         print(
-            f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} trigger={_short_log_message(trigger)} category={category} variation={variation_id} provider_prompt_len={provider_prompt_len}",
+            f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} trigger={_short_log_message(trigger)} "
+            f"category={category} variation={variation_id} provider_prompt_len={provider_prompt_len}",
             flush=True,
         )
         try:
@@ -2040,7 +2082,8 @@ def _build_object_visual_fallback(
             last_exception_type = exc.__class__.__name__
             last_reason = _short_log_message(getattr(exc, "reason", exc), max_len=220) or "object_generation_failed"
             print(
-                f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} generation=failed reason={_short_log_message(last_reason)}",
+                f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} generation=failed "
+                f"reason={_short_log_message(last_reason)}",
                 flush=True,
             )
             continue
@@ -2055,7 +2098,14 @@ def _build_object_visual_fallback(
         last_object_qa = object_qa
         last_reason = str(object_qa.get("reason", "object_qa_rejected"))
         print(
-            f"[VISUAL][OBJECT_QA] attempt={object_attempt} status={object_qa.get('status', 'fail')} reason={_short_log_message(last_reason)} people_count={object_qa.get('people_count', 'unknown')} adult_count={object_qa.get('adult_count', 'unknown')} child_count={object_qa.get('child_count', 'unknown')} ppe_detected={object_qa.get('ppe_detected', 'unknown')} text_detected={object_qa.get('text_detected', 'unknown')} illustration_style_match={object_qa.get('illustration_style_match', 'unknown')}",
+            f"[VISUAL][OBJECT_QA] attempt={object_attempt} status={object_qa.get('status', 'fail')} "
+            f"reason={_short_log_message(last_reason)} "
+            f"people_count={object_qa.get('people_count', 'unknown')} "
+            f"adult_count={object_qa.get('adult_count', 'unknown')} "
+            f"child_count={object_qa.get('child_count', 'unknown')} "
+            f"ppe_detected={object_qa.get('ppe_detected', 'unknown')} "
+            f"text_detected={object_qa.get('text_detected', 'unknown')} "
+            f"illustration_style_match={object_qa.get('illustration_style_match', 'unknown')}",
             flush=True,
         )
         if _visual_qa_passed(object_qa):
@@ -2108,7 +2158,8 @@ def _build_object_visual_fallback(
             }
 
     print(
-        f"[VISUAL][TEXT_FALLBACK] trigger=object_qa_exhausted category={category} last_reason={_short_log_message(last_reason)}",
+        f"[VISUAL][TEXT_FALLBACK] trigger=object_qa_exhausted category={category} "
+        f"last_reason={_short_log_message(last_reason)}",
         flush=True,
     )
     fallback = build_fallback_cover_buffer(title=safe_title, day_key=day_key, fallback_title=fallback_title)
@@ -2176,7 +2227,8 @@ def _fallback_for_required_visual_qa(
 ) -> Tuple[BytesIO, Dict[str, str]]:
     qa_reason = _short_log_message(qa_result.get("reason"), max_len=220)
     print(
-        f"[VISUAL_FALLBACK] reason=qa_unavailable_for_required_rubric rubric={(rubric_id or '').strip().lower()} qa_reason={qa_reason}",
+        f"[VISUAL_FALLBACK] reason=qa_unavailable_for_required_rubric "
+        f"rubric={(rubric_id or '').strip().lower()} qa_reason={qa_reason}",
         flush=True,
     )
     retry_qa = (
@@ -2315,7 +2367,11 @@ def build_post_visual(
 
     if prompt:
         print(
-            f"[VISUAL_BRIEF] roles={_short_log_message(base_meta['visual_brief_roles'])} age={_short_log_message(base_meta['visual_brief_age'])} action={_short_log_message(base_meta['visual_brief_action'])} props={_short_log_message(base_meta['visual_brief_props'])} compiled_prompt_len={len(prompt)} provider_prompt_len={base_meta['provider_prompt_len']}",
+            f"[VISUAL_BRIEF] roles={_short_log_message(base_meta['visual_brief_roles'])} "
+            f"age={_short_log_message(base_meta['visual_brief_age'])} "
+            f"action={_short_log_message(base_meta['visual_brief_action'])} "
+            f"props={_short_log_message(base_meta['visual_brief_props'])} "
+            f"compiled_prompt_len={len(prompt)} provider_prompt_len={base_meta['provider_prompt_len']}",
             flush=True,
         )
         try:
@@ -2337,11 +2393,17 @@ def build_post_visual(
                 visual_qa_api_key=visual_qa_api_key,
             )
             print(
-                f"[VISUAL_QA] status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} people_count={first_qa.get('people_count', 'unknown')} adult_count={first_qa.get('adult_count', 'unknown')} child_count={first_qa.get('child_count', 'unknown')} ppe_detected={first_qa.get('ppe_detected', 'unknown')} attempt=1 limit={_visual_people_limit(rubric_id)}",
+                f"[VISUAL_QA] status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
+                f"people_count={first_qa.get('people_count', 'unknown')} "
+                f"adult_count={first_qa.get('adult_count', 'unknown')} "
+                f"child_count={first_qa.get('child_count', 'unknown')} "
+                f"ppe_detected={first_qa.get('ppe_detected', 'unknown')} "
+                f"attempt=1 limit={_visual_people_limit(rubric_id)}",
                 flush=True,
             )
             print(
-                f"[VISUAL][QA] attempt=1 status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))}",
+                f"[VISUAL][QA] attempt=1 status={first_qa.get('status')} "
+                f"reason={_short_log_message(first_qa.get('reason'))}",
                 flush=True,
             )
             first_meta = {
@@ -2424,11 +2486,17 @@ def build_post_visual(
                     visual_qa_api_key=visual_qa_api_key,
                 )
                 print(
-                    f"[VISUAL_QA] status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} people_count={retry_qa.get('people_count', 'unknown')} adult_count={retry_qa.get('adult_count', 'unknown')} child_count={retry_qa.get('child_count', 'unknown')} ppe_detected={retry_qa.get('ppe_detected', 'unknown')} attempt=2 limit={_visual_people_limit(rubric_id)}",
+                    f"[VISUAL_QA] status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "
+                    f"people_count={retry_qa.get('people_count', 'unknown')} "
+                    f"adult_count={retry_qa.get('adult_count', 'unknown')} "
+                    f"child_count={retry_qa.get('child_count', 'unknown')} "
+                    f"ppe_detected={retry_qa.get('ppe_detected', 'unknown')} "
+                    f"attempt=2 limit={_visual_people_limit(rubric_id)}",
                     flush=True,
                 )
                 print(
-                    f"[VISUAL][QA] attempt=2 status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))}",
+                    f"[VISUAL][QA] attempt=2 status={retry_qa.get('status')} "
+                    f"reason={_short_log_message(retry_qa.get('reason'))}",
                     flush=True,
                 )
                 retry_meta = {

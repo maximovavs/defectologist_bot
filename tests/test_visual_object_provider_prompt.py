@@ -296,3 +296,110 @@ class ObjectProviderPromptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from src.services.visual_pipeline import _enforce_object_visual_qa, evaluate_visual_quality
+
+
+class ObjectSemanticFallbackRegressionTest(unittest.TestCase):
+    def test_method_piggybank_human_retry_exhaustion_goes_directly_to_text(self):
+        qa_results = iter([
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "action_mismatch",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+                "ppe_detected": False,
+            },
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "photorealistic_imagery",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+                "ppe_detected": False,
+            },
+        ])
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"human-1"), {"attempts_used": "1"}),
+                (BytesIO(b"human-2"), {"attempts_used": "1"}),
+            ],
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Нейропсихологическое упражнение «Кулак-ребро-ладонь»",
+                day_key="2026-08-15",
+                image_prompt=(
+                    "the speech specialist demonstrates a fist-edge-palm hand sequence "
+                    "while the child copies the movements"
+                ),
+                rubric_id="method_piggybank",
+                audience="pros",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertNotIn(buffer.getvalue(), {b"human-1", b"human-2"})
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["fallback_stage"], "text")
+        self.assertEqual(meta["object_prompt_used"], "False")
+        self.assertEqual(meta["object_generation_status"], "not_run")
+        self.assertEqual(meta["object_generation_attempts"], "0")
+        self.assertEqual(meta["final_reason"], "method_piggybank_object_fallback_not_allowed")
+
+    def test_object_topic_mismatch_is_a_hard_failure(self):
+        result = _enforce_object_visual_qa({
+            "status": "pass",
+            "pass": True,
+            "reason": "ok",
+            "people_count": 0,
+            "adult_count": 0,
+            "child_count": 0,
+            "ppe_detected": False,
+            "text_detected": False,
+            "illustration_style_match": True,
+            "object_topic_match": False,
+        })
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "object_topic_mismatch")
+
+    def test_hearing_object_qa_rejects_styled_but_irrelevant_objects(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{
+                "content": {"parts": [{"text": (
+                    '{"pass": false, "reason": "action_mismatch", "people_count": 0, '
+                    '"adult_count": 0, "child_count": 0, "ppe_detected": false, '
+                    '"text_detected": false}'
+                )}]}
+            }]
+        }
+        expected = (
+            "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+            "Expected action: show clearly recognizable objects matching the selected object category; "
+            "generic abstract shapes or unrelated stationery do not match.\n"
+            "Allowed props: toy drum, small bell, wooden rhythm instruments, simple sound-wave shapes without text"
+        )
+
+        with patch("src.services.visual_pipeline.requests.post", return_value=response) as post:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                audience="parents",
+                gemini_api_key="offline-test-key",
+                expected_prompt=expected,
+                qa_mode="object",
+            )
+
+        sent_prompt = post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"].lower()
+        self.assertIn("generic abstract shapes", sent_prompt)
+        self.assertIn("toy drum", sent_prompt)
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "object_topic_mismatch")

@@ -468,6 +468,59 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(meta["object_generation_attempts"], "0")
         self.assertEqual(meta["final_reason"], "method_piggybank_object_fallback_not_allowed")
 
+    def test_method_piggybank_retry_qa_skipped_goes_directly_to_text(self):
+        qa_results = iter([
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "action_mismatch",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+                "ppe_detected": False,
+            },
+            {
+                "status": "skipped",
+                "pass": True,
+                "reason": "qa_timeout",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+                "ppe_detected": "unknown",
+            },
+        ])
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"human-1"), {"attempts_used": "1"}),
+                (BytesIO(b"human-2"), {"attempts_used": "1"}),
+            ],
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Нейропсихологическое упражнение «Кулак-ребро-ладонь»",
+                day_key="2026-08-15",
+                image_prompt=(
+                    "the speech specialist demonstrates a fist-edge-palm hand sequence "
+                    "while the child copies the movements"
+                ),
+                rubric_id="method_piggybank",
+                audience="pros",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertNotIn(buffer.getvalue(), {b"human-1", b"human-2"})
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["fallback_stage"], "text")
+        self.assertEqual(meta["object_prompt_used"], "False")
+        self.assertEqual(meta["object_generation_status"], "not_run")
+        self.assertEqual(meta["object_generation_attempts"], "0")
+        self.assertEqual(meta["human_qa_first_reason"], "action_mismatch")
+        self.assertEqual(meta["human_qa_retry_status"], "skipped")
+        self.assertEqual(meta["human_qa_retry_reason"], "qa_timeout")
+        self.assertEqual(meta["final_reason"], "method_piggybank_object_fallback_not_allowed")
+
     def test_object_fallback_categories_follow_title_topic(self):
         cases = (
             ("Положение языка при произнесении звука", "tip_of_day", "articulation_speech"),

@@ -52,12 +52,20 @@ POLLINATIONS_NEAR_ASPECT_TOLERANCE = 0.08
 # Keep this independently overridable, but use a safer default for production.
 GEMINI_VISUAL_QA_TIMEOUT_SECONDS = _env_int("GEMINI_VISUAL_QA_TIMEOUT_SECONDS", 25)
 DEFAULT_GEMINI_VISUAL_QA_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL = "gemini-2.5-flash"
 GEMINI_VISUAL_QA_MODEL = (
     os.getenv(
         "GEMINI_VISUAL_QA_MODEL",
         os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_VISUAL_QA_MODEL),
     ).strip()
     or DEFAULT_GEMINI_VISUAL_QA_MODEL
+)
+GEMINI_VISUAL_QA_FALLBACK_MODEL = (
+    os.getenv(
+        "GEMINI_VISUAL_QA_FALLBACK_MODEL",
+        os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL),
+    ).strip()
+    or DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL
 )
 VISUAL_QA_REQUIRED_RUBRICS_DEFAULT = (
     "method_piggybank,tip_of_day,play_and_speak,question_week,myth_fact,"
@@ -1338,6 +1346,32 @@ def _runtime_visual_qa_key_candidates(explicit_key: str = "") -> tuple[tuple[str
     return tuple(candidates)
 
 
+def _visual_qa_model_candidates(primary_model: str = "") -> tuple[str, ...]:
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for raw_model in (
+        primary_model or GEMINI_VISUAL_QA_MODEL,
+        GEMINI_VISUAL_QA_FALLBACK_MODEL,
+    ):
+        model = (raw_model or "").strip()
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        candidates.append(model)
+    return tuple(candidates)
+
+
+def _visual_qa_model_unavailable(status_code: int, response_text: str) -> bool:
+    text = (response_text or "").lower()
+    return status_code == 404 or (
+        status_code == 400
+        and any(
+            marker in text
+            for marker in ("model", "not found", "decommissioned", "unsupported", "does not exist")
+        )
+    )
+
+
 def _visual_qa_key_metadata(
     source_name: str = "",
     attempts: int = 0,
@@ -1369,6 +1403,7 @@ def evaluate_visual_quality(
     model: str = GEMINI_VISUAL_QA_MODEL,
     expected_prompt: str = "",
     qa_mode: str = "human",
+    _allow_model_fallback: bool = True,
 ) -> Dict[str, object]:
     """Run Gemini QA for an AI cover; missing QA credentials are non-blocking."""
     key_candidates = _runtime_visual_qa_key_candidates(gemini_api_key)
@@ -1558,6 +1593,29 @@ def evaluate_visual_quality(
             print(f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={status_label}", flush=True)
             if status_code in {401, 403}:
                 print(f"[WARN][VISUAL][QA_KEY] source={source_name} status={status_label}", flush=True)
+            response_text = str(getattr(response, "text", "") or "")
+            model_candidates = _visual_qa_model_candidates(model)
+            if (
+                _allow_model_fallback
+                and len(model_candidates) > 1
+                and _visual_qa_model_unavailable(status_code, response_text)
+            ):
+                fallback_model = model_candidates[1]
+                print(
+                    f"[VISUAL][QA_MODEL_FALLBACK] from={model} to={fallback_model} "
+                    f"trigger={status_label}",
+                    flush=True,
+                )
+                return evaluate_visual_quality(
+                    image_buffer,
+                    rubric_id=rubric_id,
+                    audience=audience,
+                    gemini_api_key=gemini_api_key,
+                    model=fallback_model,
+                    expected_prompt=expected_prompt,
+                    qa_mode=qa_mode,
+                    _allow_model_fallback=False,
+                )
             retryable_key_failure = status_code in {401, 403, 429} or 500 <= status_code <= 599
             last_trigger = status_label
             if retryable_key_failure and attempt < max_attempts:

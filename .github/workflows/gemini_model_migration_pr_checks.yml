@@ -1,0 +1,71 @@
+name: Gemini model migration offline checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/services/visual_pipeline.py"
+      - "tests/test_groq_model_migration.py"
+      - "tests/test_visual_fallback_policy.py"
+      - ".github/workflows/post.yml"
+      - ".github/workflows/gemini_model_migration_pr_checks.yml"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  GEMINI_MODEL: "gemini-3.7-flash"
+  GEMINI_FALLBACK_MODEL: "gemini-2.5-flash"
+  GEMINI_MODELS: "gemini-3.7-flash,gemini-2.5-flash"
+  GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"
+  GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-2.5-flash"
+
+jobs:
+  offline-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install existing runtime dependencies used by the tests
+        run: python -m pip install "requests>=2.31.0,<3" "Pillow>=10.3.0"
+
+      - name: Compile migration paths
+        run: |
+          python -m py_compile \
+            src/services/visual_pipeline.py \
+            tests/test_groq_model_migration.py \
+            tests/test_visual_fallback_policy.py
+
+      - name: Run Gemini model migration tests offline
+        env:
+          GEMINI_API_KEY: ""
+          GEMINI_VISUAL_QA_API_KEY: ""
+          GROQ_API_KEY: ""
+          TELEGRAM_BOT_TOKEN: ""
+          POLLINATIONS_TOKEN: ""
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import runpy
+          import sys
+          import types
+
+          sys.modules["pytest"] = types.ModuleType("pytest")
+          runpy.run_path("tests/test_groq_model_migration.py", run_name="__main__")
+          PY
+          python -m unittest -v \
+            -k gemini \
+            -k key \
+            -k timeout \
+            tests.test_visual_fallback_policy

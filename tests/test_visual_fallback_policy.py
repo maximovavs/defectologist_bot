@@ -2,16 +2,19 @@ from io import BytesIO
 from contextlib import redirect_stdout
 import os
 from io import StringIO
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
 
 from src.services.visual_pipeline import (
+    DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL,
     DEFAULT_GEMINI_VISUAL_QA_MODEL,
     VISUAL_STYLE_TAIL,
     _enforce_object_visual_qa,
     _object_scene_category,
+    _visual_qa_model_candidates,
     _visual_qa_key_candidates,
     build_object_only_visual_prompt,
     build_post_visual,
@@ -20,8 +23,9 @@ from src.services.visual_pipeline import (
 )
 
 
-def _qa_response(status_code, payload=None):
+def _qa_response(status_code, payload=None, text=""):
     response = Mock(status_code=status_code)
+    response.text = text
     response.json.return_value = payload or {
         "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false}'}]}}]
     }
@@ -61,6 +65,48 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertNotIn("temperature", generation_config)
         self.assertNotIn("topP", generation_config)
         self.assertNotIn("topK", generation_config)
+
+    def test_gemini_visual_qa_uses_25_fallback_when_primary_model_is_unavailable(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[
+                _qa_response(404, text="model not found"),
+                _qa_response(200),
+            ],
+        ) as request:
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-3.7-flash")
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL, "gemini-2.5-flash")
+        self.assertEqual(
+            _visual_qa_model_candidates(),
+            ("gemini-3.7-flash", "gemini-2.5-flash"),
+        )
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ],
+        )
+        for call in request.call_args_list:
+            generation_config = call.kwargs["json"]["generationConfig"]
+            self.assertEqual(generation_config, {"responseMimeType": "application/json"})
+            self.assertNotIn("temperature", generation_config)
+            self.assertNotIn("topP", generation_config)
+            self.assertNotIn("topK", generation_config)
+
+    def test_gemini_visual_qa_workflow_pins_primary_and_fallback_models(self):
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/post.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"', workflow)
+        self.assertIn(
+            'GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-2.5-flash"',
+            workflow,
+        )
 
     def test_visual_key_403_then_general_pass_keeps_human_image(self):
         with patch.dict(

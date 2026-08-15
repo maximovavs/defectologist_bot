@@ -51,7 +51,14 @@ POLLINATIONS_NEAR_ASPECT_TOLERANCE = 0.08
 # Visual QA routinely needs more than the old 12-second budget on GitHub-hosted runners.
 # Keep this independently overridable, but use a safer default for production.
 GEMINI_VISUAL_QA_TIMEOUT_SECONDS = _env_int("GEMINI_VISUAL_QA_TIMEOUT_SECONDS", 25)
-GEMINI_VISUAL_QA_MODEL = os.getenv("GEMINI_VISUAL_QA_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+DEFAULT_GEMINI_VISUAL_QA_MODEL = "gemini-3.7-flash"
+GEMINI_VISUAL_QA_MODEL = (
+    os.getenv(
+        "GEMINI_VISUAL_QA_MODEL",
+        os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_VISUAL_QA_MODEL),
+    ).strip()
+    or DEFAULT_GEMINI_VISUAL_QA_MODEL
+)
 VISUAL_QA_REQUIRED_RUBRICS_DEFAULT = (
     "method_piggybank,tip_of_day,play_and_speak,question_week,myth_fact,"
     "bilingual_corner,bilingual_parents,age_norms"
@@ -1469,7 +1476,10 @@ def evaluate_visual_quality(
                 {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}},
             ]
         }],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+        # Gemini 3.7 Flash no longer accepts the legacy temperature/top-p/top-k
+        # sampling controls. Keep the structured-output contract and let the
+        # stable model use its supported default thinking level.
+        "generationConfig": {"responseMimeType": "application/json"},
     }
     max_attempts = min(2, len(key_candidates))
     last_trigger = ""

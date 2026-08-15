@@ -12,6 +12,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PRIMARY_MODEL = "openai/gpt-oss-120b"
 FALLBACK_MODEL = "openai/gpt-oss-20b"
+GEMINI_PRIMARY_MODEL = "gemini-3.7-flash"
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
 
 
 def _deprecated_model_ids() -> tuple[str, str]:
@@ -49,7 +51,14 @@ def test_no_deprecated_model_ids_in_runtime_files() -> None:
 
 
 def _import_llm_fresh():
-    for name in ("GROQ_MODEL", "GROQ_FALLBACK_MODEL", "GROQ_MODELS"):
+    for name in (
+        "GROQ_MODEL",
+        "GROQ_FALLBACK_MODEL",
+        "GROQ_MODELS",
+        "GEMINI_MODEL",
+        "GEMINI_FALLBACK_MODEL",
+        "GEMINI_MODELS",
+    ):
         os.environ.pop(name, None)
     sys.path.insert(0, str(ROOT))
     sys.modules.pop("src.services.llm_generator", None)
@@ -74,11 +83,58 @@ class _FakeResponse:
         raise RuntimeError(f"{self.status_code}: {self.text}")
 
 
+class _FakeGeminiResponse(_FakeResponse):
+    def json(self) -> dict:
+        return {"candidates": [{"content": {"parts": [{"text": self._content}]}}]}
+
+
 def test_default_groq_model_config() -> None:
     llm = _import_llm_fresh()
     assert llm.GROQ_MODEL == PRIMARY_MODEL
     assert llm.GROQ_FALLBACK_MODEL == FALLBACK_MODEL
     assert llm.GROQ_MODELS == [PRIMARY_MODEL, FALLBACK_MODEL]
+
+
+def test_default_gemini_model_config() -> None:
+    llm = _import_llm_fresh()
+    assert llm.GEMINI_MODEL == GEMINI_PRIMARY_MODEL
+    assert llm.GEMINI_FALLBACK_MODEL == GEMINI_FALLBACK_MODEL
+    assert llm.GEMINI_MODELS == [GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL]
+
+
+def test_gemini_primary_unavailable_attempts_fallback_without_legacy_sampling() -> None:
+    llm = _import_llm_fresh()
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_post_json(url: str, headers: dict, payload: dict, timeout: int = 70):
+        model = url.split("/models/", 1)[1].split(":", 1)[0]
+        calls.append((model, payload))
+        if model == GEMINI_PRIMARY_MODEL:
+            return _FakeGeminiResponse(404, "model not found")
+        return _FakeGeminiResponse(200, "ok", "Готовый текст")
+
+    llm.LLM_MAX_RETRIES = 1
+    llm.LLM_CALL_DELAY_SEC = 0
+    llm._next_allowed_ts = 0.0
+    llm._post_json = fake_post_json
+
+    text = asyncio.run(llm.gemini_generate("prompt", "test-key"))
+
+    assert [model for model, _payload in calls] == [GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL]
+    assert text == "Готовый текст"
+    for _model, payload in calls:
+        assert set(payload) == {"contents"}
+        assert "temperature" not in payload
+        assert "top_p" not in payload
+        assert "top_k" not in payload
+
+
+def test_workflow_uses_gemini_37_with_25_fallback() -> None:
+    workflow = (ROOT / ".github/workflows/post.yml").read_text(encoding="utf-8")
+    assert 'GEMINI_MODEL: "gemini-3.7-flash"' in workflow
+    assert 'GEMINI_FALLBACK_MODEL: "gemini-2.5-flash"' in workflow
+    assert 'GEMINI_MODELS: "gemini-3.7-flash,gemini-2.5-flash"' in workflow
+    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"' in workflow
 
 
 def test_primary_failure_attempts_fallback_model() -> None:
@@ -189,6 +245,9 @@ def main() -> None:
     tests = [
         test_no_deprecated_model_ids_in_runtime_files,
         test_default_groq_model_config,
+        test_default_gemini_model_config,
+        test_gemini_primary_unavailable_attempts_fallback_without_legacy_sampling,
+        test_workflow_uses_gemini_37_with_25_fallback,
         test_primary_failure_attempts_fallback_model,
         test_both_groq_models_fail_without_crashing_generation,
     ]

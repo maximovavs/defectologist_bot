@@ -22,7 +22,8 @@ Patch 5.4.8 — compact pro_friendly structure to prevent truncation
 7) Источник и ссылка достраиваются кодом, если модель их пропустила.
 8) Валидатор мягкий, но для Monday/Sunday добавлены точечные rubric-specific checks.
 9) Для визуального пайплайна умеет генерировать короткий image prompt на английском языке.
-10) Минимальный fallback: GROQ_MODEL -> GROQ_FALLBACK_MODEL и GEMINI_MODELS.
+10) Минимальный fallback: GROQ_MODEL -> GROQ_FALLBACK_MODEL и
+    GEMINI_MODEL -> GEMINI_FALLBACK_MODEL.
 11) Очистка Markdown-артефактов перед Telegram HTML render.
 12) Sunday validator: no false-positive 'рас', softer min length, invalid Groq can fall back to Gemini.
 13) pro_friendly validator and safer specialist prompt for method_piggybank structure.
@@ -1854,12 +1855,18 @@ LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))
 
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_GROQ_FALLBACK_MODEL = "openai/gpt-oss-20b"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
 GROQ_MODEL = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
 GROQ_FALLBACK_MODEL = (
     os.getenv("GROQ_FALLBACK_MODEL", DEFAULT_GROQ_FALLBACK_MODEL).strip()
     or DEFAULT_GROQ_FALLBACK_MODEL
 )
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+GEMINI_FALLBACK_MODEL = (
+    os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL).strip()
+    or DEFAULT_GEMINI_FALLBACK_MODEL
+)
 
 _throttle_lock = asyncio.Lock()
 _next_allowed_ts = 0.0
@@ -1876,15 +1883,19 @@ def _unique_nonempty_models(*models: str) -> List[str]:
     return items
 
 
-def _parse_model_list(raw: str, single_fallback: str) -> List[str]:
+def _parse_model_list(raw: str, *fallback_models: str) -> List[str]:
     return _unique_nonempty_models(
         *((part.strip() for part in (raw or "").split(","))),
-        single_fallback,
+        *fallback_models,
     )
 
 
 GROQ_MODELS = _unique_nonempty_models(GROQ_MODEL, GROQ_FALLBACK_MODEL)
-GEMINI_MODELS = _parse_model_list(os.getenv("GEMINI_MODELS", ""), GEMINI_MODEL)
+GEMINI_MODELS = _parse_model_list(
+    os.getenv("GEMINI_MODELS", ""),
+    GEMINI_MODEL,
+    GEMINI_FALLBACK_MODEL,
+)
 
 
 async def _throttle() -> None:

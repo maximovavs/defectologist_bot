@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from src.services.visual_pipeline import (
+    DEFAULT_GEMINI_VISUAL_QA_MODEL,
     VISUAL_STYLE_TAIL,
     _enforce_object_visual_qa,
     _object_scene_category,
@@ -43,6 +44,24 @@ def _object_pass():
 
 
 class VisualFallbackPolicyTest(unittest.TestCase):
+    def test_gemini_37_visual_qa_payload_omits_legacy_sampling_controls(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=_qa_response(200)
+        ) as request:
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-3.7-flash")
+        self.assertEqual(result["status"], "pass")
+        self.assertIn(
+            "/models/gemini-3.7-flash:generateContent",
+            request.call_args.args[0],
+        )
+        generation_config = request.call_args.kwargs["json"]["generationConfig"]
+        self.assertEqual(generation_config, {"responseMimeType": "application/json"})
+        self.assertNotIn("temperature", generation_config)
+        self.assertNotIn("topP", generation_config)
+        self.assertNotIn("topK", generation_config)
+
     def test_visual_key_403_then_general_pass_keeps_human_image(self):
         with patch.dict(
             os.environ,

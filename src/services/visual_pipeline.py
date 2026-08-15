@@ -2521,3 +2521,240 @@ def build_post_visual(
         visual_qa_api_key=visual_qa_api_key,
         context_hint=original_prompt,
     )
+
+
+# Semantic object-fallback hardening. Keep the provider transport and key-selection
+# path untouched: object QA reuses the existing strict visual QA request, but with
+# an object-only expected action that makes semantic relevance mandatory.
+VISUAL_QA_HARD_REASONS = frozenset((*VISUAL_QA_HARD_REASONS, "object_topic_mismatch"))
+
+_BASE_EVALUATE_VISUAL_QUALITY = evaluate_visual_quality
+_BASE_ENFORCE_OBJECT_VISUAL_QA = _enforce_object_visual_qa
+_BASE_BUILD_OBJECT_VISUAL_FALLBACK = _build_object_visual_fallback
+
+
+def evaluate_visual_quality(
+    image_buffer: BytesIO,
+    rubric_id: str = "",
+    audience: str = "",
+    gemini_api_key: str = "",
+    model: str = GEMINI_VISUAL_QA_MODEL,
+    expected_prompt: str = "",
+    qa_mode: str = "human",
+) -> Dict[str, object]:
+    if (qa_mode or "").strip().lower() != "object":
+        return _BASE_EVALUATE_VISUAL_QUALITY(
+            image_buffer,
+            rubric_id=rubric_id,
+            audience=audience,
+            gemini_api_key=gemini_api_key,
+            model=model,
+            expected_prompt=expected_prompt,
+            qa_mode=qa_mode,
+        )
+
+    result = _BASE_EVALUATE_VISUAL_QUALITY(
+        image_buffer,
+        rubric_id="",
+        audience=audience,
+        gemini_api_key=gemini_api_key,
+        model=model,
+        expected_prompt=expected_prompt,
+        qa_mode="human",
+    )
+    reason = _normalize_visual_qa_reason(result.get("reason"))
+    normalized = {**result, "reason": reason}
+
+    if reason == "action_mismatch":
+        normalized.update(
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "object_topic_mismatch",
+                "object_topic_match": False,
+                "illustration_style_match": True,
+            }
+        )
+        return normalized
+
+    if _visual_qa_passed(normalized):
+        normalized["object_topic_match"] = True
+        normalized["illustration_style_match"] = True
+        return normalized
+
+    if _is_visual_style_retry_reason(reason):
+        normalized["illustration_style_match"] = False
+    else:
+        # The strict shared QA already checked the watercolor/gouache contract.
+        # Preserve more specific safety/count reasons instead of replacing them
+        # with object_style_unknown solely because the shared schema has no style key.
+        normalized["illustration_style_match"] = True
+    return normalized
+
+
+def _enforce_object_visual_qa(result: Dict[str, object]) -> Dict[str, object]:
+    if "object_topic_match" in result:
+        topic_match = _coerce_bool(result.get("object_topic_match"))
+        if topic_match is not True:
+            return {
+                **result,
+                "status": "fail",
+                "pass": False,
+                "reason": "object_topic_mismatch",
+                "object_topic_match": False,
+            }
+    normalized = _BASE_ENFORCE_OBJECT_VISUAL_QA(result)
+    if _normalize_visual_qa_reason(normalized.get("reason")) == "action_mismatch":
+        normalized.update(
+            {
+                "status": "fail",
+                "pass": False,
+                "reason": "object_topic_mismatch",
+                "object_topic_match": False,
+            }
+        )
+    return normalized
+
+
+def _safe_object_visual_qa(
+    qa_fn: Callable[..., Dict[str, object]],
+    image_buffer: BytesIO,
+    *,
+    audience: str,
+    category: str,
+    visual_qa_api_key: str = "",
+) -> Dict[str, object]:
+    objects = OBJECT_SCENE_CATEGORIES.get(category, OBJECT_SCENE_CATEGORIES["default"])
+    expected_prompt = (
+        "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+        "Expected action: show clearly recognizable objects matching the selected object category and allowed props; "
+        "generic abstract shapes, unrecognizable blobs, or unrelated objects do not match.\n"
+        "Expected style: 2D hand-painted watercolor and gouache illustration, not photography or 3D render.\n"
+        f"Allowed props: {objects}"
+    )
+
+    if qa_fn is evaluate_visual_quality:
+        try:
+            result = qa_fn(
+                image_buffer,
+                rubric_id="",
+                audience=audience,
+                expected_prompt=expected_prompt,
+                gemini_api_key=visual_qa_api_key,
+                qa_mode="object",
+            )
+        except Exception as exc:
+            result = {
+                "status": "skipped",
+                "pass": True,
+                "reason": f"qa_unavailable:{exc.__class__.__name__}",
+                "people_count": "unknown",
+                "adult_count": "unknown",
+                "child_count": "unknown",
+                "ppe_detected": "unknown",
+                "text_detected": "unknown",
+                "illustration_style_match": "unknown",
+            }
+    else:
+        result = _safe_visual_qa(
+            qa_fn,
+            image_buffer,
+            rubric_id="",
+            audience=audience,
+            expected_prompt=expected_prompt,
+            visual_qa_api_key=visual_qa_api_key,
+        )
+    return _enforce_object_visual_qa(result)
+
+
+def _build_object_visual_fallback(
+    *,
+    safe_title: str,
+    day_key: str,
+    fallback_title: str,
+    base_meta: Dict[str, str],
+    title: str,
+    rubric_id: str,
+    pollinations_token: str,
+    trigger: str,
+    audience: str = "",
+    visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
+    visual_qa_api_key: str = "",
+    context_hint: str = "",
+    first_qa: Dict[str, object] | None = None,
+    retry_qa: Dict[str, object] | None = None,
+) -> Tuple[BytesIO, Dict[str, str]]:
+    rubric = (rubric_id or "").strip().lower()
+    retry_exhausted = retry_qa is not None or str(trigger or "").startswith("visual_retry_failed:")
+    if rubric == "method_piggybank" and retry_exhausted:
+        qa_result = retry_qa or first_qa or {}
+        print(
+            "[VISUAL][TEXT_FALLBACK] trigger=method_piggybank_human_qa_exhausted "
+            f"last_reason={_short_log_message(trigger)}",
+            flush=True,
+        )
+        fallback = build_fallback_cover_buffer(
+            title=safe_title,
+            day_key=day_key,
+            fallback_title=fallback_title,
+        )
+        return fallback, {
+            **base_meta,
+            "mode": "text_fallback",
+            "text_fallback_used": "True",
+            "visual_source": "text_card",
+            "fallback_stage": "text",
+            "fallback_trigger": str(trigger or "visual_quality_rejected"),
+            "reason": str(trigger or "visual_quality_rejected"),
+            "final_reason": "method_piggybank_object_fallback_not_allowed",
+            "fallback_reason": str(trigger or "visual_quality_rejected"),
+            "visual_retry_used": "True",
+            "visual_qa": str(qa_result.get("status", "fail")),
+            "visual_qa_status": str(qa_result.get("status", "fail")),
+            "visual_qa_reason": str(qa_result.get("reason", trigger or "visual_quality_rejected")),
+            "visual_qa_people_count": str(qa_result.get("people_count", "unknown")),
+            "visual_qa_adult_count": str(qa_result.get("adult_count", "unknown")),
+            "visual_qa_child_count": str(qa_result.get("child_count", "unknown")),
+            "visual_qa_ppe_detected": str(qa_result.get("ppe_detected", "unknown")),
+            "visual_qa_text_detected": str(qa_result.get("text_detected", "unknown")),
+            "visual_qa_attempts": "2",
+            "human_qa_first_status": str((first_qa or {}).get("status", "fail")),
+            "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
+            "human_qa_retry_status": str((retry_qa or {}).get("status", "fail")),
+            "human_qa_retry_reason": str((retry_qa or {}).get("reason", trigger or "visual_retry_failed")),
+            "human_qa_key_source": str(qa_result.get("human_qa_key_source", "")),
+            "human_qa_key_attempts": str(qa_result.get("human_qa_key_attempts", "0")),
+            "human_qa_key_fallback_used": str(qa_result.get("human_qa_key_fallback_used", "False")),
+            "human_qa_key_fallback_trigger": str(qa_result.get("human_qa_key_fallback_trigger", "")),
+            "object_prompt_used": "False",
+            "object_scene_category": "",
+            "object_generation_status": "not_run",
+            "object_generation_attempts": "0",
+            "object_visual_variation": "",
+            "object_qa_attempts": "0",
+            "object_qa_status": "not_run",
+            "object_qa_reason": "object_fallback_not_allowed",
+            "object_qa_people_count": "unknown",
+            "object_qa_adult_count": "unknown",
+            "object_qa_child_count": "unknown",
+            "object_qa_ppe_detected": "unknown",
+            "object_qa_text_detected": "unknown",
+            "object_qa_style_match": "unknown",
+        }
+
+    return _BASE_BUILD_OBJECT_VISUAL_FALLBACK(
+        safe_title=safe_title,
+        day_key=day_key,
+        fallback_title=fallback_title,
+        base_meta=base_meta,
+        title=title,
+        rubric_id=rubric_id,
+        pollinations_token=pollinations_token,
+        trigger=trigger,
+        audience=audience,
+        visual_qa_fn=visual_qa_fn,
+        visual_qa_api_key=visual_qa_api_key,
+        context_hint=context_hint,
+        first_qa=first_qa,
+        retry_qa=retry_qa,
+    )

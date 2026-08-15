@@ -8,12 +8,14 @@ from src.services.visual_pipeline import (
     OBJECT_SCENE_MARKER_TEMPLATE,
     PollinationsImageError,
     VISUAL_STYLE_TAIL,
+    _enforce_object_visual_qa,
     _object_scene_category,
     _pollinations_request_once,
     _prepare_pollinations_prompt,
     build_object_only_visual_prompt,
     build_object_provider_prompt,
     build_post_visual,
+    evaluate_visual_quality,
 )
 
 
@@ -239,7 +241,6 @@ class ObjectProviderPromptTest(unittest.TestCase):
         self.assertTrue(meta["object_visual_variation"])
         self.assertNotIn(meta["object_visual_variation"], _prepare_pollinations_prompt(prompts[0]))
 
-
     def test_object_provider_prompt_has_no_photographic_composition_language(self):
         for category in OBJECT_SCENE_CATEGORIES:
             for variation_id in _variation_ids(12):
@@ -292,6 +293,113 @@ class ObjectProviderPromptTest(unittest.TestCase):
                     self.assertIn(phrase, provider)
                 self.assertNotIn("open book", provider)
                 self.assertNotIn("picture book", provider)
+
+
+class ObjectSemanticFallbackRegressionTest(unittest.TestCase):
+    def test_object_topic_mismatch_is_a_hard_failure(self):
+        result = _enforce_object_visual_qa({
+            "status": "pass",
+            "pass": True,
+            "reason": "ok",
+            "people_count": 0,
+            "adult_count": 0,
+            "child_count": 0,
+            "ppe_detected": False,
+            "text_detected": False,
+            "illustration_style_match": True,
+            "object_topic_match": False,
+        })
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "object_topic_mismatch")
+
+    def test_object_topic_match_can_pass_with_existing_safety_and_style_gates(self):
+        result = _enforce_object_visual_qa({
+            "status": "pass",
+            "pass": True,
+            "reason": "ok",
+            "people_count": 0,
+            "adult_count": 0,
+            "child_count": 0,
+            "ppe_detected": False,
+            "text_detected": False,
+            "illustration_style_match": True,
+            "object_topic_match": True,
+        })
+
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+
+    def test_hearing_object_qa_rejects_styled_but_irrelevant_objects(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{
+                "content": {"parts": [{"text": (
+                    '{"pass": true, "reason": "ok", "people_count": 0, '
+                    '"adult_count": 0, "child_count": 0, "ppe_detected": false, '
+                    '"text_detected": false, "illustration_style_match": true, '
+                    '"object_topic_match": false}'
+                )}]}
+            }]
+        }
+        expected = (
+            "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+            "Expected action: show clearly recognizable objects matching the selected object category and allowed props; "
+            "generic abstract shapes, unrecognizable blobs, or unrelated dominant objects do not match.\n"
+            "Expected style: 2D hand-painted watercolor and gouache illustration, not photography or 3D render.\n"
+            "Allowed props: toy drum, small bell, wooden rhythm instruments, simple sound-wave shapes without text"
+        )
+
+        with patch("src.services.visual_pipeline.requests.post", return_value=response) as post:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                audience="parents",
+                gemini_api_key="offline-test-key",
+                expected_prompt=expected,
+                qa_mode="object",
+            )
+
+        sent_prompt = post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"].lower()
+        self.assertIn("object_topic_match", sent_prompt)
+        self.assertIn("generic abstract shapes", sent_prompt)
+        self.assertIn("toy drum", sent_prompt)
+        self.assertIn("do not evaluate the educational topic.", sent_prompt)
+        self.assertNotIn("for parent rubrics", sent_prompt)
+        enforced = _enforce_object_visual_qa(result)
+        self.assertEqual(enforced["status"], "fail")
+        self.assertFalse(enforced["pass"])
+        self.assertEqual(enforced["reason"], "object_topic_mismatch")
+
+    def test_object_qa_with_expected_brief_fails_closed_when_topic_verdict_is_missing(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{
+                "content": {"parts": [{"text": (
+                    '{"pass": true, "reason": "ok", "people_count": 0, '
+                    '"adult_count": 0, "child_count": 0, "ppe_detected": false, '
+                    '"text_detected": false, "illustration_style_match": true}'
+                )}]}
+            }]
+        }
+        expected = (
+            "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+            "Expected action: show clearly recognizable objects matching the selected object category and allowed props.\n"
+            "Allowed props: toy drum, small bell"
+        )
+
+        with patch("src.services.visual_pipeline.requests.post", return_value=response):
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                gemini_api_key="offline-test-key",
+                expected_prompt=expected,
+                qa_mode="object",
+            )
+
+        enforced = _enforce_object_visual_qa(result)
+        self.assertEqual(enforced["status"], "fail")
+        self.assertFalse(enforced["pass"])
+        self.assertEqual(enforced["reason"], "object_topic_mismatch")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - "src/services/llm_generator.py"
       - "src/services/visual_pipeline.py"
       - "tests/test_groq_model_migration.py"
       - "tests/test_visual_fallback_policy.py"

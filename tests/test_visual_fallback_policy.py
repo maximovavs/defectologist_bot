@@ -97,6 +97,71 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             self.assertNotIn("topP", generation_config)
             self.assertNotIn("topK", generation_config)
 
+    def test_gemini_visual_qa_503_uses_fallback_model_on_same_key_before_key_fallback(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(503), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                gemini_api_key="VISUAL_SECRET",
+            )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["human_qa_key_source"], "general")
+        self.assertEqual(result["human_qa_key_attempts"], "1")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ],
+        )
+        self.assertEqual(
+            [call.kwargs["headers"]["x-goog-api-key"] for call in request.call_args_list],
+            ["GENERAL_SECRET", "GENERAL_SECRET"],
+        )
+
+    def test_gemini_visual_qa_503_exhausts_model_then_uses_next_key_without_repeating_pair(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(503), _qa_response(503), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                gemini_api_key="VISUAL_SECRET",
+            )
+
+        urls = [call.args[0] for call in request.call_args_list]
+        keys = [call.kwargs["headers"]["x-goog-api-key"] for call in request.call_args_list]
+        pairs = list(zip(urls, keys))
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["human_qa_key_source"], "explicit")
+        self.assertEqual(result["human_qa_key_attempts"], "2")
+        self.assertEqual(result["human_qa_key_fallback_used"], "True")
+        self.assertEqual(result["human_qa_key_fallback_trigger"], "http_503")
+        self.assertEqual(
+            urls,
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ],
+        )
+        self.assertEqual(keys, ["GENERAL_SECRET", "GENERAL_SECRET", "VISUAL_SECRET"])
+        self.assertEqual(len(pairs), len(set(pairs)))
+
     def test_gemini_visual_qa_workflow_pins_primary_and_fallback_models(self):
         workflow = (
             Path(__file__).resolve().parents[1] / ".github/workflows/post.yml"

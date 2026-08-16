@@ -1363,7 +1363,7 @@ def _visual_qa_model_candidates(primary_model: str = "") -> tuple[str, ...]:
 
 def _visual_qa_model_unavailable(status_code: int, response_text: str) -> bool:
     text = (response_text or "").lower()
-    return status_code == 404 or (
+    return status_code in {404, 503} or (
         status_code == 400
         and any(
             marker in text

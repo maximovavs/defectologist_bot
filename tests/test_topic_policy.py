@@ -140,6 +140,26 @@ class TopicPolicyTest(unittest.TestCase):
             (),
         )
 
+    def test_speech_and_language_phrase_alone_is_not_hearing(self):
+        topics = detect_evidence_topics(
+            "Speech and language development can be supported through conversation and shared reading."
+        )
+        self.assertNotIn("hearing_and_speech", topics)
+
+    def test_hearing_specific_cues_still_detect_hearing(self):
+        examples = (
+            "A hearing screening can identify children who need further assessment.",
+            "Hearing loss may affect access to spoken language.",
+            "Понаблюдайте за реакцией на звук, а проверку слуха проводит специалист.",
+        )
+        for evidence in examples:
+            with self.subTest(evidence=evidence):
+                self.assertIn("hearing_and_speech", detect_evidence_topics(evidence))
+
+    def test_age_norms_rotation_excludes_everyday_communication(self):
+        self.assertNotIn("everyday_communication", RUBRIC_TOPIC_ROTATION["age_norms"])
+        self.assertIn("hearing_and_speech", RUBRIC_TOPIC_ROTATION["age_norms"])
+
     def test_thursday_config_and_diagnostics_are_topic_aware(self):
         cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
         self.assertNotIn("#билингвизм", cfg["channel"]["hashtags"])

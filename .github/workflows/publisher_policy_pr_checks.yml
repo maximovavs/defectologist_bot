@@ -99,7 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 10
+          fetch-depth: 11
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -119,23 +119,25 @@ jobs:
           PUBLISHER="e95efe5a0ac814aab57f24fe3346838ffd9d3707"
           INDENTATION="95b4a18f7b905dff973b6c63539cff766da79ad7"
           REGRESSION="4f3095c42c66eb7732bc489765ae4def6d879df3"
+          TRANSPORT="f34abd14e9dae04653e45de1c9806dd124e856e5"
           test "$GITHUB_REF_NAME" = "agent/p1b-myth-fact-fidelity"
-          test "$(git rev-parse HEAD^)" = "$REGRESSION"
-          test "$(git rev-parse HEAD^^)" = "$INDENTATION"
-          test "$(git rev-parse HEAD^^^)" = "$PUBLISHER"
-          test "$(git rev-parse HEAD^^^^)" = "$GEMINI"
-          test "$(git rev-parse HEAD^^^^^)" = "$CLEANUP"
-          test "$(git rev-parse HEAD^^^^^^)" = "$RECOVERY"
-          test "$(git rev-parse HEAD^^^^^^^)" = "$CORRECTIVE"
-          test "$(git rev-parse HEAD^^^^^^^^)" = "$FIRST"
-          test "$(git rev-parse HEAD^^^^^^^^^)" = "$BASE"
+          test "$(git rev-parse HEAD^)" = "$TRANSPORT"
+          test "$(git rev-parse HEAD^^)" = "$REGRESSION"
+          test "$(git rev-parse HEAD^^^)" = "$INDENTATION"
+          test "$(git rev-parse HEAD^^^^)" = "$PUBLISHER"
+          test "$(git rev-parse HEAD^^^^^)" = "$GEMINI"
+          test "$(git rev-parse HEAD^^^^^^)" = "$CLEANUP"
+          test "$(git rev-parse HEAD^^^^^^^)" = "$RECOVERY"
+          test "$(git rev-parse HEAD^^^^^^^^)" = "$CORRECTIVE"
+          test "$(git rev-parse HEAD^^^^^^^^^)" = "$FIRST"
+          test "$(git rev-parse HEAD^^^^^^^^^^)" = "$BASE"
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
-          test "$(git rev-list --count "$BASE"..HEAD)" = "9"
-          test "$(git rev-list --count "$BASE"..HEAD^)" = "8"
+          test "$(git rev-list --count "$BASE"..HEAD)" = "10"
+          test "$(git rev-list --count "$BASE"..HEAD^)" = "9"
           test -z "$(git status --porcelain)"
           test "$(git diff --name-only "$BASE"..HEAD^)" = ".github/workflows/publisher_policy_pr_checks.yml"
           test "$(git diff --name-only "$BASE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
-          test "$(git diff --name-only "$REGRESSION"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
+          test "$(git diff --name-only "$TRANSPORT"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
 
       - name: Apply deterministic P1B patch
         shell: bash
@@ -479,7 +481,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git restore --staged .github/workflows/publisher_policy_pr_checks.yml
+          git restore --source=HEAD --worktree .github/workflows/publisher_policy_pr_checks.yml
+          CORE_ACTUAL="$(git diff --cached --name-only HEAD -- | sort)"
+          CORE_EXPECTED="$(printf '%s\n' \
+            'src/publisher/run_publisher.py' \
+            'src/services/llm_generator.py' \
+            'tests/test_myth_fact_fidelity.py' | sort)"
+          test "$CORE_ACTUAL" = "$CORE_EXPECTED"
+          CORE_STATUS_PATHS="$(git status --porcelain --untracked-files=all | sed -E 's/^.. //' | awk '!/^src\/publisher\/__pycache__\/.*\.pyc$/ && !/^src\/services\/__pycache__\/.*\.pyc$/ && !/^tests\/__pycache__\/.*\.pyc$/' | sort)"
+          test "$CORE_STATUS_PATHS" = "$CORE_EXPECTED"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Enforce myth fact claim fidelity"
+          git commit -m "Enforce myth fact claim fidelity core"
           git push origin HEAD:agent/p1b-myth-fact-fidelity

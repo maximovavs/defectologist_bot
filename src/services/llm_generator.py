@@ -874,6 +874,16 @@ PARENT_ORAL_SAFETY_FORMATS = {
 }
 
 PARENT_RUSSIAN_PHONEME_FORMATS = set(PARENT_ORAL_SAFETY_FORMATS)
+PARENT_AGE_UNIT_PATTERN = (
+    r"(?:мес(?:\.|яц(?:а|ев)?)?|месяц(?:а|ев)?|год(?:а)?|лет|months?|mos?\.?|years?|yrs?\.?)"
+)
+
+
+def _age_value_to_months(value: int, unit: str) -> int:
+    normalized = (unit or "").strip().lower().replace("ё", "е")
+    if normalized.startswith(("мес", "month", "mo")):
+        return value
+    return value * 12
 
 
 @dataclass(frozen=True)
@@ -891,17 +901,61 @@ def _parse_parent_age_range(text: str) -> ParsedAgeRange | None:
     value = raw_value.lower().replace("ё", "е")
     value = re.sub(r"[‐‑‒–—−]", "-", value)
     value = re.sub(r"\s+", " ", value)
-    unit = r"(?:мес(?:яц(?:а|ев)?)?\.?|месяц(?:а|ев)?|год(?:а|лет)?|лет)"
-    range_match = re.search(rf"(?:(?:от\s*)?(\d+)\s*(?:до|-)?\s*(\d+))\s*({unit})", value)
-    if not range_match:
-        return ParsedAgeRange(None, None, raw_value)
-    minimum, maximum = int(range_match.group(1)), int(range_match.group(2))
-    if range_match.group(3).startswith(("год", "лет")):
-        minimum *= 12
-        maximum *= 12
-    if minimum > maximum:
-        minimum, maximum = maximum, minimum
-    return ParsedAgeRange(minimum, maximum, raw_value)
+    range_match = re.search(
+        rf"(?:(?:от\s*)?(\d{{1,3}})\s*(?:до|-|to)\s*(\d{{1,3}}))\s*({PARENT_AGE_UNIT_PATTERN})",
+        value,
+    )
+    if range_match:
+        minimum = _age_value_to_months(int(range_match.group(1)), range_match.group(3))
+        maximum = _age_value_to_months(int(range_match.group(2)), range_match.group(3))
+        if minimum > maximum:
+            minimum, maximum = maximum, minimum
+        return ParsedAgeRange(minimum, maximum, raw_value)
+
+    single_match = re.search(rf"(?<!\d)(\d{{1,3}})\s*({PARENT_AGE_UNIT_PATTERN})", value)
+    if single_match:
+        exact = _age_value_to_months(int(single_match.group(1)), single_match.group(2))
+        return ParsedAgeRange(exact, exact, raw_value)
+
+    return ParsedAgeRange(None, None, raw_value)
+
+
+def _extract_evidence_age_ranges(evidence_text: str) -> set[tuple[int, int]]:
+    normalized = (evidence_text or "").lower().replace("ё", "е")
+    normalized = re.sub(r"[‐‑‒–—−]", "-", normalized)
+    ranges: set[tuple[int, int]] = set()
+    masked = list(normalized)
+    range_pattern = re.compile(
+        rf"(?<!\d)(\d{{1,3}})\s*(?:-|до|to)\s*(\d{{1,3}})\s*({PARENT_AGE_UNIT_PATTERN})",
+        flags=re.IGNORECASE,
+    )
+    for match in range_pattern.finditer(normalized):
+        minimum = _age_value_to_months(int(match.group(1)), match.group(3))
+        maximum = _age_value_to_months(int(match.group(2)), match.group(3))
+        if minimum > maximum:
+            minimum, maximum = maximum, minimum
+        ranges.add((minimum, maximum))
+        for index in range(match.start(), match.end()):
+            masked[index] = " "
+
+    masked_text = "".join(masked)
+    single_pattern = re.compile(
+        rf"(?<!\d)(\d{{1,3}})\s*({PARENT_AGE_UNIT_PATTERN})",
+        flags=re.IGNORECASE,
+    )
+    for match in single_pattern.finditer(masked_text):
+        exact = _age_value_to_months(int(match.group(1)), match.group(2))
+        ranges.add((exact, exact))
+    return ranges
+
+
+def _validate_parent_age_evidence_output(text: str, evidence_text: str) -> Tuple[bool, str]:
+    parsed = _parse_parent_age_range(text)
+    if not parsed or parsed.min_months is None or parsed.max_months is None:
+        return True, "ok"
+    if (parsed.min_months, parsed.max_months) in _extract_evidence_age_ranges(evidence_text):
+        return True, "ok"
+    return False, "parent_age_not_grounded"
 
 
 PARENT_CONTENT_FORMATS = frozenset(PARENT_ORAL_SAFETY_FORMATS)
@@ -1856,6 +1910,7 @@ def _validate_output(
 
     if rf in PARENT_CONTENT_FORMATS:
         for validator in (
+            lambda value: _validate_parent_age_evidence_output(value, evidence_text),
             _validate_parent_age_range_width,
             _validate_parent_age_action_fit,
             _validate_parent_hearing_inference_output,
@@ -3096,10 +3151,10 @@ async def generate_image_prompt_async(
         return compiled, bool(compiled), compile_reason
 
     async def _try_with_repair(
-        generate: Callable[[str], object],
+        generate,
         provider_name: str,
     ) -> Tuple[str, bool, str]:
-        raw = await generate(prompt)  # type: ignore[misc]
+        raw = await generate(prompt)
         compiled, ok, reason = await _compile_raw(str(raw))
         if ok:
             return compiled, True, f"ok:{provider_name}"
@@ -3112,7 +3167,7 @@ async def generate_image_prompt_async(
             f"{prompt}\nThe previous response was invalid ({reason}). "
             f"{repair_hint} Repair it once. Return only valid JSON with action, setting, and props."
         )
-        repaired_raw = await generate(repair_prompt)  # type: ignore[misc]
+        repaired_raw = await generate(repair_prompt)
         repaired, repaired_ok, repaired_reason = await _compile_raw(str(repaired_raw))
         if repaired_ok:
             return repaired, True, f"ok:{provider_name}_retry"
@@ -3265,6 +3320,7 @@ def build_pro_friendly_repair_prompt(
 
 
 PARENT_CONTENT_REPAIR_REASONS = {
+    "parent_age_not_grounded",
     "parent_age_range_too_broad",
     "parent_age_action_mismatch",
     "parent_nonobservable_benefit",
@@ -3275,7 +3331,10 @@ PARENT_CONTENT_REPAIR_REASONS = {
 }
 
 PARENT_CONTENT_REPAIR_INSTRUCTION = (
-    "Исправь только указанную проблему, сохранив EVIDENCE и формат. Сузь возраст до подходящего конкретному действию; "
+    "Исправь только указанную проблему, сохранив EVIDENCE и формат. Для строки 👶 Возраст: используй только точный "
+    "числовой возрастной диапазон, явно присутствующий в EVIDENCE; не сужай и не расширяй его. Если формат допускает "
+    "отсутствие числового возраста и в EVIDENCE нет числового age anchor — убери числовой возраст вместо догадки. "
+    "Сузь возраст до подходящего конкретному действию только когда такой более узкий диапазон отдельно указан в EVIDENCE; "
     "не требуй от младенца слов, фраз или открытого ответа; замени обещания и механизмы на наблюдаемую реакцию; "
     "не называй игру проверкой слуха; не переноси английские звуки, примеры или нормы в русский текст; "
     "объедини близкие действия, чтобы осталось не более четырех нумерованных шагов. Не добавляй новых материалов, примеров, чисел или упражнений."
@@ -3667,6 +3726,9 @@ async def generate_post_plain_from_evidence_async(
                 groq_err = f"invalid_groq_retry:{reason2}"
             else:
                 groq_err = f"invalid_groq:{reason}"
+
+            if reason == "parent_age_not_grounded":
+                return "", False, groq_err
 
             if prov == "groq":
                 return "", False, groq_err

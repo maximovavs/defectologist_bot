@@ -259,7 +259,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             self.assertEqual(result["human_qa_key_source"], "general")
             self.assertEqual(request.call_count, 2)
 
-    def test_timeout_can_use_next_key_once(self):
+    def test_timeout_uses_fallback_model_on_same_general_key_before_key_fallback(self):
         with patch.dict(
             os.environ,
             {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
@@ -268,12 +268,94 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             "src.services.visual_pipeline.requests.post",
             side_effect=[requests.Timeout(), _qa_response(200)],
         ) as request:
-            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                gemini_api_key="VISUAL_SECRET",
+            )
 
+        urls = [call.args[0] for call in request.call_args_list]
+        keys = [call.kwargs["headers"]["x-goog-api-key"] for call in request.call_args_list]
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["human_qa_key_source"], "general")
+        self.assertEqual(result["human_qa_key_attempts"], "1")
+        self.assertEqual(result["human_qa_key_fallback_used"], "False")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            urls,
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ],
+        )
+        self.assertEqual(keys, ["GENERAL_SECRET", "GENERAL_SECRET"])
+
+    def test_timeout_exhausts_model_then_uses_next_key_without_repeating_pair(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), requests.Timeout(), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                gemini_api_key="VISUAL_SECRET",
+            )
+
+        urls = [call.args[0] for call in request.call_args_list]
+        keys = [call.kwargs["headers"]["x-goog-api-key"] for call in request.call_args_list]
+        pairs = list(zip(urls, keys))
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["human_qa_key_source"], "explicit")
+        self.assertEqual(result["human_qa_key_attempts"], "2")
+        self.assertEqual(result["human_qa_key_fallback_used"], "True")
+        self.assertEqual(result["human_qa_key_fallback_trigger"], "timeout")
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(
+            urls,
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ],
+        )
+        self.assertEqual(keys, ["GENERAL_SECRET", "GENERAL_SECRET", "VISUAL_SECRET"])
+        self.assertEqual(len(pairs), len(set(pairs)))
+
+    def test_timeout_on_fallback_model_uses_existing_next_key_fallback(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                model=DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL,
+            )
+
+        urls = [call.args[0] for call in request.call_args_list]
+        keys = [call.kwargs["headers"]["x-goog-api-key"] for call in request.call_args_list]
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["human_qa_key_source"], "general")
+        self.assertEqual(result["human_qa_key_attempts"], "2")
+        self.assertEqual(result["human_qa_key_fallback_used"], "True")
         self.assertEqual(result["human_qa_key_fallback_trigger"], "timeout")
         self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            urls,
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ],
+        )
+        self.assertEqual(keys, ["VISUAL_SECRET", "GENERAL_SECRET"])
 
     def test_both_keys_are_bounded_to_two_requests_and_logs_hide_keys(self):
         visual_key = "VISUAL_SECRET_DO_NOT_LOG"

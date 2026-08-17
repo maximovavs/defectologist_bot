@@ -99,31 +99,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 4
+          fetch-depth: 5
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Guard exact recovery parent and scope
+      - name: Guard exact cleanup recovery parent and scope
         shell: bash
         run: |
           set -euo pipefail
           BASE="702f84e8a31cedc90d17290f661abbfcc66779b0"
           FIRST="6d054749d9c7421f885b2e268288d27d7e176663"
           CORRECTIVE="375cf2cc8148cff1f1e68f1f424d2f8ffc24903c"
+          RECOVERY="b63f370e6f983834e9f0a1cade20dfbeb2245857"
           test "$GITHUB_REF_NAME" = "agent/p1b-myth-fact-fidelity"
-          test "$(git rev-parse HEAD^)" = "$CORRECTIVE"
-          test "$(git rev-parse HEAD^^)" = "$FIRST"
-          test "$(git rev-parse HEAD^^^)" = "$BASE"
+          test "$(git rev-parse HEAD^)" = "$RECOVERY"
+          test "$(git rev-parse HEAD^^)" = "$CORRECTIVE"
+          test "$(git rev-parse HEAD^^^)" = "$FIRST"
+          test "$(git rev-parse HEAD^^^^)" = "$BASE"
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
-          test "$(git rev-list --count "$BASE"..HEAD)" = "3"
-          test "$(git rev-list --count "$BASE"..HEAD^)" = "2"
+          test "$(git rev-list --count "$BASE"..HEAD)" = "4"
+          test "$(git rev-list --count "$BASE"..HEAD^)" = "3"
           test -z "$(git status --porcelain)"
           test "$(git diff --name-only "$BASE"..HEAD^)" = ".github/workflows/publisher_policy_pr_checks.yml"
           test "$(git diff --name-only "$BASE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
-          test "$(git diff --name-only "$CORRECTIVE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
+          test "$(git diff --name-only "$RECOVERY"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
 
       - name: Apply deterministic P1B patch
         shell: bash
@@ -207,13 +209,13 @@ jobs:
           llm = replace_once(llm, format_anchor, format_new, "myth pre-provider evidence gate")
 
           repair_function_start = '    def build_generic_repair_prompt(reason: str) -> str:\n'
-          repair_function_end = '\n    if prov in ("auto", "groq"):\n'
+          repair_function_end = '    if prov in ("auto", "groq"):\n'
           if llm.count(repair_function_start) != 1:
               raise RuntimeError("myth generic repair function: expected exactly one start boundary")
-          if llm.count(repair_function_end) != 1:
-              raise RuntimeError("myth generic repair function: expected exactly one end boundary")
           repair_start = llm.index(repair_function_start)
-          repair_end = llm.index(repair_function_end, repair_start)
+          repair_end = llm.find(repair_function_end, repair_start + len(repair_function_start))
+          if repair_end < 0:
+              raise RuntimeError("myth generic repair function: expected next end boundary")
           if repair_end <= repair_start:
               raise RuntimeError("myth generic repair function: invalid boundary order")
           repair_fragment = llm[repair_start:repair_end]
@@ -240,18 +242,18 @@ jobs:
           llm = llm[:repair_start] + repair_fragment + llm[repair_end:]
 
           gemini_anchor = '''            elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
-              gemini_repair_prompt = build_generic_repair_prompt(reason)
+                  gemini_repair_prompt = build_generic_repair_prompt(reason)
           '''
           gemini_new = '''            elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
-              gemini_repair_prompt = build_generic_repair_prompt(reason)
-              out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
-              ok2, reason2 = validate(out2)
-              if ok2:
-                  return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
-              return "", False, f"invalid_gemini_retry:{reason2}"
+                  gemini_repair_prompt = build_generic_repair_prompt(reason)
+                  out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                  ok2, reason2 = validate(out2)
+                  if ok2:
+                      return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                  return "", False, f"invalid_gemini_retry:{reason2}"
 
               elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
-              gemini_repair_prompt = build_generic_repair_prompt(reason)
+                  gemini_repair_prompt = build_generic_repair_prompt(reason)
           '''
           llm = replace_once(llm, gemini_anchor, gemini_new, "myth Gemini bounded repair")
 

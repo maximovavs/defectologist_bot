@@ -300,6 +300,7 @@ def _contains_any_fragment(text: str, fragments: List[str]) -> Optional[str]:
     return None
 
 
+
 MYTH_FACT_REFUTATION_PATTERNS = (
     r"\bmyth\b",
     r"\bmisconception\b",
@@ -957,183 +958,6 @@ def _validate_parent_age_evidence_output(text: str, evidence_text: str) -> Tuple
     return False, "parent_age_not_grounded"
 
 
-PARENT_SOFT_MODALITY_RE = re.compile(
-    r"(?:\b(?:may|might|can|often|typically|usually|generally|sometimes|commonly)\b|"
-    r"\bmost\s+children\b|\bmany\s+children\b|\btend(?:s|ed|ing)?\s+to\b|"
-    r"\b(?:может|могут|часто|обычно|нередко|иногда)\b|"
-    r"\bкак\s+правило\b|\bу\s+многих\b|\bбольшинство\s+детей\b|\bв\s+среднем\b)",
-    re.IGNORECASE,
-)
-PARENT_HARD_MODALITY_RE = re.compile(
-    r"(?:\b(?:реб[её]нок|дети|малыш\w*)\b.{0,60}\bдолж\w*|"
-    r"\b(?:реб[её]нок|дети|малыш\w*)\b.{0,60}\bобязан\w*|"
-    r"\bэто\s+норма\b|\bв\s+норме\s+(?:реб[её]нок|дети|малыш\w*)\b|"
-    r"\bнормой\s+(?:явля\w*|счита\w*)|"
-    r"\b(?:child|children|toddler)s?\b.{0,60}\b(?:must|should)\b|"
-    r"\b(?:child|children|toddler)s?\b.{0,60}\b(?:is|are)\s+expected\s+to\b|"
-    r"\bis\s+the\s+norm\b|\bnormal\s+for\s+(?:a\s+)?(?:child|children|toddler)s?\b)",
-    re.IGNORECASE,
-)
-PARENT_MODALITY_AGE_CONTEXT_RE = re.compile(
-    r"(?:\bв\s+этом\s+возрасте\b|\bк\s+этому\s+возрасту\b|"
-    r"\b(?:в|к)\s+\d{1,3}\s*(?:мес\w*|год\w*|лет)\b|"
-    r"\b(?:aged|at\s+age|by\s+age)\s+\d{1,3}\b|"
-    r"\b\d{1,3}\s*(?:months?|years?)\s+old\b|"
-    r"\bchildren\s+aged\s+\d{1,3}\b)",
-    re.IGNORECASE,
-)
-PARENT_MODALITY_CHILD_SUBJECT_RE = re.compile(
-    r"\b(?:реб[её]нок|дети|малыш\w*|child|children|toddler)s?\b",
-    re.IGNORECASE,
-)
-PARENT_MODALITY_ADULT_SUBJECT_RE = re.compile(
-    r"\b(?:родител\w*|взросл\w*|мам\w*|пап\w*|специалист\w*|логопед\w*|педагог\w*|"
-    r"parent\w*|adult\w*|caregiver\w*|therapist\w*)\b",
-    re.IGNORECASE,
-)
-PARENT_MODALITY_FAMILY_PATTERNS = {
-    "phrase": (
-        r"\b(?:фраз\w*|сочета\w*.{0,30}слов\w*|два\s+слов\w*|двух\s+слов\w*|"
-        r"two[-\s]+word\w*|combine\w*.{0,30}words?\b|short\s+phrases?)",
-    ),
-    "gesture": (r"\b(?:жест\w*|указательн\w*|показыва\w*|point\w*|gesture\w*)\b",),
-    "understanding": (r"\b(?:понима\w*|understand\w*|comprehens\w*)\b",),
-    "speech_sound": (
-        r"\b(?:звукопроизнош\w*|произнош\w*|фонем\w*|speech\s+sounds?|pronunciation|phoneme\w*)\b",
-    ),
-    "vocabulary": (r"\b(?:словар\w*|vocabular\w*)\b",),
-    "word": (
-        r"\b(?:перв\w*\s+слов\w*|говор\w*.{0,20}слов\w*|произнос\w*.{0,20}слов\w*|"
-        r"first\s+words?|say\w*.{0,20}words?)\b",
-    ),
-}
-PARENT_MODALITY_NUMBER_WORDS = {
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "один": "1",
-    "одна": "1",
-    "два": "2",
-    "две": "2",
-    "двух": "2",
-    "три": "3",
-    "трех": "3",
-    "четыре": "4",
-    "пять": "5",
-}
-
-
-def _parent_modality_segments(text: str) -> List[str]:
-    segments: List[str] = []
-    for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
-        line = raw_line.strip()
-        if not line:
-            continue
-        if re.match(r"^🔴\s*Миф\s*[:：]", line, flags=re.IGNORECASE):
-            continue
-        lowered = line.lower()
-        if line.startswith("#") or lowered.startswith("источник:") or line.startswith("🔗"):
-            continue
-        segments.extend(
-            part.strip()
-            for part in re.split(r"(?<=[.!?;])\s+", line)
-            if part.strip()
-        )
-    return segments
-
-
-def _parent_modality_claim_families(text: str) -> set[str]:
-    normalized = _normalize_scan_text(text)
-    return {
-        family
-        for family, patterns in PARENT_MODALITY_FAMILY_PATTERNS.items()
-        if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
-    }
-
-
-def _parent_modality_is_adult_instruction(segment: str) -> bool:
-    hard = re.search(r"\b(?:долж\w*|обязан\w*|must|should)\b", segment, flags=re.IGNORECASE)
-    if not hard:
-        return False
-    prefix = segment[:hard.start()]
-    adult = PARENT_MODALITY_ADULT_SUBJECT_RE.search(prefix)
-    child = PARENT_MODALITY_CHILD_SUBJECT_RE.search(prefix)
-    return bool(adult and not child)
-
-
-def _parent_modality_is_hard_developmental_claim(segment: str) -> bool:
-    if not _parent_modality_claim_families(segment):
-        return False
-    if _parent_modality_is_adult_instruction(segment):
-        return False
-    if PARENT_HARD_MODALITY_RE.search(segment):
-        return True
-    return bool(
-        PARENT_MODALITY_CHILD_SUBJECT_RE.search(segment)
-        and PARENT_MODALITY_AGE_CONTEXT_RE.search(segment)
-        and not PARENT_SOFT_MODALITY_RE.search(segment)
-    )
-
-
-def _parent_modality_claim_numbers(text: str) -> set[str]:
-    normalized = _normalize_scan_text(text)
-    normalized = re.sub(
-        rf"\b\d{{1,3}}\s*({PARENT_AGE_UNIT_PATTERN})\b",
-        " ",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    numbers = set(re.findall(r"(?<!\w)\d+(?!\w)", normalized))
-    for word, value in PARENT_MODALITY_NUMBER_WORDS.items():
-        if re.search(rf"\b{re.escape(word)}\b", normalized, flags=re.IGNORECASE):
-            numbers.add(value)
-    return numbers
-
-
-def _parent_modality_hard_claims(text: str) -> List[tuple[str, set[str], set[tuple[int, int]], set[str]]]:
-    claims: List[tuple[str, set[str], set[tuple[int, int]], set[str]]] = []
-    for segment in _parent_modality_segments(text):
-        if not _parent_modality_is_hard_developmental_claim(segment):
-            continue
-        claims.append(
-            (
-                segment,
-                _parent_modality_claim_families(segment),
-                _extract_evidence_age_ranges(segment),
-                _parent_modality_claim_numbers(segment),
-            )
-        )
-    return claims
-
-
-def _validate_parent_modality_fidelity_output(text: str, evidence_text: str) -> Tuple[bool, str]:
-    parsed_age = _parse_parent_age_range(text)
-    output_age: set[tuple[int, int]] = set()
-    if parsed_age and parsed_age.min_months is not None and parsed_age.max_months is not None:
-        output_age.add((parsed_age.min_months, parsed_age.max_months))
-
-    evidence_hard_claims = _parent_modality_hard_claims(evidence_text)
-    for _claim, families, claim_ages, claim_numbers in _parent_modality_hard_claims(text):
-        effective_ages = claim_ages or output_age
-        supported = False
-        for _evidence_claim, evidence_families, evidence_ages, evidence_numbers in evidence_hard_claims:
-            if not (families & evidence_families):
-                continue
-            if effective_ages and evidence_ages and not (effective_ages & evidence_ages):
-                continue
-            if claim_numbers and not evidence_numbers:
-                continue
-            if claim_numbers and not claim_numbers.issubset(evidence_numbers):
-                continue
-            supported = True
-            break
-        if not supported:
-            return False, "parent_modality_not_grounded"
-    return True, "ok"
-
-
 def _strip_unsupported_repaired_myth_age_line(
     text: str,
     evidence_text: str,
@@ -1611,6 +1435,7 @@ def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+
 def _has_any_header(lines: List[str], variants: List[str]) -> bool:
     normalized_lines = [line.strip().lower().replace("ё", "е") for line in lines]
     normalized_variants = [v.strip().lower().replace("ё", "е") for v in variants]
@@ -1749,7 +1574,13 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
     steps = _extract_section_after_header(
         text,
         r"^🔁\s*Как провести\s*[:：]?\s*",
-        [r"^✅", r"^💡", r"^Источник\s*:", r"^🔗", r"^#"],
+        [
+            r"^✅",
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+        ],
     )
     if not re.search(r"(^|\n|\s)1[\).]\s+", steps) or not re.search(r"(^|\n|\s)2[\).]\s+", steps):
         return False, "pro_missing_steps"
@@ -1757,7 +1588,12 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
     observation = _extract_section_after_header(
         text,
         r"^✅\s*На что смотреть\s*[:：]?\s*",
-        [r"^💡", r"^Источник\s*:", r"^🔗", r"^#"],
+        [
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+        ],
     )
     if not PRO_OBSERVATION_ALLOWED_RE.search(_normalize_scan_text(observation)):
         return False, "pro_missing_observation_criterion"
@@ -1829,7 +1665,10 @@ def _extract_parent_benefit_section(text: str) -> str:
     return _extract_section_after_header(
         text,
         PARENT_BENEFIT_HEADER_RE,
-        [r"^Источник\s*:", r"^🔗", r"^#", r"^💬", r"^📊", r"^👶", r"^❓", r"^🧩", r"^🏠", r"^🎲", r"^🌍", r"^🔴", r"^🧭", r"^Ориентиры\s*:"],
+        [
+            r"^Источник\s*:", r"^🔗", r"^#", r"^💬", r"^📊", r"^👶", r"^❓", r"^🧩", r"^🏠",
+            r"^🎲", r"^🌍", r"^🔴", r"^🧭", r"^Ориентиры\s*:",
+        ],
     )
 
 
@@ -1848,11 +1687,29 @@ def _validate_parent_observable_benefit_output(text: str, thematic: bool = False
 
 
 PARENT_HEARING_INFERENCE_RE = re.compile(
-    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|позволя\w*\s+(?:проверить|сделать\s+вывод)|можно\s+(?:понять|определ\w*|узна\w*|проверить)).{0,120}(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|позволя\w*\s+(?:проверить|сделать\s+вывод)|можно\s+(?:понять|определ\w*|узна\w*|проверить))|означа\w*.{0,80}слух\w*\s+в\s+норм\w*|(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,120}(?:значит.{0,40}слух\w*|хорош\w*\s+слыш\w*|потер\w*\s+слух\w*\s+исключ\w*|слух\w*\s+в\s+норм\w*|(?:снижени|нарушени)\w*\s+слух\w*\s+нет)",
+    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|"
+    r"позволя\w*\s+(?:проверить|сделать\s+вывод)|"
+    r"можно\s+(?:понять|определ\w*|узна\w*|проверить)).{0,120}"
+    r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*)|"
+    r"(?:слыш\w*|слух\w*|нарушени\w*\s+слух\w*).{0,120}(?:увид\w*|пойм\w*|узна\w*|определ\w*|"
+    r"проверь\w*|проверя\w*|проверите|показыва\w*|"
+    r"позволя\w*\s+(?:проверить|сделать\s+вывод)|"
+    r"можно\s+(?:понять|определ\w*|узна\w*|проверить))|"
+    r"означа\w*.{0,80}слух\w*\s+в\s+норм\w*|"
+    r"(?:повторя\w*|называ\w*|произнос\w*|произнош\w*).{0,120}(?:"
+    r"значит.{0,40}слух\w*|хорош\w*\s+слыш\w*|потер\w*\s+слух\w*\s+исключ\w*|"
+    r"слух\w*\s+в\s+норм\w*|(?:снижени|нарушени)\w*\s+слух\w*\s+нет)",
     re.IGNORECASE,
 )
-PARENT_HEARING_NEGATED_INFERENCE_RE = re.compile(r"(?:\bне\s+|\bнельзя\s+(?:\w+\s+){0,4}|\bневозможно\s+(?:\w+\s+){0,4})$", re.IGNORECASE)
-PARENT_HEARING_INFERENCE_ACTION_RE = re.compile(r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|позволя\w*|означа\w*)", re.IGNORECASE)
+PARENT_HEARING_NEGATED_INFERENCE_RE = re.compile(
+    r"(?:\bне\s+|\bнельзя\s+(?:\w+\s+){0,4}|\bневозможно\s+(?:\w+\s+){0,4})$",
+    re.IGNORECASE,
+)
+PARENT_HEARING_INFERENCE_ACTION_RE = re.compile(
+    r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|"
+    r"показыва\w*|позволя\w*|означа\w*)",
+    re.IGNORECASE,
+)
 
 
 def _validate_parent_hearing_inference_output(text: str) -> Tuple[bool, str]:
@@ -1881,30 +1738,72 @@ def _validate_cross_language_sound_output(text: str, evidence_text: str) -> Tupl
     if not _evidence_is_predominantly_english(evidence_text):
         return True, "ok"
     content = _parent_phoneme_content(text)
-    if re.search(r"(?:звук\w*|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком|целев\w*\s+звук|потрениру\w*\s+звук).{0,35}\[\s*[а-яё]{1,3}\s*\]", content, re.IGNORECASE):
+    if re.search(
+        r"(?:звук\w*|фонем\w*|произнош\w*|произнес\w*|повтор\w*\s+звук|слова\s+со\s+звуком|"
+        r"целев\w*\s+звук|потрениру\w*\s+звук)"
+        r".{0,35}\[\s*[а-яё]{1,3}\s*\]",
+        content,
+        re.IGNORECASE,
+    ):
         return False, "parent_cross_language_sound_norm"
     evidence_lower = (evidence_text or "").lower()
-    sound_context = re.compile(r"(?:\bзвук\w*|фонем\w*|целев\w*\s+звук\w*|слова\s+со\s+звуком|потрениру\w*\s+звук\w*|произнош\w*\s+звук\w*)", re.IGNORECASE)
-    sound_example_marker = re.compile(r"(?:слова\s+со\s+звуком\s*:|подберите\s+слова\s*:?|потрениру\w*\s+звук\w*\s+в\s+словах\s*:|\bслова\s*:|примеры\s+слов(?:\s+для\s+звука)?\s*:|например\s*:)", re.IGNORECASE)
+    sound_context = re.compile(
+        r"(?:\bзвук\w*|фонем\w*|целев\w*\s+звук\w*|слова\s+со\s+звуком|"
+        r"потрениру\w*\s+звук\w*|произнош\w*\s+звук\w*)",
+        re.IGNORECASE,
+    )
+    sound_example_marker = re.compile(
+        r"(?:слова\s+со\s+звуком\s*:|подберите\s+слова\s*:?|"
+        r"потрениру\w*\s+звук\w*\s+в\s+словах\s*:|"
+        r"\bслова\s*:|примеры\s+слов(?:\s+для\s+звука)?\s*:|например\s*:)",
+        re.IGNORECASE,
+    )
     for block in (line.strip() for line in content.splitlines() if line.strip()):
         if not sound_context.search(block):
             continue
         for marker in sound_example_marker.finditer(block):
             tail = re.split(r"[.!?;]", block[marker.end():], maxsplit=1)[0]
             list_tail = re.sub(r"^\s*(?:слова\s+)?", "", tail, flags=re.IGNORECASE)
-            quoted_list = re.match(r"([«\"“][^»\"”]+[»\"”](?:\s*,\s*[«\"“][^»\"”]+[»\"”]){1,4})", list_tail)
-            quoted_groups = re.findall(r"[«\"“]([^»\"”]+)[»\"”]", quoted_list.group(1)) if quoted_list else []
-            candidates = [word.lower() for group in quoted_groups for word in re.findall(r"[А-Яа-яЁё]{2,}", group)]
+            quoted_list = re.match(
+                r"([«\"“][^»\"”]+[»\"”](?:\s*,\s*[«\"“][^»\"”]+[»\"”]){1,4})",
+                list_tail,
+            )
+            quoted_groups = (
+                re.findall(r"[«\"“]([^»\"”]+)[»\"”]", quoted_list.group(1))
+                if quoted_list
+                else []
+            )
+            candidates = [
+                word.lower()
+                for group in quoted_groups
+                for word in re.findall(r"[А-Яа-яЁё]{2,}", group)
+            ]
             if not candidates:
-                comma_list = re.match(r"([А-Яа-яЁё]{2,}(?:\s*,\s*[А-Яа-яЁё]{2,}){1,4})(?:\s*$)", list_tail)
-                candidates = re.findall(r"[А-Яа-яЁё]{2,}", comma_list.group(1).lower()) if comma_list else []
+                comma_list = re.match(
+                    r"([А-Яа-яЁё]{2,}(?:\s*,\s*[А-Яа-яЁё]{2,}){1,4})(?:\s*$)",
+                    list_tail,
+                )
+                candidates = (
+                    re.findall(r"[А-Яа-яЁё]{2,}", comma_list.group(1).lower())
+                    if comma_list
+                    else []
+                )
             if candidates and any(word not in evidence_lower for word in candidates):
                 return False, "parent_cross_language_sound_norm"
     for sentence in (part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n", content) if part.strip()):
         has_sound_term = re.search(r"(?:звук\w*|фонем\w*|произнош\w*)", sentence, re.IGNORECASE)
         has_age_term = re.search(r"(?:возраст\w*|год\w*|лет|месяц\w*)", sentence, re.IGNORECASE)
-        has_normative_term = re.search(r"(?:долж\w*|формиру\w*|появля\w*|осваива\w*|сформирован\w*)", sentence, re.IGNORECASE)
-        is_language_caveat = re.search(r"(?:нельзя.{0,45}перенос|не\s+перенос|зависит\s+от\s+язык|в\s+разн\w*\s+язык\w*.{0,80}разн\w*\s+(?:время|возраст))", sentence, re.IGNORECASE)
+        has_normative_term = re.search(
+            r"(?:долж\w*|формиру\w*|появля\w*|осваива\w*|сформирован\w*)",
+            sentence,
+            re.IGNORECASE,
+        )
+        is_language_caveat = re.search(
+            r"(?:нельзя.{0,45}перенос|не\s+перенос|зависит\s+от\s+язык|"
+            r"в\s+разн\w*\s+язык\w*.{0,80}разн\w*\s+(?:время|возраст))",
+            sentence,
+            re.IGNORECASE,
+        )
         if has_sound_term and has_age_term and has_normative_term and not is_language_caveat:
             return False, "parent_cross_language_sound_norm"
     return True, "ok"
@@ -1928,27 +1827,69 @@ def _validate_question_week_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(out)
     if not lines:
         return False, "question_week_empty"
+
     if not re.search(r"^❓\s*Вопрос недели\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
         return False, "question_week_missing_question"
-    if not re.search(r"^🧩\s*Что попробовать сегодня\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
+
+    if not re.search(
+        r"^🧩\s*Что попробовать сегодня\s*[:：]?",
+        out,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
         return False, "question_week_missing_action"
-    if not re.search(r"^💡\s*Что это да[её]т\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
+
+    if not re.search(
+        r"^💡\s*Что это да[её]т\s*[:：]?",
+        out,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
         return False, "question_week_missing_benefit"
-    action = _extract_section_after_header(out, r"^🧩\s*Что попробовать сегодня\s*[:：]?\s*", [r"^💡", r"^Источник\s*:", r"^🔗", r"^#", r"^👶", r"^❓"])
+
+    action = _extract_section_after_header(
+        out,
+        r"^🧩\s*Что попробовать сегодня\s*[:：]?\s*",
+        [
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+            r"^👶",
+            r"^❓",
+        ],
+    )
+
     if len(action.strip()) < 35:
         return False, "question_week_empty_action"
+
     if action.rstrip().endswith(("...", "…")):
         return False, "question_week_truncated_action"
-    benefit = _extract_section_after_header(out, r"^💡\s*Что это да[её]т\s*[:：]?\s*", [r"^Источник\s*:", r"^🔗", r"^#", r"^👶", r"^❓", r"^🧩"])
+
+    benefit = _extract_section_after_header(
+        out,
+        r"^💡\s*Что это да[её]т\s*[:：]?\s*",
+        [
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+            r"^👶",
+            r"^❓",
+            r"^🧩",
+        ],
+    )
+
     if benefit.rstrip().endswith(("...", "…")):
         return False, "question_week_truncated_benefit"
+
     benefit_clean = benefit.strip()
     if len(benefit_clean) < 20:
         return False, "question_week_empty_benefit"
+
     if benefit_clean.lower().replace("ё", "е").startswith("что это дает"):
         return False, "question_week_empty_benefit"
+
     if "..." in out or "…" in out:
         return False, "question_week_ellipsis_truncation"
+
     return True, "ok"
 
 
@@ -1986,7 +1927,6 @@ def _validate_output(
     if rf in PARENT_CONTENT_FORMATS:
         for validator in (
             lambda value: _validate_parent_age_evidence_output(value, evidence_text),
-            lambda value: _validate_parent_modality_fidelity_output(value, evidence_text),
             _validate_parent_age_range_width,
             _validate_parent_age_action_fit,
             _validate_parent_hearing_inference_output,
@@ -2018,6 +1958,7 @@ def _validate_output(
     banned = _contains_banned(out)
     if banned:
         return False, f"banned_phrase:{banned}"
+
     if _has_template_leak(out):
         return False, "template_leak"
 
@@ -2039,26 +1980,1944 @@ def _validate_output(
         if not result[0]:
             return result
         return _validate_parent_observable_benefit_output(out)
+
     if rf == "thematic_parents":
         result = _validate_thematic_output(out, evidence_text, topic_id=topic_id)
         if not result[0]:
             return result
         return _validate_parent_observable_benefit_output(out, thematic=True)
+
     if dk == "TH" or rf == "bilingual_parents":
         result = _validate_bilingual_output(out, evidence_text)
         if not result[0]:
             return result
         return _validate_parent_observable_benefit_output(out)
+
     if dk == "SU" or rf == "age_norms":
         result = _validate_age_norms_output(out)
         if not result[0]:
             return result
         return _validate_parent_observable_benefit_output(out)
+
     if rf == "pro_friendly":
         return _validate_pro_output(out, evidence_text)
+
     if rf in PARENT_CONTENT_FORMATS:
         return _validate_parent_observable_benefit_output(out)
+
     return True, "ok"
 
 
-# NOTE: the remainder of this module is intentionally kept identical to main.
+def _clip_text_for_structure(text: str, max_chars: int) -> str:
+    s = norm_space(text)
+    if len(s) <= max_chars:
+        return s
+
+    cut = s[:max_chars].rstrip(" ,;:-")
+    boundary = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    if boundary >= max_chars * 0.55:
+        return cut[: boundary + 1].strip()
+
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")].rstrip(" ,;:-")
+
+    return (cut + "…").strip()
+
+
+def _is_pro_heading_line(line: str) -> bool:
+    low = line.strip().lower().replace("ё", "е")
+    return (
+        low.startswith("👩‍⚕️ аудитория:")
+        or low.startswith("аудитория:")
+        or low.startswith("🎯 цель")
+        or low.startswith("🧰 материалы")
+        or low.startswith("🔁 как провести")
+        or low.startswith("✅ на что смотреть")
+        or low.startswith("💡 вариант усложнения")
+        or low in {"введение", "коротко", "суть"}
+        or low in {"главные выводы", "главный вывод", "выводы", "что важно"}
+        or low in {"практическое применение", "практика", "как применить", "что взять в работу"}
+        or low.startswith("💡 что это дает")
+        or low.startswith("💡 что это даёт")
+    )
+
+
+def _split_sentences_for_structure(text: str) -> List[str]:
+    s = norm_space(text)
+    if not s:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", s)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _pro_section(text: str, header_pattern: str) -> str:
+    return _extract_section_after_header(
+        text,
+        header_pattern,
+        [
+            r"^👩‍⚕️",
+            r"^🎯",
+            r"^🧰",
+            r"^🔁",
+            r"^✅",
+            r"^💡",
+            r"^Источник\s*:",
+            r"^🔗",
+            r"^#",
+            r"^Введение\s*$",
+            r"^Главные выводы\s*$",
+            r"^Практическое применение\s*$",
+            r"^Выводы\s*$",
+            r"^Суть\s*$",
+        ],
+    )
+
+
+def _pro_skill_from_text(text: str) -> str:
+    blob = _normalize_scan_text(text)
+    rules = [
+        ("фонематический слух", ["фонемат", "звук", "звука", "слух", "слыш"]),
+        ("артикуляция", ["артикуля", "язык", "губ", "зеркал", "уклад"]),
+        ("слоговая структура", ["слог", "слогов", "ритм слова"]),
+        ("словарь", ["словар", "лексик", "назван", "предмет"]),
+        ("фразовая речь", ["фраз", "предложен", "ответ"]),
+        ("грамматический строй", ["граммат", "падеж", "род ", "число", "окончан"]),
+        ("дыхание", ["дых", "выдох", "воздушн", "дуть"]),
+        ("связная речь", ["связн", "пересказ", "рассказ", "истори"]),
+    ]
+    for skill, probes in rules:
+        if any(probe in blob for probe in probes):
+            return skill
+    return "фразовая речь"
+
+
+def _normalize_pro_structure(text: str) -> str:
+    """Normalize pro_friendly layout without inventing missing method details."""
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return text
+
+    if not all(_find_line(lines, heading) for heading in PRO_REQUIRED_HEADINGS):
+        return text.strip()
+
+    normalized: List[str] = []
+    previous_blank = False
+    for raw in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            if normalized and not previous_blank:
+                normalized.append("")
+            previous_blank = True
+            continue
+        normalized.append(line)
+        previous_blank = False
+
+    return "\n".join(normalized).strip()
+
+
+# -----------------------
+# Provider config / throttle / backoff
+# -----------------------
+
+LLM_CALL_DELAY_SEC = float(os.getenv("LLM_CALL_DELAY_SEC", "2.0"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
+LLM_BACKOFF_MIN = float(os.getenv("LLM_BACKOFF_MIN", "15"))
+LLM_BACKOFF_MAX = float(os.getenv("LLM_BACKOFF_MAX", "120"))
+
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+DEFAULT_GROQ_FALLBACK_MODEL = "openai/gpt-oss-20b"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
+GROQ_MODEL = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+GROQ_FALLBACK_MODEL = (
+    os.getenv("GROQ_FALLBACK_MODEL", DEFAULT_GROQ_FALLBACK_MODEL).strip()
+    or DEFAULT_GROQ_FALLBACK_MODEL
+)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+GEMINI_FALLBACK_MODEL = (
+    os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL).strip()
+    or DEFAULT_GEMINI_FALLBACK_MODEL
+)
+
+_throttle_lock = asyncio.Lock()
+_next_allowed_ts = 0.0
+_gemini_region_blocked = False
+_gemini_quota_exhausted = False
+
+
+def _unique_nonempty_models(*models: str) -> List[str]:
+    items: List[str] = []
+    for model in models:
+        model = (model or "").strip()
+        if model and model not in items:
+            items.append(model)
+    return items
+
+
+def _parse_model_list(raw: str, *fallback_models: str) -> List[str]:
+    return _unique_nonempty_models(
+        *((part.strip() for part in (raw or "").split(","))),
+        *fallback_models,
+    )
+
+
+GROQ_MODELS = _unique_nonempty_models(GROQ_MODEL, GROQ_FALLBACK_MODEL)
+GEMINI_MODELS = _parse_model_list(
+    os.getenv("GEMINI_MODELS", ""),
+    GEMINI_MODEL,
+    GEMINI_FALLBACK_MODEL,
+)
+
+
+async def _throttle() -> None:
+    global _next_allowed_ts
+    async with _throttle_lock:
+        now = time.time()
+        if now < _next_allowed_ts:
+            await asyncio.sleep(_next_allowed_ts - now)
+        _next_allowed_ts = time.time() + LLM_CALL_DELAY_SEC
+
+
+def _is_quota_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status == 429 or any(k in t for k in ["too many requests", "rate limit", "quota", "resource_exhausted"])
+
+
+def _is_confirmed_gemini_quota_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status == 429 and any(
+        marker in t for marker in ("too many requests", "rate limit", "quota", "resource_exhausted")
+    )
+
+
+def _is_temporary_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return status in (500, 502, 503, 504) or "overloaded" in t or "temporarily unavailable" in t
+
+
+def _is_model_not_available(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        status in (400, 404)
+        and (
+            "model" in t
+            or "not found" in t
+            or "decommissioned" in t
+            or "unsupported" in t
+            or "does not exist" in t
+        )
+    )
+
+
+def _is_gemini_region_block(text: str) -> bool:
+    t = (text or "").lower()
+    return "user location is not supported" in t or "location is not supported" in t
+
+
+def gemini_text_provider_status(api_key: str = "") -> str:
+    if _gemini_quota_exhausted:
+        return "quota_exhausted"
+    return "available" if (api_key or "").strip() else "unavailable"
+
+
+async def _post_json(url: str, headers: Dict[str, str], payload: Dict, timeout: int = 70) -> requests.Response:
+    def _do() -> requests.Response:
+        return requests.post(url, headers=headers, json=payload, timeout=timeout)
+
+    return await asyncio.to_thread(_do)
+
+
+async def groq_chat(prompt: str, api_key: str) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    last_err = ""
+    for model in GROQ_MODELS:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
+
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            await _throttle()
+            resp = await _post_json(url, headers, payload, timeout=80)
+
+            if resp.status_code == 200:
+                j = resp.json()
+                print(f"[LLM][groq] selected model={model}", flush=True)
+                return (j["choices"][0]["message"]["content"] or "").strip()
+
+            txt = resp.text or ""
+            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
+
+            if _is_model_not_available(resp.status_code, txt):
+                print(f"[LLM][groq] skip unavailable model={model} status={resp.status_code}", flush=True)
+                break
+
+            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                if attempt < LLM_MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[LLM][groq] exhausted retries model={model} status={resp.status_code}", flush=True)
+                break
+
+            resp.raise_for_status()
+
+    raise RuntimeError(f"groq_failed_after_fallbacks:{last_err}")
+
+
+async def gemini_generate(prompt: str, api_key: str) -> str:
+    global _gemini_region_blocked, _gemini_quota_exhausted
+    if _gemini_region_blocked:
+        raise RuntimeError("gemini_disabled_region")
+    if _gemini_quota_exhausted:
+        print("[LLM][gemini] skipped reason=gemini_quota_exhausted_cached", flush=True)
+        raise RuntimeError("gemini_quota_exhausted_cached")
+
+    last_err = ""
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            await _throttle()
+            resp = await _post_json(url, headers, payload, timeout=80)
+
+            if resp.status_code == 200:
+                j = resp.json()
+                return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+
+            txt = resp.text or ""
+            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
+
+            if _is_gemini_region_block(txt):
+                _gemini_region_blocked = True
+                raise RuntimeError("gemini_blocked_region")
+
+            if _is_confirmed_gemini_quota_error(resp.status_code, txt):
+                _gemini_quota_exhausted = True
+                print("[LLM][gemini] quota exhausted; disabling Gemini for the rest of this run", flush=True)
+                raise RuntimeError("gemini_quota_exhausted")
+
+            if _is_model_not_available(resp.status_code, txt):
+                print(f"[LLM][gemini] skip unavailable model={model} status={resp.status_code}", flush=True)
+                break
+
+            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                wait = wait * random.uniform(0.85, 1.15)
+                if attempt < LLM_MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[LLM][gemini] exhausted retries model={model} status={resp.status_code}", flush=True)
+                break
+
+            resp.raise_for_status()
+
+    raise RuntimeError(f"gemini_failed_after_fallbacks:{last_err}")
+
+
+# -----------------------
+# Prompt templates
+# -----------------------
+
+PRO_PREVALIDATED_GENERAL_NO_DATA_RULES = {
+    "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.",
+    "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ",
+    "Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.",
+}
+
+PRO_RISKY_MANUAL_SAFETY_ONLY_NO_DATA_RULE = (
+    "Не предлагай рискованные ручные или внутриротовые действия: вводить зонд, шпатель, "
+    "ложку или другой предмет в рот ребёнка, тянуть, давить или смещать язык, выполнять "
+    "самостоятельный массаж языка, нёба или дёсен. Если EVIDENCE содержит только такие "
+    "действия и не даёт безопасной альтернативы, верни НЕТ_ДАННЫХ."
+)
+
+
+def _remove_general_no_data_rules_for_prevalidated_evidence(prompt: str) -> str:
+    return "\n".join(
+        line
+        for line in (prompt or "").splitlines()
+        if line.strip() not in PRO_PREVALIDATED_GENERAL_NO_DATA_RULES
+    )
+
+
+def _common_rules(max_chars: int, allow_numbered_steps: bool = False) -> str:
+    numbered_steps_rule = (
+        "Для pro_friendly в блоке 🔁 Как провести: используй ровно три коротких шага: 1., 2., 3.; не добавляй шаг 4.\n"
+        if allow_numbered_steps
+        else "Не делай длинные нумерованные списки 1., 2., 3., 4.; для Telegram нужен короткий живой текст.\n"
+    )
+    return (
+        "Ты — практикующий Логопед-дефектолог и сильный Telegram-редактор.\n"
+        "Пиши по-русски.\n"
+        f"Весь пост не должен превышать {max_chars} символов.\n"
+        "Опирайся только на EVIDENCE ниже.\n"
+        "Любое физиологическое, неврологическое, причинное, диагностическое или терапевтическое объяснение должно быть прямо поддержано EVIDENCE.\n"
+        "Не придумывай, почему упражнение работает. Если механизм не объяснен в EVIDENCE, описывай только действие взрослого и наблюдаемую реакцию ребенка.\n"
+        "Предпочитай наблюдаемые результаты механизмам: ребенок повторяет слово, выбирает картинку, показывает предмет или отвечает фразой.\n"
+        "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.\n"
+        "Упрощение фразы — временная подсказка, а не отказ от вежливости: взрослый может дать короткую модель и естественно показывать полную вежливую фразу.\n"
+        "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ\n"
+        "Опирайся преимущественно на перефразирование, не используй прямые цитаты из текста.\n"
+        "Нельзя копировать длинные фразы из статьи.\n"
+        "Нельзя печатать служебные слова EVIDENCE, ШАБЛОН и placeholders.\n"
+        "Категорически запрещено использовать канцелярские фразы вроде: "
+        "«развитие речи очень важно», «родители часто сталкиваются с проблемой», "
+        "«создайте благоприятную среду», «это важный аспект общего развития».\n"
+        "Никаких заголовков «Проблема», «Решение», «Результат», «Как сделать дома».\n"
+        "Твоя задача — вытащить практическую суть: игру, упражнение, прием, последовательность действий, примеры слов, формулировки для родителя.\n"
+        "Текст должен читаться как живой полезный пост человека, а не как доклад.\n"
+        "Не ставь диагнозы и не назначай лечение.\n"
+        f"{PRO_RISKY_MANUAL_SAFETY_ONLY_NO_DATA_RULE}\n"
+        "Если прямо описываешь ребёнка, у которого пропал навык, есть вопросы к пониманию речи, ребёнок перестал говорить или долго нет прогресса, добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.»\n"
+        "Не используй Markdown и кодовые блоки.\n"
+        "Никаких **жирных выделений**, ## заголовков, markdown-ссылок и markdown-разметки.\n"
+        "Не выделяй слова звёздочками: все выделения позже делает код через Telegram HTML.\n"
+        + numbered_steps_rule +
+        "В самом конце текста выведи отдельной последней строкой 1 или 2 хештега, которые максимально точно отражают суть конкретной проблемы или упражнения в тексте.\n"
+        "Используй формат вроде: #билингвизм #запуск_речи\n"
+        "Никогда не пиши больше двух тематических хештегов.\n"
+    )
+
+
+def _ensure_source_and_link(
+    text: str,
+    source_domain: str,
+    source_url: str,
+) -> str:
+    lines = [x.rstrip() for x in (text or "").replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    has_source_line = any(re.match(r"^Источник:\s*\S.+$", x.strip(), re.IGNORECASE) for x in lines)
+    has_link_line = any(x.strip().startswith("🔗 ") for x in lines)
+
+    if not has_source_line:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"Источник: {source_domain}")
+
+    if not has_link_line:
+        lines.append(f"🔗 {source_url}")
+
+    return "\n".join(lines).strip()
+
+
+def _build_generation_prompt_raw(
+    day_key: str,
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    max_chars: int,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    aud = (audience or "parents").strip().lower()
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+    is_pro_format = aud == "pros" or rf == "pro_friendly"
+    rules = _common_rules(max_chars, allow_numbered_steps=is_pro_format)
+    rules += _topic_instruction(topic_id, topic_title)
+    if not is_pro_format and rf in PARENT_RUSSIAN_PHONEME_FORMATS:
+        rules += "\n" + PARENT_RUSSIAN_PHONEME_PROMPT_RULE + "\n"
+    if not is_pro_format and rf in PARENT_CONTENT_FORMATS:
+        rules += "\n" + PARENT_EDITORIAL_PROMPT_RULE + "\n"
+    if evidence_prevalidated:
+        rules = _remove_general_no_data_rules_for_prevalidated_evidence(rules)
+
+    if aud == "pros":
+        template = (
+            "Первая строка — короткое конкретное название метода, игры или приема, до 90 символов.\n"
+            "Не используй Markdown и не выделяй слова звёздочками.\n"
+            "Не начинай с диагноза или пугающей клинической формулировки.\n"
+            "Пиши как практическую карточку методики: цель, материалы, протокол, критерий наблюдения.\n"
+            "Не используй заголовки Введение, Главные выводы, Практическое применение, Коротко, Суть, Выводы.\n\n"
+            "👩‍⚕️ Аудитория: специалисты\n\n"
+            "🎯 Цель:\n"
+            "1 предложение с конкретным навыком: фонематический слух, артикуляция, слоговая структура, словарь, "
+            "фразовая речь, грамматический строй, дыхание или связная речь.\n\n"
+            "🧰 Материалы:\n"
+            "1 короткая строка: карточки, предметы, зеркало, мяч, картинки, фишки, таймер — только то, что подходит.\n\n"
+            "🔁 Как провести:\n\n"
+            "1. Конкретное действие специалиста.\n"
+            "2. Конкретная инструкция ребёнку.\n"
+            "3. Как отметить или исправить ответ.\n\n"
+            "✅ На что смотреть:\n"
+            "1 предложение с наблюдаемым критерием: ребёнок различает звук, повторяет слово, удерживает артикуляцию, "
+            "отвечает фразой, выбирает нужную картинку или исправляет ошибку после подсказки.\n\n"
+            "💡 Вариант усложнения:\n"
+            "1 практическая вариация, не общий benefit.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и редактор профессиональной, но понятной Telegram-рубрики.\n"
+            + "Твоя задача — не академический конспект, а короткая практическая карточка метода для занятия.\n"
+            + "Строй карточку только из EVIDENCE. Не достраивай недостающие материалы, шаги, таймеры, уровни, режимы, количество повторов или этапы прогрессии.\n"
+            + "Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.\n"
+            + "Если действие и упражнение описаны, но отдельный критерий наблюдения прямо не сформулирован, "
+            + "заполни блок «✅ На что смотреть» только непосредственной наблюдаемой реакцией ребёнка, "
+            + "которая прямо следует из задания: повторяет ли слово, выбирает ли изображение, различает ли звук, "
+            + "называет ли предмет, выполняет ли инструкцию, соединяет ли элементы или исправляет ли ответ после подсказки. "
+            + "Не придумывай медицинский результат, механизм работы, диагноз, улучшение функций мозга или долгосрочный эффект.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if dk == "MO" or rf == "tip_of_day":
+        template = (
+            "Первая строка — H1 с одним конкретным советом на сегодня.\n"
+            "Не пиши название рубрики и не пиши общую тему.\n"
+            "H1 должен звучать как одно простое действие родителя дома.\n"
+            "Хорошие паттерны: «Повторите последнее слово и сделайте паузу», «Дайте выбор из двух слов», «Положите игрушки в мешочек и просите называть».\n"
+            "Плохие паттерны: «Развитие речи у детей», «Как помочь ребенку говорить», «Билингвизм у детей».\n\n"
+            "Верни текст строго в таком скелете, без перестановки блоков и без замены названий блоков:\n\n"
+            "<H1 с одним действием>\n\n"
+            "👶 Возраст: ...\n\n"
+            "<1 короткая вводная фраза>\n\n"
+            "🧩 Что попробовать сегодня:\n"
+            "<2–4 предложения с одним конкретным приемом>\n\n"
+            "👄 Пример:\n"
+            "<1–3 короткие реплики взрослого или пример мини-диалога>\n\n"
+            "💡 Что это дает:\n"
+            "<1 короткое предложение про один конкретный навык>\n\n"
+            "Не пиши «💡 Это помогает...» вместо названия блока. Должна быть отдельная строка «💡 Что это дает:».\n"
+            "После строки возраста обязательно оставь пустую строку. Перед блоками 🧩, 👄 и 💡 тоже обязательно оставь пустую строку.\n"
+            "В вводной фразе не делай обзор темы и не используй канцелярит. Это должна быть живая подводка к одному домашнему шагу.\n"
+            "В блоке «🧩 Что попробовать сегодня:» опиши один конкретный прием в 2–4 предложениях.\n"
+            "Обязательно добавь, что говорит взрослый, что делает ребенок.\n"
+            "В блоке «👄 Пример:» дай короткие реальные реплики.\n"
+            "В блоке «💡 Что это дает:» назови один конкретный навык одним коротким предложением.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который умеет превращать статью в один прикладной совет на сегодня.\n"
+            + "В Monday-рубрике нельзя делать обзор темы: только один совет, один прием, один следующий шаг для родителя.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if dk == "TU" or rf in ("exercise_steps", "games_vocab"):
+        template = (
+            "Первая строка — короткий живой заголовок по сути игры, а не название рубрики.\n"
+            "👶 Возраст: укажи диапазон\n\n"
+            "Сразу начни с одного живого предложения о том, над чем сегодня играем.\n"
+            "Без общих слов и без вступительной лекции.\n\n"
+            "🎲 Как играть:\n"
+            "Опиши одну конкретную игру или упражнение пошагово.\n"
+            "Напиши, что говорит родитель, что отвечает ребенок, какой реквизит нужен.\n"
+            "Добавь примеры слов и короткие реплики взрослого.\n\n"
+            "💡 Что это дает: одним предложением укажи конкретный навык.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и популярный Telegram-блогер для родителей-экспатов.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if dk == "WE" or rf == "myth_fact":
+        template = (
+            "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
+            "👶 Возраст: укажи диапазон\n"
+            "🔴 Миф: используй только утверждение, которое EVIDENCE явно называет ошибочным или прямо опровергает.\n"
+            "Не придумывай популярный миф из собственных знаний. Если в EVIDENCE нет явного опровергаемого утверждения — верни НЕТ_ДАННЫХ.\n\n"
+            "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
+            "🧩 Что попробовать сегодня:\n"
+            "Дай один практический прием или микро-упражнение без канцелярита.\n\n"
+            "💡 Что это дает: одним предложением назови конкретный навык или эффект.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который мягко развеивает мифы и сразу дает полезный следующий шаг.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if rf == "thematic_parents":
+        topic_line = topic_title or "только тему, явно подтверждённую EVIDENCE"
+        template = (
+            "Первая строка — короткий заголовок по конкретной теме статьи.\n"
+            "👶 Возраст: укажи диапазон только если он есть в EVIDENCE\n"
+            f"🧭 Тема: {topic_line}\n\n"
+            "🏠 Что можно попробовать дома:\n"
+            "Дай 2–4 конкретных действия семьи, пронумерованных 1., 2., 3., 4. только при наличии в EVIDENCE.\n\n"
+            "💡 Что это дает: одним предложением назови наблюдаемый навык без обещания результата.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор спокойных практических материалов для родителей.\n"
+            + "Используй только конкретные домашние действия из EVIDENCE. Не добавляй диагнозы, обещания результата, механизмы, таймеры или материалы, которых нет в источнике.\n"
+            + "Не используй bilingual heading, отдельный блок о двух языках или рекомендации про русский язык, если EVIDENCE прямо не относится к двуязычию.\n"
+            + "Заголовок должен естественно звучать по-русски. Предпочитай: «игра со звуком», «сказка со звуками», «слова со звуком», «как услышать звук», «игра на различение звуков». Избегай искусственных конструкций: «сказка для звуков», «упражнение для букв», «игра для речи», если можно назвать конкретный навык.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if dk == "TH" or rf == "bilingual_parents":
+        template = (
+            f"{rubric_title} {title_suffix}\n"
+            "👶 Возраст: укажи диапазон\n\n"
+            "Сразу начни с реальной ситуации семьи за границей: как звучит русский дома, где ребенок переключается между языками, что напрягает родителей.\n\n"
+            "🌍 Что помогает в двуязычной семье:\n"
+            "Перескажи 2–4 конкретных приема из текста человеческим языком. Никакой теории ради теории.\n\n"
+            "💡 Что это дает: одним предложением объясни практический смысл.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог, который помогает семьям-экспатам поддерживать русский язык без давления и чувства вины.\n"
+            + "Не представляй двуязычие, переключение языков или два языка как причину нарушений звукопроизношения, задержки речи или речевого расстройства.\n"
+            + "Различай языковые особенности билингвального ребенка и возможные коммуникативные трудности. Совет должен касаться реальной практики двуязычной семьи.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if dk == "FR" or rf == "question_week":
+        template = (
+            "Первая строка — короткий заголовок-ответ по сути вопроса, а не название рубрики.\n"
+            "👶 Возраст: укажи диапазон\n"
+            "❓ Вопрос недели: задай живой вопрос родителя по теме статьи.\n\n"
+            "Ответь на него 4–6 предложениями: сначала короткий прямой ответ, затем поясни 2–3 факта из EVIDENCE простым языком.\n"
+            "Если в EVIDENCE есть не упражнение, а факты, мифы, рекомендации или возрастные ориентиры — это достаточно для поста question_week.\n"
+            "Не возвращай НЕТ_ДАННЫХ только потому, что в источнике нет готового упражнения.\n"
+            "НЕТ_ДАННЫХ можно вернуть только если текст вообще не про детскую речь, коммуникацию, билингвизм или развитие языка.\n\n"
+            "🧩 Что попробовать сегодня:\n"
+            "Дай один мягкий следующий шаг для родителя: что спросить, что понаблюдать, какую ситуацию создать или какую фразу попробовать.\n\n"
+            "💡 Что это дает: напиши одно завершенное предложение о конкретном навыке или наблюдении для родителя. Не оставляй этот блок пустым и не используй многоточие.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог и автор Telegram-рубрики «вопрос недели», который отвечает по-человечески, но по делу.\n"
+            + "Для question_week разрешено строить полезный ответ не только из упражнений, но и из фактов, мифов, рекомендаций и возрастных ориентиров из EVIDENCE.\n"
+            + "Цель: не короткая справка, а полноценный Telegram Q&A-пост примерно 350–800 символов.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    if dk == "SU" or rf == "age_norms":
+        template = (
+            "Первая строка — спокойный parent-friendly H1 про возрастной ориентир.\n"
+            "Не пиши название рубрики, не пиши «норма речи», не пиши про нарушения, задержки, диагностику и коррекцию.\n"
+            "Хорошие паттерны: «Что обычно понимает ребенок к 2 годам», «Какие фразы часто появляются ближе к 3 годам».\n\n"
+            "👶 Возраст: укажи диапазон\n"
+            "Ориентиры: коротко перечисли 2–4 age / milestone ориентира в одной строке.\n\n"
+            "Дальше в 2–4 спокойных предложениях объясни смысл без запугивания и без патологической лексики.\n"
+            "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n"
+            "Говори только про типичное развитие и наблюдаемые milestones.\n\n"
+            "🏠 Что можно понаблюдать дома:\n"
+            "Дай один мягкий родительский способ заметить навык в повседневной жизни или игре. Не упражнение на коррекцию, а наблюдение или естественный бытовой прием.\n\n"
+            "💡 Что это дает: одним предложением объясни, что именно родитель сможет заметить.\n\n"
+            f"Источник: {source_domain}\n"
+            f"🔗 {source_url}\n"
+        )
+        return (
+            rules
+            + "\nРОЛЬ:\nТы — Логопед-дефектолог, который умеет говорить о возрастных ориентирах спокойно, точно и без нагнетания.\n"
+            + "В Sunday-рубрике запрещены патологические, коррекционные и диагностические акценты.\n"
+            + "\nШАБЛОН:\n"
+            + template
+            + "\nEVIDENCE:\n"
+            + evidence_text.strip()
+            + "\n"
+        )
+
+    template = (
+        "Первая строка — короткий живой заголовок по сути поста, а не название рубрики.\n"
+        "👶 Возраст: укажи диапазон\n\n"
+        "Сразу начни с сути: над чем сегодня работаем или что можно заметить у ребенка по теме статьи.\n\n"
+        "🧩 Что попробовать сегодня:\n"
+        "Дай один конкретный прием, сценарий общения или микро-упражнение из текста.\n\n"
+        "💡 Что это дает: одним предложением назови конкретный навык.\n\n"
+        f"Источник: {source_domain}\n"
+        f"🔗 {source_url}\n"
+    )
+
+    footer = ""
+    if disclaimer:
+        footer += f"\nℹ️ {norm_space(disclaimer)}\n"
+
+    return (
+        rules
+        + "\nРОЛЬ:\nТы — практикующий Логопед-дефектолог и Telegram-автор, который объясняет коротко, тепло и с конкретной пользой.\n"
+        + "\nШАБЛОН:\n"
+        + template
+        + "\nEVIDENCE:\n"
+        + evidence_text.strip()
+        + "\n"
+        + footer
+    )
+
+
+def build_generation_prompt(
+    day_key: str,
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    max_chars: int,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    raw_prompt = _build_generation_prompt_raw(
+        day_key=day_key,
+        rubric_title=rubric_title,
+        rubric_format=rubric_format,
+        audience=audience,
+        title_suffix=title_suffix,
+        source_domain=source_domain,
+        source_url=source_url,
+        evidence_text=evidence_text,
+        disclaimer=disclaimer,
+        hashtags=hashtags,
+        max_chars=max_chars,
+        evidence_prevalidated=evidence_prevalidated,
+        topic_id=topic_id,
+        topic_title=topic_title,
+    )
+    return _prepare_generation_prompt(
+        raw_prompt,
+        evidence_text,
+        is_pro_format=(audience or "parents").strip().lower() == "pros"
+        or (rubric_format or "").strip().lower() == "pro_friendly",
+        evidence_prevalidated=evidence_prevalidated,
+    )
+
+
+# -----------------------
+# Image prompt helpers
+# -----------------------
+
+def _clean_image_prompt(text: str) -> str:
+    s = (text or "").strip().replace("\r\n", "\n")
+    s = re.sub(r"^```[a-zA-Z]*\n", "", s)
+    s = re.sub(r"\n```$", "", s)
+    s = s.replace("\n", " ")
+    s = re.sub(r"^(prompt|image prompt)\s*:\s*", "", s, flags=re.IGNORECASE)
+    s = s.strip(" \"'“”")
+    return norm_space(s)
+
+
+def _validate_image_prompt(prompt: str, body_text: str = "", rubric_id: str = "") -> Tuple[bool, str]:
+    p = _clean_image_prompt(prompt)
+    if not p:
+        return False, "empty"
+    if len(p) < 12:
+        return False, "too_short"
+    if len(p) > 900:
+        return False, "too_long"
+    if re.search(r"[А-Яа-яЁё]", p):
+        return False, "non_english"
+    if any(marker in p for marker in ["EVIDENCE", "ШАБЛОН", "#пример_тега"]):
+        return False, "template_leak"
+
+    prompt_blob = _normalize_scan_text(p)
+    body_blob = _normalize_scan_text(body_text)
+
+    seasonal_or_elderly_context = bool(
+        re.search(r"(новогод|рождеств|праздник|санта|дед мороз|пожил|бабуш|дедуш|elderly|grandparent|holiday|christmas|santa)", body_blob)
+    )
+    if re.search(r"\b(santa|father christmas|christmas|holiday|elderly (?:man|woman))\b", prompt_blob) and not seasonal_or_elderly_context:
+        return False, "visual_prompt_topic_mismatch"
+
+    listening_context = bool(re.search(r"(слуш|аудио|звук|фонемат|наушник|headphones?|headset|listen|audio|sound)", body_blob))
+    if re.search(r"\b(headphones?|headset)\b", prompt_blob) and not listening_context:
+        return False, "visual_prompt_topic_mismatch"
+
+    letter_context = bool(
+        re.search(r"(букв|чтен|читать|прочит|звукобукв|звук\s*[-—]\s*букв|letter|reading|sound-letter)", body_blob)
+    )
+    random_letters = re.search(r"\b(random|floating|scattered)\s+(?:letters?|numbers?|alphabet|abc)\b", prompt_blob)
+    letter_props = re.search(r"\b(letter|alphabet|abc)\s+(?:cards?|blocks?|tiles?)\b", prompt_blob)
+    if (random_letters or letter_props) and not letter_context:
+        return False, "visual_prompt_topic_mismatch"
+    if "Action:" not in p and "; allowed props:" not in p:
+        return True, "ok"
+    return _validate_compiled_visual_prompt(
+        p,
+        rubric_id,
+        allowed_props=_mentioned_visual_props(body_text),
+    )
+
+
+def _mentioned_visual_props(body_text: str) -> List[str]:
+    blob = _sanitize_visual_post_body(body_text).lower().replace("ё", "е")
+    candidates: List[Tuple[int, str]] = []
+
+    def add(label: str, *patterns: str) -> None:
+        positions = [match.start() for pattern in patterns if (match := re.search(pattern, blob, flags=re.IGNORECASE))]
+        if positions:
+            candidates.append((min(positions), label))
+
+    has_cards = bool(re.search(r"\b(?:карточ\w*|picture\s+cards?)\b", blob))
+    add("book", r"\bкниг\w*\b", r"\bкниж\w*\b", r"\bbooks?\b")
+    if has_cards:
+        add("picture cards", r"\bкарточ\w*\b", r"\bpicture\s+cards?\b")
+    else:
+        add("picture", r"\bкартинк\w*\b", r"\bизображени\w*\b", r"\bpictures?\b")
+    add("toy car", r"\bмашинк\w*\b", r"\btoy\s+cars?\b")
+    if re.search(r"\bигруш\w*\b(?!\s+машин\w*)|\btoys?\b(?!\s+cars?\b)", blob):
+        add("toy", r"\bигруш\w*\b", r"\btoys?\b")
+    add("ball", r"\bмяч\w*\b", r"\bballs?\b")
+    add("mirror", r"\bзеркал\w*\b", r"\bmirrors?\b")
+    add("tablet", r"\bпланшет\w*\b", r"\btablets?\b")
+    add("computer", r"\bкомпьютер\w*\b", r"\bcomputers?\b")
+    add("headphones", r"\bнаушник\w*\b", r"\bheadphones?\b")
+    add("notebook", r"\bблокнот\w*\b", r"\bтетрад\w*\b", r"\bnotebooks?\b")
+    add("cup", r"\bчашк\w*\b", r"\bстакан\w*\b", r"\bcups?\b")
+    add("water", r"\bвод(?:а|ы|е|у|ой|ою)\b", r"\bwater\b")
+    add("drum", r"\bбарабан\w*\b", r"\bdrums?\b")
+    add("tambourine", r"\bбубен\w*\b", r"\btambourines?\b")
+    add("metronome", r"\bметроном\w*\b", r"\bmetronomes?\b")
+    add("light indicator", r"\bсветов\w*\s+индикатор\w*\b", r"\blight\s+indicators?\b")
+    add("pencil", r"\bкарандаш\w*\b", r"\bpencils?\b")
+    add("paper", r"\bбумаг\w*\b", r"\bлист(?:ок|а|ы|е|у|ом)?\b", r"\bpaper\b")
+    add("blocks", r"\bкубик\w*\b", r"\bблок\w*\b", r"\bblocks?\b")
+    add("puzzle", r"\bпазл\w*\b", r"\bpuzzles?\b")
+
+    props: List[str] = []
+    for _, label in sorted(candidates, key=lambda item: item[0]):
+        if label not in props:
+            props.append(label)
+        if len(props) == 3:
+            break
+    return props
+
+
+def _sanitize_visual_post_body(body_text: str) -> str:
+    lines = (body_text or "").replace("\r\n", "\n").split("\n")
+    kept: List[str] = []
+    skip_benefit = False
+    action_heading = re.compile(r"^(?:как играть|как провести|что попробовать|ход игры|упражнение)\b", re.IGNORECASE)
+    benefit_heading = re.compile(r"^(?:польза|почему это полезно|зачем это нужно)\b", re.IGNORECASE)
+    for raw_line in lines:
+        line = norm_space(raw_line)
+        if not line or line.startswith("#"):
+            continue
+        lower = line.lower()
+        if lower.startswith(("источник:", "source:", "ссылка:", "url:")) or "http://" in lower or "https://" in lower:
+            continue
+        heading_text = re.sub(r"^[^\wА-Яа-яЁё]+", "", line).strip()
+        if benefit_heading.match(heading_text):
+            skip_benefit = True
+            continue
+        if action_heading.match(heading_text):
+            skip_benefit = False
+        if skip_benefit:
+            continue
+        kept.append(line)
+        if len(kept) >= 16:
+            break
+    return "\n".join(kept)[:1800]
+
+
+def _extract_visual_age_descriptor(body_text: str) -> str:
+    text = (body_text or "").lower().replace("ё", "е")
+    month_range = re.search(r"(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(?:мес\.?|месяц\w*)", text)
+    if month_range:
+        low, high = int(month_range.group(1)), int(month_range.group(2))
+        midpoint = (low + high) / 2
+        if high < 36:
+            years = max(1, min(2, round(midpoint / 12)))
+            return f"{years}-year-old toddler"
+        return "toddler"
+
+    month = re.search(r"(\d{1,2})\s*(?:мес\.?|месяц\w*)", text)
+    if month and int(month.group(1)) < 36:
+        years = max(1, min(2, round(int(month.group(1)) / 12)))
+        return f"{years}-year-old toddler"
+    if re.search(r"до\s*3\s*(?:лет|года)", text):
+        return "toddler"
+
+    year_range = re.search(r"(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(?:лет|года|год)", text)
+    if year_range:
+        low, high = int(year_range.group(1)), int(year_range.group(2))
+        if high < 3:
+            return "toddler"
+        if low >= 7:
+            return "school-age child"
+        return "preschool child"
+
+    year = re.search(r"(\d{1,2})\s*(?:лет|года|год)\b", text)
+    if year:
+        value = int(year.group(1))
+        if value < 3:
+            return "toddler"
+        if value < 7:
+            return "preschool child"
+        return "school-age child"
+    return "young child"
+
+
+def _extract_first_visual_step(body_text: str) -> str:
+    lines = _sanitize_visual_post_body(body_text).split("\n")
+    headings = re.compile(r"^(?:как играть|как провести|что попробовать|ход игры|упражнение)\b", re.IGNORECASE)
+    action_words = re.compile(
+        r"\b(?:покаж\w*|предлож\w*|попрос\w*|полож\w*|возьм\w*|назов\w*|повтор\w*|"
+        r"удар\w*|хлоп\w*|выбер\w*|соедин\w*|укаж\w*|постав\w*|произнес\w*|прочит\w*|кат\w*)\b",
+        re.IGNORECASE,
+    )
+    for index, raw_line in enumerate(lines):
+        line = re.sub(r"^[^\wА-Яа-яЁё]+", "", raw_line).strip()
+        if headings.match(line):
+            inline = line.split(":", 1)[1].strip() if ":" in line else ""
+            if inline:
+                return inline
+            for candidate in lines[index + 1:index + 4]:
+                candidate = re.sub(r"^\s*(?:\d+[.)]|[-•–—])\s*", "", candidate).strip()
+                if candidate:
+                    return candidate
+    for raw_line in lines:
+        if action_words.search(raw_line):
+            return re.sub(r"^\s*(?:\d+[.)]|[-•–—])\s*", "", raw_line).strip()
+    return lines[0] if lines else ""
+
+
+def _action_requires_adult(action: str, body_text: str) -> bool:
+    text = f"{action} {_extract_first_visual_step(body_text)}".lower().replace("ё", "е")
+    return bool(
+        re.search(
+            r"\b(?:parent|adult|specialist|therapist|родител\w*|взросл\w*|специалист\w*|"
+            r"покаж\w*|предлож\w*|попрос\w*|дает|дайте|моделир\w*)\b",
+            text,
+        )
+    )
+
+
+def _visual_actor_terms(rubric_id: str) -> tuple[str, str]:
+    rubric = (rubric_id or "").strip().lower()
+    if rubric in PARENT_VISUAL_RUBRICS:
+        return "the parent", "the child"
+    if rubric == "method_piggybank":
+        return "the speech specialist", "the child"
+    if rubric == "age_norms":
+        return "the child", "the child"
+    return "the adult", "the child"
+
+
+def _deterministic_visual_action(body_text: str, rubric_id: str, props: List[str]) -> str:
+    text = f"{_extract_first_visual_step(body_text)} {body_text}".lower().replace("ё", "е")
+    actor, child = _visual_actor_terms(rubric_id)
+    single_child = actor == child
+    prop_set = set(props)
+    if "вежлив" in text and "просьб" in text:
+        request_targets: List[str] = []
+        if "toy" in prop_set:
+            request_targets.append("a toy")
+        if {"cup", "water"}.issubset(prop_set):
+            request_targets.append("a cup of water")
+        elif "cup" in prop_set:
+            request_targets.append("a cup")
+        elif "water" in prop_set:
+            request_targets.append("water")
+        target = " beside ".join(request_targets)
+        if single_child:
+            if target:
+                return f"the child makes a polite request while pointing to {target} and waits for a response"
+            return "the child makes a polite request and waits for a response"
+        if target:
+            return f"{actor} models a polite request while {child} points to {target} and repeats the request"
+        return f"{actor} models a polite request while {child} repeats the request and waits for a response"
+    if "drum" in prop_set and "metronome" in prop_set:
+        if single_child:
+            return "the child taps a drum in time with a metronome and follows the rhythm"
+        return f"{actor} taps a drum in time with a metronome while {child} copies the rhythm"
+    if "drum" in prop_set:
+        if single_child:
+            return "the child taps a drum and follows the rhythm"
+        return f"{actor} taps a drum while {child} copies the rhythm"
+    if "tambourine" in prop_set:
+        if single_child:
+            return "the child taps a tambourine and follows the rhythm"
+        return f"{actor} taps a tambourine while {child} copies the rhythm"
+    if "picture cards" in prop_set:
+        if single_child:
+            return "the child selects and names one picture card"
+        return f"{actor} shows one picture card while {child} points to and names the card"
+    if "toy car" in prop_set:
+        if single_child:
+            return "the child rolls a toy car and names the action"
+        return f"{actor} rolls a toy car while {child} names the action"
+    if "ball" in prop_set:
+        if single_child:
+            return "the child rolls a ball and repeats one target word"
+        return f"{actor} rolls a ball while {child} repeats one target word"
+    if "mirror" in prop_set:
+        if single_child:
+            return "the child copies one visible speech movement while looking in a mirror"
+        return f"{actor} demonstrates one speech movement while {child} copies it in a mirror"
+    if "book" in prop_set:
+        if single_child:
+            return "the child points to one page in a book and names what is shown"
+        return f"{actor} points to one page in a book while {child} names what is shown"
+    if single_child:
+        return "the child performs the first clearly described developmental action"
+    return f"{actor} demonstrates the first described activity while {child} responds"
+
+
+def _parse_visual_brief_json(raw: str) -> Tuple[Dict[str, object] | None, str]:
+    text = (raw or "").strip()
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None, "invalid_json"
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+    if not isinstance(payload, dict):
+        return None, "invalid_json"
+    action = norm_space(str(payload.get("action", "")))
+    setting = norm_space(str(payload.get("setting", "")))
+    props = payload.get("props", [])
+    if len(action) < 8 or re.search(r"[А-Яа-яЁё]", action):
+        return None, "invalid_action"
+    if not setting or re.search(r"[А-Яа-яЁё]", setting):
+        return None, "invalid_setting"
+    if not isinstance(props, list) or any(not isinstance(prop, str) for prop in props):
+        return None, "invalid_props"
+    return {"action": action, "setting": setting, "props": props}, "ok"
+
+
+def _normalize_visual_setting(setting: str, rubric_id: str) -> str:
+    rubric = (rubric_id or "").strip().lower()
+    if rubric == "method_piggybank":
+        return "simple uncluttered speech therapy room"
+    value = norm_space(setting).lower()
+    if any(token in value for token in ("home", "living room", "play area", "table")):
+        return "simple uncluttered home play area"
+    return "simple uncluttered play area"
+
+
+def _compile_image_prompt_from_payload(
+    payload: Dict[str, object],
+    *,
+    body_text: str,
+    audience: str,
+    rubric_id: str,
+) -> Tuple[str, VisualBrief | None, str]:
+    del audience
+    action = norm_space(str(payload.get("action", "")))
+    if len(action) < 8 or re.search(r"[А-Яа-яЁё]", action):
+        return "", None, "invalid_action"
+
+    allowed_props = _mentioned_visual_props(body_text)
+    requested_props = payload.get("props", [])
+    selected_props: List[str] = []
+    if isinstance(requested_props, list):
+        for raw_prop in requested_props:
+            value = norm_space(str(raw_prop)).lower()
+            for allowed in allowed_props:
+                if allowed == value or allowed in value or value in allowed:
+                    if allowed not in selected_props:
+                        selected_props.append(allowed)
+            if len(selected_props) >= 3:
+                break
+
+    rubric = (rubric_id or "").strip().lower()
+    age_descriptor = _extract_visual_age_descriptor(body_text)
+    adult_required = rubric == "age_norms" and _action_requires_adult(action, body_text)
+    brief = VisualBrief(
+        rubric_id=rubric,
+        role_rule=build_visual_role_rule(
+            rubric,
+            age_descriptor=age_descriptor,
+            adult_required=adult_required,
+        ),
+        age_descriptor=age_descriptor,
+        setting=_normalize_visual_setting(str(payload.get("setting", "")), rubric),
+        action=action,
+        props=tuple(selected_props[:3]),
+    )
+    prompt = _compile_visual_prompt(brief)
+    ok, reason = _validate_image_prompt(prompt, body_text=body_text, rubric_id=rubric)
+    if not ok:
+        return "", None, reason
+    return prompt, brief, "ok"
+
+
+def _deterministic_visual_prompt(body_text: str, audience: str, rubric_id: str) -> str:
+    props = _mentioned_visual_props(body_text)
+    payload: Dict[str, object] = {
+        "action": _deterministic_visual_action(body_text, rubric_id, props),
+        "setting": (
+            "simple speech therapy room"
+            if (rubric_id or "").strip().lower() == "method_piggybank"
+            else "simple home play area"
+        ),
+        "props": props,
+    }
+    prompt, _, _ = _compile_image_prompt_from_payload(
+        payload,
+        body_text=body_text,
+        audience=audience,
+        rubric_id=rubric_id,
+    )
+    return prompt
+
+
+def build_image_prompt_prompt(
+    title: str,
+    body_text: str,
+    audience: str,
+    rubric_id: str = "",
+) -> str:
+    safe_title = norm_space(title)
+    safe_body = _sanitize_visual_post_body(body_text)
+    rubric = (rubric_id or "").strip().lower()
+    age_descriptor = _extract_visual_age_descriptor(safe_body)
+    role_rule = build_visual_role_rule(rubric, age_descriptor=age_descriptor)
+    props = _mentioned_visual_props(safe_body)
+    first_step = _extract_first_visual_step(safe_body)
+    prop_rule = ", ".join(props) if props else "none"
+
+    return (
+        "Extract one visually distinct action from this educational post. Return JSON only, with exactly these keys:\n"
+        '{"action":"one visible action in English","setting":"one simple setting in English","props":["explicit prop"]}\n'
+        "The action must describe one observable interaction from the first concrete step. "
+        "Do not write an image prompt. Do not choose the number, roles, ages, art style, camera, or negative constraints.\n"
+        "Use only props from Allowed props; return at most three. Do not infer typical therapy equipment. "
+        "Never include probes, spatulas, tongue depressors, spoons used intraorally, or other oral tools.\n"
+        f"Audience: {audience or 'parents'}\n"
+        f"Rubric: {rubric or 'unknown'}\n"
+        f"Code-defined roles (context only, do not repeat): {role_rule}\n"
+        f"Detected age: {age_descriptor}\n"
+        f"Allowed props: {prop_rule}\n"
+        f"First concrete step: {first_step or 'not found'}\n"
+        f"Title: {safe_title}\n"
+        f"Post facts:\n{safe_body}\n"
+    )
+
+
+async def generate_image_prompt_async(
+    title: str,
+    body_text: str,
+    audience: str,
+    provider: str,
+    groq_key: str,
+    gemini_key: str,
+    rubric_id: str = "",
+) -> Tuple[str, bool, str]:
+    prov = (provider or "auto").strip().lower()
+    prompt = build_image_prompt_prompt(title=title, body_text=body_text, audience=audience, rubric_id=rubric_id)
+
+    async def _compile_raw(raw: str) -> Tuple[str, bool, str]:
+        payload, parse_reason = _parse_visual_brief_json(raw)
+        if payload is None:
+            return "", False, parse_reason
+        compiled, _, compile_reason = _compile_image_prompt_from_payload(
+            payload,
+            body_text=body_text,
+            audience=audience,
+            rubric_id=rubric_id,
+        )
+        return compiled, bool(compiled), compile_reason
+
+    async def _try_with_repair(
+        generate: Callable[[str], object],
+        provider_name: str,
+    ) -> Tuple[str, bool, str]:
+        raw = await generate(prompt)  # type: ignore[misc]
+        compiled, ok, reason = await _compile_raw(str(raw))
+        if ok:
+            return compiled, True, f"ok:{provider_name}"
+
+        repair_hint = {
+            "action_role_mismatch": "Use only the actor named in Code-defined roles.",
+            "action_unsupported_visual_prop": "Remove every object from action unless it is listed in Allowed props and props.",
+        }.get(reason, "")
+        repair_prompt = (
+            f"{prompt}\nThe previous response was invalid ({reason}). "
+            f"{repair_hint} Repair it once. Return only valid JSON with action, setting, and props."
+        )
+        repaired_raw = await generate(repair_prompt)  # type: ignore[misc]
+        repaired, repaired_ok, repaired_reason = await _compile_raw(str(repaired_raw))
+        if repaired_ok:
+            return repaired, True, f"ok:{provider_name}_retry"
+        return "", False, f"invalid_{provider_name}_image_brief:{repaired_reason}"
+
+    async def _try_groq() -> Tuple[str, bool, str]:
+        if not groq_key:
+            return "", False, "GROQ_API_KEY_missing"
+
+        async def generate(value: str) -> str:
+            return await groq_chat(value, groq_key)
+
+        return await _try_with_repair(generate, "groq")
+
+    async def _try_gemini() -> Tuple[str, bool, str]:
+        if not gemini_key:
+            return "", False, "GEMINI_API_KEY_missing"
+
+        async def generate(value: str) -> str:
+            return await gemini_generate(value, gemini_key)
+
+        return await _try_with_repair(generate, "gemini")
+
+    def fallback(note: str) -> Tuple[str, bool, str]:
+        compiled = _deterministic_visual_prompt(body_text, audience, rubric_id)
+        if compiled:
+            return compiled, True, f"ok:deterministic_fallback:{note}"
+        return "", False, f"image_prompt_failed:{note}"
+
+    if prov == "none":
+        return "", False, "provider:none"
+
+    groq_err = ""
+    if prov in ("auto", "groq"):
+        try:
+            result = await _try_groq()
+            if result[1]:
+                return result
+            groq_err = result[2]
+            if prov == "groq":
+                return fallback(groq_err)
+        except Exception as e:
+            groq_err = str(e)
+            if prov == "groq":
+                return fallback(f"groq_image_prompt_failed:{groq_err}")
+
+    if prov in ("auto", "gemini"):
+        try:
+            result = await _try_gemini()
+            if result[1]:
+                return result
+            return fallback(f"{result[2]}|groq={groq_err}")
+        except Exception as e:
+            if "gemini_quota_exhausted_cached" in str(e):
+                return fallback("gemini_quota_exhausted_cached")
+            if "gemini_quota_exhausted" in str(e):
+                return fallback("gemini_quota_exhausted")
+            return fallback(f"gemini_image_prompt_failed:{e}|groq={groq_err}")
+
+    return fallback(f"groq={groq_err}")
+
+
+PRO_FRIENDLY_REPAIR_EXACT_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
+    "pro_empty",
+    "pro_title_too_long",
+    "pro_markdown_or_template_leak",
+    "pro_generic_benefit",
+    "pro_missing_goal",
+    "pro_missing_materials",
+    "pro_missing_steps",
+    "pro_missing_observation_criterion",
+    "pro_missing_method_card_heading",
+    "pro_unsupported_observation_claim",
+    "pro_too_abstract",
+    "pro_old_academic_structure",
+    "pro_risky_manual_technique",
+}
+
+PRO_FRIENDLY_REPAIR_PREFIX_REASONS = (
+    "banned_phrase",
+    "unsupported_mechanism_claim",
+    "pro_unsupported_concrete_detail",
+    "pro_unsupported_numeric_detail",
+)
+
+
+def _should_repair_pro_friendly_reason(reason: str) -> bool:
+    reason = (reason or "").strip()
+    return reason in PRO_FRIENDLY_REPAIR_EXACT_REASONS or any(
+        reason.startswith(prefix + ":") for prefix in PRO_FRIENDLY_REPAIR_PREFIX_REASONS
+    )
+
+
+def build_pro_friendly_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    reason = (reason or "").strip()
+    if not _should_repair_pro_friendly_reason(reason):
+        return ""
+
+    if evidence_prevalidated:
+        safe_base_prompt = _remove_general_no_data_rules_for_prevalidated_evidence(base_prompt or "")
+        return (
+            safe_base_prompt
+            + _topic_instruction(topic_id, topic_title)
+            + "\n\nREPAIR: Evidence already passed pre-validation.\n"
+            + f"Validation reason: {reason}.\n"
+            + "Select one concrete action and one explicitly named exercise or material from the evidence anchors and evidence.\n"
+            + "Return a practical pro_friendly method card with exactly three short numbered steps.\n"
+            + "Do not add timers, repetition counts, new objects, progression stages, medical promises, or unsupported observations.\n"
+            + "Use only a safe alternative when the evidence contains a risky manual or intraoral action."
+        )
+
+    no_data_note = ""
+    if reason == "no_data_in_source":
+        no_data_note = (
+            "Pre-LLM evidence gate уже нашёл в источнике действие и упражнение/материал. "
+            "Не возвращай НЕТ_ДАННЫХ автоматически: построй карточку только из этих найденных действий и материалов, "
+            "не добавляя новых деталей. "
+        )
+
+    return (
+        base_prompt
+        + _topic_instruction(topic_id, topic_title)
+        + "\n\nПОВТОРИ pro_friendly method card. Предыдущий вариант не прошёл строгую валидацию.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + no_data_note
+        + "Верни структурированный Telegram-пост: H1 до 90 символов, затем 👩‍⚕️ Аудитория: специалисты, "
+        + "затем блоки 🎯 Цель:, 🧰 Материалы:, 🔁 Как провести: с ровно тремя короткими шагами 1., 2., 3., "
+        + "✅ На что смотреть:, 💡 Вариант усложнения:. "
+        + "Это должна быть практическая карточка метода, а не академический конспект. "
+        + "Не используй Введение, Главные выводы, Практическое применение, Суть или Выводы. "
+        + "В шагах должны быть конкретные действия специалиста и ребёнка. "
+        + "В ✅ На что смотреть: пиши только непосредственную наблюдаемую реакцию ребёнка из задания. "
+        + "Не придумывай медицинский результат, механизм работы, диагноз, улучшение функций мозга или долгосрочный эффект. "
+        + "Не повторяй рискованные ручные или внутриротовые действия: ввод зонда, шпателя, ложки или другого предмета в рот ребёнка, тяни, дави или смещай язык, самостоятельный массаж языка, нёба или дёсен. "
+        + "Строй карточку только из EVIDENCE; не придумывай таймеры, зеркало, карточки, картинки, уровни, режимы, "
+        + "программы, количество повторов или этапы прогрессии. "
+        + "Если после этого данных всё равно не хватает для действия и упражнения/материала — верни НЕТ_ДАННЫХ. "
+        + "Без Markdown, без звездочек, без placeholders."
+    )
+
+
+PARENT_CONTENT_REPAIR_REASONS = {
+    "parent_age_not_grounded",
+    "parent_age_range_too_broad",
+    "parent_age_action_mismatch",
+    "parent_nonobservable_benefit",
+    "thematic_nonobservable_benefit",
+    "parent_false_hearing_inference",
+    "parent_cross_language_sound_norm",
+    "parent_too_many_numbered_steps",
+}
+
+PARENT_CONTENT_REPAIR_INSTRUCTION = (
+    "Исправь только указанную проблему, сохранив EVIDENCE и формат. Для строки 👶 Возраст: используй только точный "
+    "числовой возрастной диапазон, явно присутствующий в EVIDENCE; не сужай и не расширяй его. Если формат допускает "
+    "отсутствие числового возраста и в EVIDENCE нет числового age anchor — убери числовой возраст вместо догадки. "
+    "Сузь возраст до подходящего конкретному действию только когда такой более узкий диапазон отдельно указан в EVIDENCE; "
+    "не требуй от младенца слов, фраз или открытого ответа; замени обещания и механизмы на наблюдаемую реакцию; "
+    "не называй игру проверкой слуха; не переноси английские звуки, примеры или нормы в русский текст; "
+    "объедини близкие действия, чтобы осталось не более четырех нумерованных шагов. Не добавляй новых материалов, примеров, чисел или упражнений."
+)
+
+BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
+    "missing_parent_safety_note",
+    "blanket_reassurance",
+    "misleading_politeness_framing",
+    "parent_risky_oral_manipulation",
+    "parent_ambiguous_latin_phoneme",
+    "bilingual_topic_mismatch",
+    "bilingual_missing_family_action",
+    "bilingual_false_causality",
+    "bilingual_unsupported_mechanism",
+    *PARENT_CONTENT_REPAIR_REASONS,
+}
+
+BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS = (
+    "banned_phrase",
+    "unsupported_mechanism_claim",
+)
+
+PARENT_RUSSIAN_PHONEME_PROMPT_RULE = (
+    "В русскоязычном посте обозначай русские звуки только кириллицей. "
+    "Используй понятную родителям запись: [п], [р], [с], [б]. "
+    "Не используй латинские символы /p/, /r/, /s/, [p], [r], [s] для обозначения русских звуков. "
+    "Не копируй IPA-символ из англоязычного EVIDENCE в русский родительский текст без перевода в однозначную русскую запись. "
+    "Если соответствие нельзя установить уверенно по EVIDENCE и русским примерам слов, убери буквенный символ и опиши упражнение словами. Не угадывай звук."
+)
+
+PARENT_EDITORIAL_PROMPT_RULE = (
+    "Для родительских рубрик выбирай узкий возраст из EVIDENCE, соответствующий именно этому упражнению или игре; "
+    "не переноси на весь пост самый широкий диапазон источника. Не требуй от младенца слова, фразы или открытого словесного ответа: "
+    "разрешены взгляд, улыбка, поворот, поиск глазами, жест, звук, лепет, показ и ожидание продолжения. "
+    "В блоке пользы описывай только наблюдаемое действие или реакцию ребенка, без обещаний развития, механизмов, слуховых проверок и диагнозов. "
+    "Не называй игру домашней проверкой слуха. Не переноси русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
+    "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
+    "с правильным согласованием, без длинной инструкции в H1."
+)
+
+PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION = (
+    "Не предлагай взрослому физически фиксировать, удерживать, прижимать, тянуть, смещать или массировать язык, губы, "
+    "челюсть, щёки, нёбо или дёсны ребёнка. Разрешены только: словесная модель взрослого; показ собственного движения "
+    "взрослым; самостоятельное повторение ребёнком; наблюдение за положением губ и языка; зеркало, только если оно прямо "
+    "присутствует в EVIDENCE. Не добавляй зеркало, инструменты или материалы, отсутствующие в EVIDENCE."
+)
+
+PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION = (
+    "\u0423\u0434\u0430\u043b\u0438 \u0434\u0432\u0443\u0441\u043c\u044b\u0441\u043b\u0435\u043d\u043d\u0443\u044e \u043b\u0430\u0442\u0438\u043d\u0441\u043a\u0443\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0440\u0443\u0441\u0441\u043a\u043e\u0433\u043e \u0437\u0432\u0443\u043a\u0430. \u0414\u043b\u044f \u0440\u0443\u0441\u0441\u043a\u043e\u0433\u043e \u0437\u0432\u0443\u043a\u0430 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u043a\u0438\u0440\u0438\u043b\u043b\u0438\u0447\u0435\u0441\u043a\u0443\u044e \u0431\u0443\u043a\u0432\u0443 \u0432 \u043a\u0432\u0430\u0434\u0440\u0430\u0442\u043d\u044b\u0445 \u0441\u043a\u043e\u0431\u043a\u0430\u0445: [\u043f], [\u0440], [\u0441]. "
+    "\u041e\u0440\u0438\u0435\u043d\u0442\u0438\u0440\u0443\u0439\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 EVIDENCE \u0438 \u0440\u0443\u0441\u0441\u043a\u0438\u0435 \u043f\u0440\u0438\u043c\u0435\u0440\u044b \u0441\u043b\u043e\u0432. \u041d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, \u0434\u043b\u044f \u0441\u043b\u043e\u0432 \u00ab\u043f\u0430\u043f\u0430\u00bb, \u00ab\u043f\u0438\u0440\u043e\u0433\u00bb, \u00ab\u043f\u0442\u0438\u0446\u0430\u00bb \u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u0430 \u0437\u0430\u043f\u0438\u0441\u044c [\u043f], \u043d\u043e \u043d\u0435 /p/ \u0438 \u043d\u0435 [p]. "
+    "\u0415\u0441\u043b\u0438 \u043f\u043e EVIDENCE \u043d\u0435\u043b\u044c\u0437\u044f \u0443\u0432\u0435\u0440\u0435\u043d\u043d\u043e \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u0440\u0443\u0441\u0441\u043a\u0443\u044e \u0431\u0443\u043a\u0432\u0443, \u043f\u0435\u0440\u0435\u0444\u043e\u0440\u043c\u0443\u043b\u0438\u0440\u0443\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043a\u0446\u0438\u044e \u0431\u0435\u0437 \u0431\u0443\u043a\u0432\u0435\u043d\u043d\u043e\u0433\u043e \u0441\u0438\u043c\u0432\u043e\u043b\u0430. \u041d\u0435 \u0443\u0433\u0430\u0434\u044b\u0432\u0430\u0439. "
+    "\u041d\u0435 \u0438\u0437\u043c\u0435\u043d\u044f\u0439 \u0430\u043d\u0433\u043b\u0438\u0439\u0441\u043a\u0438\u0435 \u0441\u043b\u043e\u0432\u0430 \u0438 \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0439 \u043d\u043e\u0432\u044b\u0435 \u043f\u0440\u0438\u043c\u0435\u0440\u044b."
+)
+
+THEMATIC_OBSERVABLE_BENEFIT_REPAIR_INSTRUCTION = (
+    "В блоке «💡 Что это дает» опиши только то, что взрослый может непосредственно увидеть или услышать. "
+    "Используй наблюдаемый результат: ребёнок повторяет, произносит, называет, различает, выбирает, показывает, "
+    "отвечает или составляет фразу. Не пиши о развитии внимания, связывании звука с образом, укреплении органов речи, "
+    "активации мозга, закреплении результата или других внутренних механизмах."
+)
+
+
+def _should_repair_bilingual_parents_reason(reason: str) -> bool:
+    reason = (reason or "").strip()
+    return reason in BILINGUAL_PARENTS_REPAIR_EXACT_REASONS or any(
+        reason.startswith(prefix + ":") for prefix in BILINGUAL_PARENTS_REPAIR_PREFIX_REASONS
+    )
+
+
+def build_bilingual_parents_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    previous_output: str = "",
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    reason = (reason or "").strip()
+    if not _should_repair_bilingual_parents_reason(reason):
+        return ""
+
+    previous_note = (
+        "\n\nПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous_output.strip()
+        if previous_output.strip()
+        else ""
+    )
+    return (
+        (base_prompt or "")
+        + _topic_instruction(topic_id, topic_title)
+        + previous_note
+        + "\n\nПОВТОРИ bilingual_parents пост. Предыдущий вариант не прошёл строгую валидацию.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + "Сохрани заголовок и строку 👶 Возраст:. "
+        + "Сохрани точный блок 🌍 Что помогает в двуязычной семье:. "
+        + "В этом блоке дай 2–4 конкретных семейных действия, основанных только на EVIDENCE. "
+        + "Явно опиши действие семьи с русским или домашним языком. "
+        + "Не представляй билингвизм, два языка или переключение языков как причину задержки речи или речевого расстройства. "
+        + "Не придумывай механизмы, диагнозы или терапевтические эффекты. "
+        + "Сохрани блок 💡 Что это дает:. "
+        + (
+            "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
+            if reason == "parent_risky_oral_manipulation"
+            else ""
+        )
+        + (
+            "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
+            if reason == "parent_ambiguous_latin_phoneme"
+            else ""
+        )
+        + (
+            "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            if reason in PARENT_CONTENT_REPAIR_REASONS
+            else ""
+        )
+        + "Не используй Markdown, placeholders или служебные маркеры."
+    )
+
+
+THEMATIC_PARENTS_REPAIR_EXACT_REASONS = {
+    "no_data_in_source",
+    "empty",
+    "too_short",
+    "template_leak",
+    "missing_parent_safety_note",
+    "blanket_reassurance",
+    "misleading_politeness_framing",
+    "parent_risky_oral_manipulation",
+    "parent_ambiguous_latin_phoneme",
+    "thematic_topic_mismatch",
+    "thematic_missing_home_action",
+    "thematic_unsupported_mechanism",
+    "thematic_missing_heading",
+    "thematic_nonobservable_benefit",
+    *PARENT_CONTENT_REPAIR_REASONS,
+}
+
+
+def build_thematic_parents_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    previous_output: str = "",
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    reason = (reason or "").strip()
+    if reason not in THEMATIC_PARENTS_REPAIR_EXACT_REASONS and not reason.startswith("banned_phrase:"):
+        return ""
+    previous_note = (
+        "\n\nПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous_output.strip()
+        if previous_output.strip()
+        else ""
+    )
+    return (
+        (base_prompt or "")
+        + _topic_instruction(topic_id, topic_title)
+        + previous_note
+        + "\n\nПОВТОРИ thematic_parents пост. Предыдущий вариант не прошёл строгую валидацию.\n"
+        + f"Точная причина валидации: {reason}\n"
+        + "Сохрани короткий заголовок, 👶 Возраст:, 🧭 Тема:, 🏠 Что можно попробовать дома: и 💡 Что это дает:. "
+        + "В домашнем блоке дай 2–4 конкретных действия, основанных только на EVIDENCE. "
+        + "Не добавляй диагнозы, обещания результата, неподтверждённые механизмы, материалы или таймеры. "
+        + "Не используй 🌍 Что помогает в двуязычной семье и не добавляй блок о двух языках, если тема не bilingualism. "
+        + (
+            "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
+            if reason == "parent_risky_oral_manipulation"
+            else ""
+        )
+        + (
+            "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
+            if reason == "parent_ambiguous_latin_phoneme"
+            else ""
+        )
+        + (
+            "\n" + THEMATIC_OBSERVABLE_BENEFIT_REPAIR_INSTRUCTION
+            if reason in {"thematic_nonobservable_benefit", "parent_risky_oral_manipulation"}
+            else ""
+        )
+        + (
+            "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            if reason in PARENT_CONTENT_REPAIR_REASONS
+            else ""
+        )
+        + "Не используй Markdown, placeholders или служебные маркеры."
+    )
+
+
+# -----------------------
+# Public API
+# -----------------------
+
+async def generate_post_plain_from_evidence_async(
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    provider: str,
+    groq_key: str,
+    gemini_key: str,
+    max_chars: int,
+    day_key: Optional[str] = None,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> Tuple[str, bool, str]:
+    prov = (provider or "auto").strip().lower()
+    aud = (audience or "parents").strip().lower()
+    dk = (day_key or "").strip().upper()
+    rf = (rubric_format or "").strip().lower()
+
+    ev = (evidence_text or "").strip()
+    if len(ev) < 260:
+        return "", False, "no_evidence_short"
+
+    is_pro_format = aud == "pros" or rf == "pro_friendly"
+    is_bilingual_format = rf == "bilingual_parents"
+    is_thematic_format = rf == "thematic_parents"
+    is_myth_fact_format = rf == "myth_fact"
+
+    if is_myth_fact_format:
+        myth_evidence_ok, myth_evidence_reason = validate_myth_fact_evidence_for_generation(ev, topic_id)
+        if not myth_evidence_ok:
+            return "", False, myth_evidence_reason
+
+    prompt = build_generation_prompt(
+        day_key=dk,
+        rubric_title=rubric_title,
+        rubric_format=rf,
+        audience=aud,
+        title_suffix=title_suffix,
+        source_domain=source_domain,
+        source_url=source_url,
+        evidence_text=ev,
+        disclaimer=disclaimer,
+        hashtags=hashtags,
+        max_chars=max_chars,
+        evidence_prevalidated=evidence_prevalidated,
+        topic_id=topic_id,
+        topic_title=topic_title,
+    )
+
+    def postprocess(s: str) -> str:
+        s = (s or "").strip().replace("\r\n", "\n")
+        s = re.sub(r"^```[a-zA-Z]*\n", "", s)
+        s = re.sub(r"\n```$", "", s)
+        s = _strip_placeholder_artifacts(s)
+        s = _strip_markdown_artifacts(s)
+        if aud == "pros" or rf == "pro_friendly":
+            s = _normalize_pro_structure(s)
+        s = _ensure_source_and_link(
+            text=s,
+            source_domain=source_domain,
+            source_url=source_url,
+        )
+        s = enforce_total_chars_keep_structure(s, max_chars)
+        return s.strip()
+
+    def validate(out: str) -> Tuple[bool, str]:
+        out_lines = _extract_nonempty_lines(out)
+        if out.strip() == "НЕТ_ДАННЫХ" or (
+            out_lines and out_lines[0].strip().upper().startswith("НЕТ_ДАННЫХ")
+        ):
+            return False, "no_data_in_source"
+        return _validate_output(
+            out,
+            day_key=dk,
+            rubric_format=rf,
+            audience=aud,
+            evidence_text=ev,
+            topic_id=topic_id,
+        )
+
+    def postprocess_repaired(s: str) -> tuple[str, bool]:
+        out = postprocess(s)
+        if not is_myth_fact_format:
+            return out, False
+        return _strip_unsupported_repaired_myth_age_line(out, ev)
+
+    if prov == "none":
+        return "", False, "provider:none"
+
+    groq_err = ""
+    repair_prompt = ""
+    def build_generic_repair_prompt(reason: str) -> str:
+        repair = (
+            prompt
+            + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+            + reason
+            + ". "
+            + "Сделай текст живее, плотнее и конкретнее. "
+            + "Не используй шаблонные фразы, placeholders, #пример_тега, #пример_тега_2 и служебные маркеры. "
+            + "Не выводи фразы вроде «Действуй как Логопед-дефектолог». "
+            + "Сразу иди к сути и не делай текст слишком коротким. "
+        )
+
+        if dk == "MO" or rf == "tip_of_day":
+            repair += (
+                "Для Monday обязательно: первая строка — один прикладной совет, "
+                "после возраста — одна конкретная фраза про домашний шаг на сегодня, "
+                "никаких обзоров темы и общих формулировок. "
+                "Сохрани блоки 🧩, 👄 и 💡."
+            )
+
+        if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
+            repair += (
+                "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
+                "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
+                "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
+            )
+
+        if reason == "parent_risky_oral_manipulation":
+            repair += "\n" + PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION
+        if reason == "parent_ambiguous_latin_phoneme":
+            repair += "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
+        if reason in PARENT_CONTENT_REPAIR_REASONS:
+            repair += "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+
+        if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
+            repair += (
+                "\\nДля myth_fact сохрани одну непустую строку 🔴 Миф:. "
+                "Исправляй только исходный claim из EVIDENCE: не придумывай новый миф, "
+                "новую чувствительную тему, возраст, число или фонему. "
+                "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."
+            )
+
+        if dk == "FR" or rf == "question_week":
+            repair += (
+                "Для Friday/question_week обязательно: сохрани формат вопрос-ответ, "
+                "добавь строку ❓ Вопрос недели:, затем дай ответ не короче 4 предложений, "
+                "сохрани блок 🧩 Что попробовать сегодня: и блок 💡 Что это дает:. "
+                "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+                "Запрещено оставлять «...», «…» или пустой блок. "
+                "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
+            )
+
+        if dk == "SU" or rf == "age_norms":
+            repair += (
+                "Для Sunday обязательно: только возрастные ориентиры и milestones, "
+                "без патологической, диагностической и коррекционной лексики, "
+                "с фразой «Каждый ребенок развивается индивидуально»."
+            )
+
+        return repair
+
+    if prov in ("auto", "groq"):
+        if not groq_key:
+            return "", False, "GROQ_API_KEY_missing"
+        try:
+            out = postprocess(await groq_chat(prompt, groq_key))
+            ok, reason = validate(out)
+            if ok:
+                return out, True, "ok:groq"
+
+            if is_pro_format:
+                repair_prompt = build_pro_friendly_repair_prompt(
+                    prompt,
+                    reason,
+                    evidence_prevalidated=evidence_prevalidated,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+            elif is_bilingual_format:
+                repair_prompt = build_bilingual_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+            elif is_thematic_format:
+                repair_prompt = build_thematic_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+            else:
+                repair_prompt = build_generic_repair_prompt(reason)
+            if repair_prompt:
+                out2, repaired_age_removed = postprocess_repaired(
+                    await groq_chat(repair_prompt, groq_key)
+                )
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, "ok:groq_retry"
+                groq_err = f"invalid_groq_retry:{reason2}"
+                if repaired_age_removed or reason2 == "parent_age_not_grounded":
+                    return "", False, groq_err
+            else:
+                groq_err = f"invalid_groq:{reason}"
+
+            if reason == "parent_age_not_grounded":
+                return "", False, groq_err
+
+            if prov == "groq":
+                return "", False, groq_err
+
+            print(f"[LLM][groq] invalid output, falling back to gemini: {groq_err}", flush=True)
+        except Exception as e:
+            groq_err = str(e)
+            if prov == "groq":
+                return "", False, f"groq_failed:{groq_err}"
+
+    if prov in ("auto", "gemini"):
+        if not gemini_key:
+            return "", False, "GEMINI_API_KEY_missing"
+        try:
+            out = postprocess(await gemini_generate(prompt, gemini_key))
+            ok, reason = validate(out)
+            if ok:
+                return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
+
+            if is_pro_format:
+                gemini_repair_prompt = build_pro_friendly_repair_prompt(
+                    prompt,
+                    reason,
+                    evidence_prevalidated=evidence_prevalidated,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif is_bilingual_format:
+                gemini_repair_prompt = build_bilingual_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif is_thematic_format:
+                gemini_repair_prompt = build_thematic_parents_repair_prompt(
+                    prompt,
+                    reason,
+                    previous_output=out,
+                    topic_id=topic_id,
+                    topic_title=topic_title,
+                )
+                if gemini_repair_prompt:
+                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
+                gemini_repair_prompt = build_generic_repair_prompt(reason)
+                out2, _ = postprocess_repaired(
+                    await gemini_generate(gemini_repair_prompt, gemini_key)
+                )
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
+                gemini_repair_prompt = build_generic_repair_prompt(reason)
+                if gemini_repair_prompt:
+                    out2, _ = postprocess_repaired(
+                        await gemini_generate(gemini_repair_prompt, gemini_key)
+                    )
+                    ok2, reason2 = validate(out2)
+                    if ok2:
+                        return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                    return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif (dk == "FR" or rf == "question_week") and (
+                reason in {"too_short", "no_data_in_source"} or reason.startswith("question_week_")
+            ):
+                gemini_repair_prompt = repair_prompt or (
+                    prompt
+                    + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
+                    + reason
+                    + ". "
+                    + "Для Friday/question_week обязательно сделай полноценный Telegram Q&A-пост: "
+                    + "короткий H1, строка 👶 Возраст:, строка ❓ Вопрос недели:, "
+                    + "ответ не короче 4 предложений, блок 🧩 Что попробовать сегодня:, "
+                    + "блок 💡 Что это дает:. "
+                    + "Блок 💡 Что это дает: обязателен и должен содержать одно законченное предложение минимум 20 символов после двоеточия. "
+                    + "Запрещено оставлять «...», «…» или пустой блок. "
+                    + "Если в источнике есть факты, мифы, рекомендации или возрастные ориентиры, "
+                    + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
+                    + "Итоговый текст: примерно 350–800 символов."
+                )
+                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                return "", False, f"invalid_gemini_retry:{reason2}"
+
+            return "", False, f"invalid_gemini:{reason}"
+        except Exception as e:
+            if "gemini_quota_exhausted_cached" in str(e):
+                return "", False, "gemini_quota_exhausted_cached"
+            if "gemini_quota_exhausted" in str(e):
+                return "", False, "gemini_quota_exhausted"
+            return "", False, f"gemini_failed:{e} | groq={groq_err}"
+
+    return "", False, f"llm_failed:groq={groq_err}"
+
+
+def generate_post_plain_from_evidence(
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    provider: str,
+    groq_key: str,
+    gemini_key: str,
+    max_chars: int,
+    day_key: Optional[str] = None,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> Tuple[str, bool, str]:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            generate_post_plain_from_evidence_async(
+                rubric_title=rubric_title,
+                rubric_format=rubric_format,
+                audience=audience,
+                title_suffix=title_suffix,
+                source_domain=source_domain,
+                source_url=source_url,
+                evidence_text=evidence_text,
+                disclaimer=disclaimer,
+                hashtags=hashtags,
+                provider=provider,
+                groq_key=groq_key,
+                gemini_key=gemini_key,
+                max_chars=max_chars,
+                day_key=day_key,
+                evidence_prevalidated=evidence_prevalidated,
+                topic_id=topic_id,
+                topic_title=topic_title,
+            )
+        )
+    raise RuntimeError(
+        "generate_post_plain_from_evidence called inside running event loop; use generate_post_plain_from_evidence_async()."
+    )

@@ -99,27 +99,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 3
+          fetch-depth: 4
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Guard exact corrective parent and scope
+      - name: Guard exact recovery parent and scope
         shell: bash
         run: |
           set -euo pipefail
           BASE="702f84e8a31cedc90d17290f661abbfcc66779b0"
           FIRST="6d054749d9c7421f885b2e268288d27d7e176663"
+          CORRECTIVE="375cf2cc8148cff1f1e68f1f424d2f8ffc24903c"
           test "$GITHUB_REF_NAME" = "agent/p1b-myth-fact-fidelity"
-          test "$(git rev-parse HEAD^)" = "$FIRST"
-          test "$(git rev-parse HEAD^^)" = "$BASE"
+          test "$(git rev-parse HEAD^)" = "$CORRECTIVE"
+          test "$(git rev-parse HEAD^^)" = "$FIRST"
+          test "$(git rev-parse HEAD^^^)" = "$BASE"
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
-          test "$(git rev-list --count "$BASE"..HEAD)" = "2"
+          test "$(git rev-list --count "$BASE"..HEAD)" = "3"
+          test "$(git rev-list --count "$BASE"..HEAD^)" = "2"
           test -z "$(git status --porcelain)"
+          test "$(git diff --name-only "$BASE"..HEAD^)" = ".github/workflows/publisher_policy_pr_checks.yml"
           test "$(git diff --name-only "$BASE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
-          test "$(git diff --name-only "$FIRST"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
+          test "$(git diff --name-only "$CORRECTIVE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
 
       - name: Apply deterministic P1B patch
         shell: bash
@@ -202,39 +206,52 @@ jobs:
           '''
           llm = replace_once(llm, format_anchor, format_new, "myth pre-provider evidence gate")
 
-          repair_anchor = '''        if reason in PARENT_CONTENT_REPAIR_REASONS:
-                  repair += "\\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+          repair_function_start = '    def build_generic_repair_prompt(reason: str) -> str:\n'
+          repair_function_end = '\n    if prov in ("auto", "groq"):\n'
+          if llm.count(repair_function_start) != 1:
+              raise RuntimeError("myth generic repair function: expected exactly one start boundary")
+          if llm.count(repair_function_end) != 1:
+              raise RuntimeError("myth generic repair function: expected exactly one end boundary")
+          repair_start = llm.index(repair_function_start)
+          repair_end = llm.index(repair_function_end, repair_start)
+          if repair_end <= repair_start:
+              raise RuntimeError("myth generic repair function: invalid boundary order")
+          repair_fragment = llm[repair_start:repair_end]
+          repair_insert_anchor = '        if dk == "FR" or rf == "question_week":\n'
+          repair_anchor_count = repair_fragment.count(repair_insert_anchor)
+          if repair_anchor_count != 1:
+              raise RuntimeError(
+                  f"myth generic repair instruction: expected exactly one bounded anchor, found {repair_anchor_count}"
+              )
+          myth_repair_block = '''        if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
+              repair += (
+                  "\\nДля myth_fact сохрани одну непустую строку 🔴 Миф:. "
+                  "Исправляй только исходный claim из EVIDENCE: не придумывай новый миф, "
+                  "новую чувствительную тему, возраст, число или фонему. "
+                  "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."
+              )
 
-              if dk == "FR" or rf == "question_week":
           '''
-          repair_new = '''        if reason in PARENT_CONTENT_REPAIR_REASONS:
-                  repair += "\\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
-
-              if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
-                  repair += (
-                      "\\nДля myth_fact сохрани одну непустую строку 🔴 Миф:. "
-                      "Исправляй только исходный claim из EVIDENCE: не придумывай новый миф, "
-                      "новую чувствительную тему, возраст, число или фонему. "
-                      "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."
-                  )
-
-              if dk == "FR" or rf == "question_week":
-          '''
-          llm = replace_once(llm, repair_anchor, repair_new, "myth generic repair instruction")
+          repair_fragment = repair_fragment.replace(
+              repair_insert_anchor,
+              myth_repair_block + repair_insert_anchor,
+              1,
+          )
+          llm = llm[:repair_start] + repair_fragment + llm[repair_end:]
 
           gemini_anchor = '''            elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
-                  gemini_repair_prompt = build_generic_repair_prompt(reason)
+              gemini_repair_prompt = build_generic_repair_prompt(reason)
           '''
           gemini_new = '''            elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
-                  gemini_repair_prompt = build_generic_repair_prompt(reason)
-                  out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
-                  ok2, reason2 = validate(out2)
-                  if ok2:
-                      return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
-                  return "", False, f"invalid_gemini_retry:{reason2}"
+              gemini_repair_prompt = build_generic_repair_prompt(reason)
+              out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+              ok2, reason2 = validate(out2)
+              if ok2:
+                  return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+              return "", False, f"invalid_gemini_retry:{reason2}"
 
               elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
-                  gemini_repair_prompt = build_generic_repair_prompt(reason)
+              gemini_repair_prompt = build_generic_repair_prompt(reason)
           '''
           llm = replace_once(llm, gemini_anchor, gemini_new, "myth Gemini bounded repair")
 

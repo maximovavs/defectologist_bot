@@ -78,7 +78,7 @@ TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
         "emergent literacy", "print awareness", "phonics", "reading readiness",
     ),
     "hearing_and_speech": (
-        "слух", "слуховое восприятие", "слышит", "hearing", "listening", "speech and language",
+        "слух", "слуховое восприятие", "слышит", "hearing", "listening", "hearing loss",
         "hearing screening",
     ),
     "bilingualism": (
@@ -123,7 +123,6 @@ RUBRIC_TOPIC_ROTATION: dict[str, tuple[str, ...]] = {
     ),
     "age_norms": (
         "early_communication", "vocabulary_phrase", "speech_sounds", "hearing_and_speech",
-        "everyday_communication",
     ),
 }
 

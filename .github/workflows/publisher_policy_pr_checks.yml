@@ -99,14 +99,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 7
+          fetch-depth: 8
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Guard exact publisher anchor recovery parent and scope
+      - name: Guard exact generated-code indentation recovery parent and scope
         shell: bash
         run: |
           set -euo pipefail
@@ -116,20 +116,22 @@ jobs:
           RECOVERY="b63f370e6f983834e9f0a1cade20dfbeb2245857"
           CLEANUP="8ad43b475ce7207bbc14bdd9bebf85c58e72237b"
           GEMINI="aa5d89b643a34a1170ade9bee9e9afb2b0a64028"
+          PUBLISHER="e95efe5a0ac814aab57f24fe3346838ffd9d3707"
           test "$GITHUB_REF_NAME" = "agent/p1b-myth-fact-fidelity"
-          test "$(git rev-parse HEAD^)" = "$GEMINI"
-          test "$(git rev-parse HEAD^^)" = "$CLEANUP"
-          test "$(git rev-parse HEAD^^^)" = "$RECOVERY"
-          test "$(git rev-parse HEAD^^^^)" = "$CORRECTIVE"
-          test "$(git rev-parse HEAD^^^^^)" = "$FIRST"
-          test "$(git rev-parse HEAD^^^^^^)" = "$BASE"
+          test "$(git rev-parse HEAD^)" = "$PUBLISHER"
+          test "$(git rev-parse HEAD^^)" = "$GEMINI"
+          test "$(git rev-parse HEAD^^^)" = "$CLEANUP"
+          test "$(git rev-parse HEAD^^^^)" = "$RECOVERY"
+          test "$(git rev-parse HEAD^^^^^)" = "$CORRECTIVE"
+          test "$(git rev-parse HEAD^^^^^^)" = "$FIRST"
+          test "$(git rev-parse HEAD^^^^^^^)" = "$BASE"
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
-          test "$(git rev-list --count "$BASE"..HEAD)" = "6"
-          test "$(git rev-list --count "$BASE"..HEAD^)" = "5"
+          test "$(git rev-list --count "$BASE"..HEAD)" = "7"
+          test "$(git rev-list --count "$BASE"..HEAD^)" = "6"
           test -z "$(git status --porcelain)"
           test "$(git diff --name-only "$BASE"..HEAD^)" = ".github/workflows/publisher_policy_pr_checks.yml"
           test "$(git diff --name-only "$BASE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
-          test "$(git diff --name-only "$GEMINI"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
+          test "$(git diff --name-only "$PUBLISHER"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
 
       - name: Apply deterministic P1B patch
         shell: bash
@@ -229,15 +231,16 @@ jobs:
               raise RuntimeError(
                   f"myth generic repair instruction: expected exactly one bounded anchor, found {repair_anchor_count}"
               )
-          myth_repair_block = '''        if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
-              repair += (
-                  "\\nДля myth_fact сохрани одну непустую строку 🔴 Миф:. "
-                  "Исправляй только исходный claim из EVIDENCE: не придумывай новый миф, "
-                  "новую чувствительную тему, возраст, число или фонему. "
-                  "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."
-              )
-
-          '''
+          myth_repair_block = (
+              '        if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:\n'
+              '            repair += (\n'
+              '                "\\\\nДля myth_fact сохрани одну непустую строку 🔴 Миф:. "\n'
+              '                "Исправляй только исходный claim из EVIDENCE: не придумывай новый миф, "\n'
+              '                "новую чувствительную тему, возраст, число или фонему. "\n'
+              '                "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."\n'
+              '            )\n'
+              '\n'
+          )
           repair_fragment = repair_fragment.replace(
               repair_insert_anchor,
               myth_repair_block + repair_insert_anchor,
@@ -262,15 +265,16 @@ jobs:
               raise RuntimeError(
                   f"myth Gemini bounded repair: expected exactly one bounded anchor, found {gemini_anchor_count}"
               )
-          myth_gemini_block = '''            elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
-                gemini_repair_prompt = build_generic_repair_prompt(reason)
-                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
-                ok2, reason2 = validate(out2)
-                if ok2:
-                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
-                return "", False, f"invalid_gemini_retry:{reason2}"
-
-          '''
+          myth_gemini_block = (
+              '            elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:\n'
+              '                gemini_repair_prompt = build_generic_repair_prompt(reason)\n'
+              '                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))\n'
+              '                ok2, reason2 = validate(out2)\n'
+              '                if ok2:\n'
+              '                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"\n'
+              '                return "", False, f"invalid_gemini_retry:{reason2}"\n'
+              '\n'
+          )
           gemini_fragment = gemini_fragment.replace(
               gemini_insert_anchor,
               myth_gemini_block + gemini_insert_anchor,
@@ -349,27 +353,28 @@ jobs:
                   f"publisher pre-LLM myth gate: expected exactly one bounded pro anchor, found {pre_llm_pro_count}"
               )
 
-          myth_pre_llm_block = '''                if llm_rubric_format == "myth_fact":
-              myth_evidence_ok, myth_evidence_reason = validate_myth_fact_evidence_for_generation(
-                  evidence,
-                  effective_topic_id,
-              )
-              if not myth_evidence_ok:
-                  kind = note(myth_evidence_reason, canon)
-                  print(
-                      f"[SKIP][{kind}] {myth_evidence_reason} "
-                      f"stage=pre_llm source={candidate_source_id} url={canon}",
-                      flush=True,
-                  )
-                  if kind == "hard":
-                      rubric_skips += 1
-                  if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
-                      note("max_skips_per_rubric", rubric_id)
-                      print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
-                      break
-                  continue
-
-          '''
+          myth_pre_llm_block = (
+              '                if llm_rubric_format == "myth_fact":\n'
+              '                    myth_evidence_ok, myth_evidence_reason = validate_myth_fact_evidence_for_generation(\n'
+              '                        evidence,\n'
+              '                        effective_topic_id,\n'
+              '                    )\n'
+              '                    if not myth_evidence_ok:\n'
+              '                        kind = note(myth_evidence_reason, canon)\n'
+              '                        print(\n'
+              '                            f"[SKIP][{kind}] {myth_evidence_reason} "\n'
+              '                            f"stage=pre_llm source={candidate_source_id} url={canon}",\n'
+              '                            flush=True,\n'
+              '                        )\n'
+              '                        if kind == "hard":\n'
+              '                            rubric_skips += 1\n'
+              '                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:\n'
+              '                            note("max_skips_per_rubric", rubric_id)\n'
+              '                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)\n'
+              '                            break\n'
+              '                        continue\n'
+              '\n'
+          )
           pub = pub[:pre_llm_start] + myth_pre_llm_block + pub[pre_llm_start:]
 
           LLM.write_text(llm, encoding="utf-8")

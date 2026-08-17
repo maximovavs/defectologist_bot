@@ -958,6 +958,22 @@ def _validate_parent_age_evidence_output(text: str, evidence_text: str) -> Tuple
     return False, "parent_age_not_grounded"
 
 
+def _strip_unsupported_repaired_myth_age_line(
+    text: str,
+    evidence_text: str,
+) -> tuple[str, bool]:
+    ok, reason = _validate_parent_age_evidence_output(text, evidence_text)
+    if ok or reason != "parent_age_not_grounded":
+        return text, False
+
+    lines = (text or "").splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*👶\s*Возраст\s*:", line, flags=re.IGNORECASE):
+            del lines[index]
+            return "".join(lines), True
+    return text, False
+
+
 PARENT_CONTENT_FORMATS = frozenset(PARENT_ORAL_SAFETY_FORMATS)
 PARENT_AGE_ACTION_RE = re.compile(
     r"(?:реб[её]н(?:ок|ка)|малыш\w*).{0,100}(?:повтор\w*\s+слово|сказ\w*\s+слово|назва\w*\s+(?:предмет|слово)|"
@@ -3615,6 +3631,12 @@ async def generate_post_plain_from_evidence_async(
             topic_id=topic_id,
         )
 
+    def postprocess_repaired(s: str) -> tuple[str, bool]:
+        out = postprocess(s)
+        if not is_myth_fact_format:
+            return out, False
+        return _strip_unsupported_repaired_myth_age_line(out, ev)
+
     if prov == "none":
         return "", False, "provider:none"
 
@@ -3719,11 +3741,15 @@ async def generate_post_plain_from_evidence_async(
             else:
                 repair_prompt = build_generic_repair_prompt(reason)
             if repair_prompt:
-                out2 = postprocess(await groq_chat(repair_prompt, groq_key))
+                out2, repaired_age_removed = postprocess_repaired(
+                    await groq_chat(repair_prompt, groq_key)
+                )
                 ok2, reason2 = validate(out2)
                 if ok2:
                     return out2, True, "ok:groq_retry"
                 groq_err = f"invalid_groq_retry:{reason2}"
+                if repaired_age_removed or reason2 == "parent_age_not_grounded":
+                    return "", False, groq_err
             else:
                 groq_err = f"invalid_groq:{reason}"
 
@@ -3795,7 +3821,9 @@ async def generate_post_plain_from_evidence_async(
 
             elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
-                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                out2, _ = postprocess_repaired(
+                    await gemini_generate(gemini_repair_prompt, gemini_key)
+                )
                 ok2, reason2 = validate(out2)
                 if ok2:
                     return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
@@ -3804,7 +3832,9 @@ async def generate_post_plain_from_evidence_async(
             elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
                 if gemini_repair_prompt:
-                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    out2, _ = postprocess_repaired(
+                        await gemini_generate(gemini_repair_prompt, gemini_key)
+                    )
                     ok2, reason2 = validate(out2)
                     if ok2:
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"

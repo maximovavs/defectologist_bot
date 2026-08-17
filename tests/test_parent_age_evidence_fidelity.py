@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from src.services import llm_generator as llm
 from src.services.llm_generator import (
+    _strip_unsupported_repaired_myth_age_line,
     _validate_cross_language_sound_output,
     _validate_output,
     _validate_parent_age_action_fit,
@@ -29,6 +30,25 @@ VALID_OUTPUT = (
     "Продолжайте короткий обмен без требования обязательного ответа и без проверки результата дома."
 )
 INVALID_AGE_OUTPUT = VALID_OUTPUT.replace("2–3 года", "4–5 лет")
+
+MYTH_EVIDENCE = (
+    "A common myth is that bilingualism causes language delay. "
+    "Bilingualism does not cause language delay, and using two languages is not itself a language disorder. "
+    "Families can keep using the home language during books, meals, and play. "
+    "Children can participate in ordinary family conversations while learning the community language too. "
+    "There is no evidence that two languages by themselves create a speech or language disorder."
+)
+
+REPAIRED_MYTH_WITH_UNSUPPORTED_AGE = (
+    "Два языка не вызывают задержку сами по себе\n\n"
+    "👶 Возраст: 3–6 лет\n\n"
+    "🔴 Миф: Два языка вызывают задержку речи.\n\n"
+    "Двуязычие само по себе не является причиной задержки речи. В семье можно продолжать использовать "
+    "домашний язык в обычных разговорах, чтении и игре, не превращая общение в проверку ребёнка.\n\n"
+    "🧩 Что попробовать сегодня:\n"
+    "Прочитайте знакомую книгу на домашнем языке и обсудите две картинки короткими фразами.\n\n"
+    "💡 Что это дает: Ребёнок участвует в семейном разговоре и отвечает доступным ему способом."
+)
 
 
 class ParentAgeEvidenceFidelityTest(unittest.TestCase):
@@ -175,7 +195,58 @@ class ParentAgeEvidenceFidelityTest(unittest.TestCase):
         )
 
 
+class ParentAgeMythRepairSanitizerTest(unittest.TestCase):
+    def test_repaired_myth_removes_only_unsupported_age_line(self):
+        cleaned, removed = _strip_unsupported_repaired_myth_age_line(
+            REPAIRED_MYTH_WITH_UNSUPPORTED_AGE,
+            MYTH_EVIDENCE,
+        )
+        self.assertTrue(removed)
+        self.assertEqual(
+            cleaned,
+            REPAIRED_MYTH_WITH_UNSUPPORTED_AGE.replace(
+                "👶 Возраст: 3–6 лет\n",
+                "",
+                1,
+            ),
+        )
+
+    def test_repaired_myth_keeps_grounded_age_line(self):
+        evidence = MYTH_EVIDENCE + " This guidance applies to children aged 3-6 years."
+        cleaned, removed = _strip_unsupported_repaired_myth_age_line(
+            REPAIRED_MYTH_WITH_UNSUPPORTED_AGE,
+            evidence,
+        )
+        self.assertFalse(removed)
+        self.assertEqual(cleaned, REPAIRED_MYTH_WITH_UNSUPPORTED_AGE)
+
+
 class ParentAgeEvidenceRepairTest(unittest.IsolatedAsyncioTestCase):
+    async def _generate_myth(
+        self,
+        *,
+        provider="gemini",
+        groq_key="",
+        gemini_key="gemini-key",
+    ):
+        return await llm.generate_post_plain_from_evidence_async(
+            rubric_title="Миф / факт",
+            rubric_format="myth_fact",
+            audience="parents",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=MYTH_EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            provider=provider,
+            groq_key=groq_key,
+            gemini_key=gemini_key,
+            max_chars=1200,
+            day_key="WE",
+            topic_id="bilingualism",
+        )
+
     async def test_gemini_age_repair_is_bounded_to_one_retry(self):
         evidence = _long_evidence("2-3 years")
         responses = [INVALID_AGE_OUTPUT, VALID_OUTPUT]
@@ -236,6 +307,57 @@ class ParentAgeEvidenceRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, "")
         self.assertFalse(ok)
         self.assertEqual(note, "invalid_groq_retry:parent_age_not_grounded")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+    async def test_repaired_myth_with_unsupported_age_is_sanitized_once(self):
+        invalid = (
+            "Два языка в семье\n"
+            "👶 Возраст: 3–6 лет\n"
+            + ("Полезный текст без строки мифа. " * 15)
+        )
+        responses = [invalid, REPAIRED_MYTH_WITH_UNSUPPORTED_AGE]
+
+        async def fake_gemini(prompt, api_key):
+            return responses.pop(0)
+
+        with patch.object(llm, "gemini_generate", side_effect=fake_gemini) as gemini_mock:
+            out, ok, note = await self._generate_myth()
+
+        self.assertTrue(ok, note)
+        self.assertIn("🔴 Миф: Два языка вызывают задержку речи.", out)
+        self.assertNotIn("👶 Возраст:", out)
+        self.assertEqual(gemini_mock.call_count, 2)
+        self.assertTrue(note.startswith("ok:gemini_retry:"), note)
+
+    async def test_repaired_myth_cleanup_preserves_other_failure_without_fallback(self):
+        invalid = (
+            "Два языка в семье\n"
+            "👶 Возраст: 3–6 лет\n"
+            + ("Полезный текст без строки мифа. " * 15)
+        )
+        bad_repair = REPAIRED_MYTH_WITH_UNSUPPORTED_AGE.replace(
+            "🔴 Миф: Два языка вызывают задержку речи.",
+            "🔴 Миф: Если ребёнок повторяет слово, слух точно в норме.",
+        )
+        responses = [invalid, bad_repair]
+
+        async def fake_groq(prompt, api_key):
+            return responses.pop(0)
+
+        gemini_mock = AsyncMock(return_value=REPAIRED_MYTH_WITH_UNSUPPORTED_AGE)
+        with patch.object(llm, "groq_chat", side_effect=fake_groq) as groq_mock, patch.object(
+            llm, "gemini_generate", gemini_mock
+        ):
+            out, ok, note = await self._generate_myth(
+                provider="auto",
+                groq_key="groq-key",
+                gemini_key="gemini-key",
+            )
+
+        self.assertEqual(out, "")
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_groq_retry:myth_topic_mismatch")
         self.assertEqual(groq_mock.call_count, 2)
         gemini_mock.assert_not_awaited()
 

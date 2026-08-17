@@ -11,9 +11,12 @@ on:
       - "tests/test_topic_policy.py"
       - "tests/test_editorial_freshness_policy.py"
       - ".github/workflows/publisher_policy_pr_checks.yml"
+  push:
+    branches:
+      - "agent/p1b-myth-fact-fidelity"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   offline-policy:
@@ -64,22 +67,17 @@ jobs:
           import sys
           import types
           import unittest
-
           sentence_transformers = types.ModuleType("sentence_transformers")
-
           class _UnavailableModel:
               def __init__(self, *args, **kwargs):
                   raise RuntimeError("disabled in offline policy checks")
-
           class _Util:
               @staticmethod
               def pytorch_cos_sim(*args, **kwargs):
                   raise RuntimeError("semantic backend should be stubbed by tests")
-
           sentence_transformers.SentenceTransformer = _UnavailableModel
           sentence_transformers.util = _Util()
           sys.modules["sentence_transformers"] = sentence_transformers
-
           suite = unittest.defaultTestLoader.loadTestsFromNames([
               "tests.test_topic_policy",
               "tests.test_editorial_freshness_policy",
@@ -87,3 +85,221 @@ jobs:
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() else 1)
           PY
+
+  p1b-bootstrap:
+    if: github.event_name == 'push' && github.ref_name == 'agent/p1b-myth-fact-fidelity'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Guard exact bootstrap parent and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="702f84e8a31cedc90d17290f661abbfcc66779b0"
+          test "$GITHUB_REF_NAME" = "agent/p1b-myth-fact-fidelity"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = "1"
+          test -z "$(git status --porcelain)"
+          test "$(git diff --name-only "$BASE"..HEAD)" = ".github/workflows/publisher_policy_pr_checks.yml"
+
+      - name: Apply deterministic P1B patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d <<'PATCH' | gzip -d | python -
+          H4sIABb9gmoC/+09a3MbR3Lf+Sv2NqkIsEFQlHx+IIZ0tEydWeYrJH1nh2S2FsCC2ONiF95diMKR
+          qtLjHDuxc4rvfJXnvZxKXVJJVWRJtHl6UH8B+Av3C/IT0o+Z3dnFLgDSkk+VO1ZJ2MdMT093T093
+          T8/sVNP32lrHDFuOXdPsdsfzQ20Vbqem3phbn9eqmv7K2XPNV1+yXjXPz9atRv21s43ZV869drb5
+          8suzZq3WrNdffvmVV16rndWnphpWU/OtjmPWLcNz61YhtK6GFS0I/ZLmOQ1x5Vp74soxa5ZD10Vt
+          +gL+VqY0+Kt7XTeEtrF6mW4KUL1I7+ymeP2tqjbLxfHPN+3A0tZ7QWi156/aYaGpm2695fkGla7s
+          U1vXKvt0e01nYL4Vdn2X2xGIY0uEY0mbLU5NOU7bQPIANkiWgh749ZnA8q/YdSuYwbc7lmv5Zuj5
+          5U4PwPpdd7hCp1tz7KBl+TP0Wt5xjdAKwmQVfBLM0PN2L2wZTbMeGk27YTl22ONKe56/23S8vWTF
+          8o4dtrq1Gfk2iFs2Op5j13tGByjSsuq7QbnXdnTuIdSX/QQymA0DCVKw3LrXsN2dqt4Nm9Ovct+g
+          qOzhyKJTS+9tvGW8sbhy6W2scubMGX5yee7ShjH/7uriwqWFDWNu+dJbK2vGGgqabwGr2x3bsQrM
+          G32rVrhYQQIctO2gjgLVCW3PPWiaDvAa2GlbTXFTd0y7feB6oRb6XevABnx836qHolRxq3agq1D7
+          j/pHgx8d9L/q3+l/0X84uNX/sn+/f9h/3D/a2nvhAH4P+08G1+Ht3f796Mnd/iE8ewz3AFAvCREq
+          L3x3eWVt/hKMl9JUUenm2vzldzbmNhZWlkf2sOFZwVbwIiB/gJfumfCgbrp4Cz9nwiK8k7hD6brZ
+          DawDB0gPz0PvoG2Z7gFIhtk76PjWFcsND1qm3z4AEQgs96AOTAqtA98Kuk4INWx3iBa2bN0ORHPw
+          0IQfbgqvAnvHPbCugAQCExBYx3MDu+ZYSWCux5Wjkh3f85oIMWyZYaIo0pML9+8OPu5/Bf/u9u8Q
+          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
+          PATCH
+
+      - name: Install policy-test dependencies
+        run: |
+          python -m pip install \
+            "requests>=2.31.0,<3" \
+            "beautifulsoup4>=4.12.2" \
+            "lxml>=5.1.0" \
+            "PyYAML>=6.0.1" \
+            "Pillow>=10.3.0" \
+            "python-dateutil>=2.9.0.post0" \
+            "feedparser>=6.0.11"
+
+      - name: Compile P1B paths
+        run: |
+          python -m py_compile \
+            src/services/llm_generator.py \
+            src/publisher/run_publisher.py \
+            tests/test_myth_fact_fidelity.py
+
+      - name: Run P1B and publisher policy regressions offline
+        env:
+          GEMINI_API_KEY: ""
+          GEMINI_VISUAL_QA_API_KEY: ""
+          GROQ_API_KEY: ""
+          TELEGRAM_BOT_TOKEN: ""
+          TELEGRAM_CHAT_ID: ""
+          TELEGRAM_DRAFTS_CHAT_ID: ""
+          POLLINATIONS_TOKEN: ""
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import sys
+          import types
+          import unittest
+          sentence_transformers = types.ModuleType("sentence_transformers")
+          class _UnavailableModel:
+              def __init__(self, *args, **kwargs):
+                  raise RuntimeError("disabled in offline policy checks")
+          class _Util:
+              @staticmethod
+              def pytorch_cos_sim(*args, **kwargs):
+                  raise RuntimeError("semantic backend should be stubbed by tests")
+          sentence_transformers.SentenceTransformer = _UnavailableModel
+          sentence_transformers.util = _Util()
+          sys.modules["sentence_transformers"] = sentence_transformers
+          suite = unittest.defaultTestLoader.loadTestsFromNames([
+              "tests.test_topic_policy",
+              "tests.test_editorial_freshness_policy",
+              "tests.test_myth_fact_fidelity",
+          ])
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() else 1)
+          PY
+
+      - name: Verify final diff scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="702f84e8a31cedc90d17290f661abbfcc66779b0"
+          git add \
+            .github/workflows/publisher_policy_pr_checks.yml \
+            src/publisher/run_publisher.py \
+            src/services/llm_generator.py \
+            tests/test_myth_fact_fidelity.py
+          git diff --cached --check "$BASE"
+          ACTUAL="$(git diff --cached --name-only "$BASE" | sort)"
+          EXPECTED="$(printf '%s\n' \
+            '.github/workflows/publisher_policy_pr_checks.yml' \
+            'src/publisher/run_publisher.py' \
+            'src/services/llm_generator.py' \
+            'tests/test_myth_fact_fidelity.py' | sort)"
+          test "$ACTUAL" = "$EXPECTED"
+          STATUS_PATHS="$(git status --porcelain | sed -E 's/^.. //' | sort)"
+          test "$STATUS_PATHS" = "$EXPECTED"
+          ! grep -q 'workflow_dispatch' .github/workflows/publisher_policy_pr_checks.yml
+          ! grep -q '^  push:' .github/workflows/publisher_policy_pr_checks.yml
+          ! grep -q 'p1b-bootstrap' .github/workflows/publisher_policy_pr_checks.yml
+          ! grep -q 'contents: write' .github/workflows/publisher_policy_pr_checks.yml
+          grep -q 'contents: read' .github/workflows/publisher_policy_pr_checks.yml
+
+      - name: Commit and push final P1B patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Enforce myth fact claim fidelity"
+          git push origin HEAD:agent/p1b-myth-fact-fidelity

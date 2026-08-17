@@ -36,6 +36,7 @@ from src.publisher.dedup_policy import (
     SEMANTIC_THRESHOLD_SOURCE,
     SOURCE_COOLDOWN_DAYS,
     extract_editorial_core,
+    is_scientific_domain,
     semantic_editorial_core_threshold,
     semantic_post_threshold_for_rubric,
     should_bypass_duplicate_reason,
@@ -222,6 +223,7 @@ SOFT_SKIP_REASONS = {
     "dup_semantic_post",
     "rubric_topic_mismatch_source",
     "rubric_topic_mismatch_post",
+    "source_authority_required",
     "tip_of_day_post_too_generic",
     "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
@@ -355,6 +357,63 @@ AGE_NORMS_GOOD_MARKERS = [
     "речевое развитие",
     "что умеет",
     "что обычно",
+]
+AGE_NORMS_SOURCE_GOOD_MARKERS = [
+    "milestone",
+    "developmental milestone",
+    "communication milestone",
+    "возрастн",
+    "ориентир",
+    "месяц",
+    "months",
+    "years old",
+    "by age",
+]
+AGE_NORMS_SOURCE_BAD_MARKERS = [
+    "speech delay",
+    "language delay",
+    "late language emergence",
+    "speech disorder",
+    "language disorder",
+    "communication disorder",
+    "hearing loss",
+    "diagnos",
+    "патолог",
+    "диагноз",
+    "задержк речи",
+    "задержк язык",
+    "нарушени речи",
+]
+DEVELOPMENTAL_RISK_MARKERS = [
+    "speech delay",
+    "language delay",
+    "late language emergence",
+    "regression",
+    "lost skills",
+    "loss of skills",
+    "stopped talking",
+    "stops talking",
+    "does not understand speech",
+    "doesn't understand speech",
+    "hearing loss",
+    "hearing screening",
+    "speech disorder",
+    "language disorder",
+    "communication disorder",
+    "diagnos",
+    "задержк речи",
+    "задержк язык",
+    "регресс",
+    "потерял навык",
+    "потеря навык",
+    "перестал говор",
+    "не понимает речь",
+    "снижение слух",
+    "потеря слух",
+    "проверка слух",
+    "диагноз",
+    "диагност",
+    "нарушени речи",
 ]
 TIP_OF_DAY_BAD_MARKERS = [
     "совет логопеда дня",
@@ -1002,6 +1061,27 @@ def _is_age_norms_content_fit(text: str) -> bool:
     blob = (text or "").lower().replace("ё", "е")
     return not _contains_any_marker(blob, AGE_NORMS_BAD_MARKERS) and _contains_any_marker(
         blob, AGE_NORMS_GOOD_MARKERS
+    )
+
+
+def _is_age_norms_source_fit(text: str) -> bool:
+    blob = (text or "").lower().replace("ё", "е")
+    return not _contains_any_marker(blob, AGE_NORMS_SOURCE_BAD_MARKERS) and _contains_any_marker(
+        blob, AGE_NORMS_SOURCE_GOOD_MARKERS
+    )
+
+
+def _evidence_has_developmental_risk(text: str) -> bool:
+    return _contains_any_marker(text, DEVELOPMENTAL_RISK_MARKERS)
+
+
+def _requires_tier1_source(rubric_id: str, effective_topic_id: str, evidence: str) -> bool:
+    rubric = (rubric_id or "").strip().lower()
+    topic = (effective_topic_id or "").strip().lower()
+    return (
+        rubric == "age_norms"
+        or topic == "hearing_and_speech"
+        or _evidence_has_developmental_risk(evidence)
     )
 
 
@@ -2184,11 +2264,31 @@ async def amain() -> None:
                             flush=True,
                         )
 
-                if rubric_id == "age_norms" and not _is_age_norms_content_fit(evidence):
+                if rubric_id == "age_norms" and not _is_age_norms_source_fit(evidence):
                     kind = note("rubric_topic_mismatch_source", canon)
                     print(
                         f"[SKIP][{kind}] rubric_topic_mismatch_source source={candidate_source_id} "
                         f"url={canon}",
+                        flush=True,
+                    )
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+
+                candidate_domain = safe_domain(canon) or safe_domain(url)
+                if _requires_tier1_source(rubric_id, effective_topic_id, evidence) and not is_scientific_domain(
+                    candidate_domain,
+                    scientific_domains,
+                ):
+                    kind = note("source_authority_required", canon)
+                    print(
+                        f"[SKIP][{kind}] source_authority_required source={candidate_source_id} "
+                        f"rubric={rubric_id} topic={effective_topic_id or '(none)'} "
+                        f"domain={candidate_domain or '(none)'} url={canon}",
                         flush=True,
                     )
                     if kind == "hard":
@@ -2318,7 +2418,7 @@ async def amain() -> None:
                             break
                         continue
 
-                sd = safe_domain(canon) or safe_domain(url) or "источник"
+                sd = candidate_domain or "источник"
 
                 llm_rubric_format = rf
                 if rubric_id.lower() == "bilingual_corner":

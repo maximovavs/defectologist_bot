@@ -1530,6 +1530,24 @@ def evaluate_visual_quality(
             status_label = "timeout"
             print(f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={status_label}", flush=True)
             last_trigger = status_label
+            model_candidates = _visual_qa_model_candidates(model)
+            if _allow_model_fallback and len(model_candidates) > 1:
+                fallback_model = model_candidates[1]
+                print(
+                    f"[VISUAL][QA_MODEL_FALLBACK] from={model} to={fallback_model} "
+                    f"trigger={status_label}",
+                    flush=True,
+                )
+                return evaluate_visual_quality(
+                    image_buffer,
+                    rubric_id=rubric_id,
+                    audience=audience,
+                    gemini_api_key=gemini_api_key,
+                    model=fallback_model,
+                    expected_prompt=expected_prompt,
+                    qa_mode=qa_mode,
+                    _allow_model_fallback=False,
+                )
             if attempt < max_attempts:
                 next_source = key_candidates[attempt][0]
                 print(

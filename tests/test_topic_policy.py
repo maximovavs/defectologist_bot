@@ -140,6 +140,26 @@ class TopicPolicyTest(unittest.TestCase):
             (),
         )
 
+    def test_speech_and_language_phrase_alone_is_not_hearing(self):
+        topics = detect_evidence_topics(
+            "Speech and language development can be supported through conversation and shared reading."
+        )
+        self.assertNotIn("hearing_and_speech", topics)
+
+    def test_hearing_specific_cues_still_detect_hearing(self):
+        examples = (
+            "A hearing screening can identify children who need further assessment.",
+            "Hearing loss may affect access to spoken language.",
+            "Понаблюдайте за реакцией на звук, а проверку слуха проводит специалист.",
+        )
+        for evidence in examples:
+            with self.subTest(evidence=evidence):
+                self.assertIn("hearing_and_speech", detect_evidence_topics(evidence))
+
+    def test_age_norms_rotation_excludes_everyday_communication(self):
+        self.assertNotIn("everyday_communication", RUBRIC_TOPIC_ROTATION["age_norms"])
+        self.assertIn("hearing_and_speech", RUBRIC_TOPIC_ROTATION["age_norms"])
+
     def test_thursday_config_and_diagnostics_are_topic_aware(self):
         cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
         self.assertNotIn("#билингвизм", cfg["channel"]["hashtags"])
@@ -184,6 +204,99 @@ class TopicPolicyTest(unittest.TestCase):
         source = inspect.getsource(publisher.amain)
         self.assertIn("topic_override={POST_TOPIC_ID}", source)
         self.assertIn("topic={effective_topic_id", source)
+
+
+class SensitiveSourceFidelityTest(unittest.TestCase):
+    def test_age_norms_always_requires_tier1(self):
+        self.assertTrue(
+            publisher._requires_tier1_source(
+                "age_norms",
+                "early_communication",
+                "Communication milestones by age: at 24 months children may combine words.",
+            )
+        )
+
+    def test_effective_hearing_topic_requires_tier1(self):
+        self.assertTrue(
+            publisher._requires_tier1_source(
+                "myth_fact",
+                "hearing_and_speech",
+                "A hearing screening can identify children who need further assessment.",
+            )
+        )
+
+    def test_developmental_risk_requires_tier1_across_rubrics(self):
+        examples = (
+            "A child with speech delay may need further assessment.",
+            "Regression or loss of skills should be discussed with a clinician.",
+            "Ребёнок перестал говорить и потерял навыки.",
+        )
+        for evidence in examples:
+            with self.subTest(evidence=evidence):
+                self.assertTrue(
+                    publisher._requires_tier1_source("question_week", "early_communication", evidence)
+                )
+
+    def test_low_risk_advice_does_not_require_tier1(self):
+        self.assertFalse(
+            publisher._requires_tier1_source(
+                "play_and_speak",
+                "vocabulary_phrase",
+                "Во время игры называйте знакомые предметы и делайте паузу для ответа ребёнка.",
+            )
+        )
+
+    def test_generic_development_communication_is_not_age_norms_source_fit(self):
+        self.assertFalse(
+            publisher._is_age_norms_source_fit(
+                "Child development and communication are supported through warm everyday interaction."
+            )
+        )
+
+    def test_explicit_age_milestone_evidence_is_age_norms_source_fit(self):
+        self.assertTrue(
+            publisher._is_age_norms_source_fit(
+                "Communication milestones by age: at 24 months many children combine two words."
+            )
+        )
+
+    def test_delay_or_diagnostic_evidence_is_not_age_norms_source_fit(self):
+        cases = (
+            "Language delay: diagnostic signs and treatment options for toddlers.",
+            "Задержка речи: диагностика нарушений речи у детей двух лет.",
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                self.assertFalse(publisher._is_age_norms_source_fit(evidence))
+
+    def test_authority_rejection_is_a_soft_skip(self):
+        self.assertIn("source_authority_required", publisher.SOFT_SKIP_REASONS)
+        self.assertEqual(publisher._skip_kind("source_authority_required"), "soft")
+
+    def test_new_institutional_domains_are_tier1_and_subdomains_match(self):
+        domains = publisher.load_scientific_domains()
+        for domain in (
+            "gosh.nhs.uk",
+            "nationwidechildrens.org",
+            "blog.cincinnatichildrens.org",
+        ):
+            with self.subTest(domain=domain):
+                self.assertIn(domain, domains)
+                self.assertTrue(publisher.is_scientific_domain(domain, domains))
+                self.assertTrue(publisher.is_scientific_domain("www." + domain, domains))
+
+    def test_authority_gate_runs_before_llm_and_visual_work(self):
+        source = inspect.getsource(publisher.amain)
+        gate_at = source.index("if _requires_tier1_source(")
+        llm_at = source.index("generate_post_plain_from_evidence_async(")
+        visual_at = source.index("build_post_visual(")
+        topic_at = source.index("detected_topic_ids = detect_evidence_topics(evidence)")
+        self.assertLess(topic_at, gate_at)
+        self.assertLess(gate_at, llm_at)
+        self.assertLess(gate_at, visual_at)
+        block = source[gate_at:llm_at]
+        self.assertIn('note("source_authority_required", canon)', block)
+        self.assertIn("continue", block)
 
 
 if __name__ == "__main__":

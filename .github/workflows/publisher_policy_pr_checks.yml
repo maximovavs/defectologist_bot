@@ -1,0 +1,89 @@
+name: Publisher policy offline checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/publisher/run_publisher.py"
+      - "src/services/topic_policy.py"
+      - "config/sources.yml"
+      - "tests/test_topic_policy.py"
+      - "tests/test_editorial_freshness_policy.py"
+      - ".github/workflows/publisher_policy_pr_checks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install policy-test dependencies
+        run: |
+          python -m pip install \
+            "requests>=2.31.0,<3" \
+            "beautifulsoup4>=4.12.2" \
+            "lxml>=5.1.0" \
+            "PyYAML>=6.0.1" \
+            "Pillow>=10.3.0" \
+            "python-dateutil>=2.9.0.post0" \
+            "feedparser>=6.0.11"
+
+      - name: Compile publisher policy paths
+        run: |
+          python -m py_compile \
+            src/publisher/run_publisher.py \
+            src/services/topic_policy.py \
+            tests/test_topic_policy.py \
+            tests/test_editorial_freshness_policy.py
+
+      - name: Run publisher policy regressions offline
+        env:
+          GEMINI_API_KEY: ""
+          GEMINI_VISUAL_QA_API_KEY: ""
+          GROQ_API_KEY: ""
+          TELEGRAM_BOT_TOKEN: ""
+          TELEGRAM_CHAT_ID: ""
+          TELEGRAM_DRAFTS_CHAT_ID: ""
+          POLLINATIONS_TOKEN: ""
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import sys
+          import types
+          import unittest
+
+          sentence_transformers = types.ModuleType("sentence_transformers")
+
+          class _UnavailableModel:
+              def __init__(self, *args, **kwargs):
+                  raise RuntimeError("disabled in offline policy checks")
+
+          class _Util:
+              @staticmethod
+              def pytorch_cos_sim(*args, **kwargs):
+                  raise RuntimeError("semantic backend should be stubbed by tests")
+
+          sentence_transformers.SentenceTransformer = _UnavailableModel
+          sentence_transformers.util = _Util()
+          sys.modules["sentence_transformers"] = sentence_transformers
+
+          suite = unittest.defaultTestLoader.loadTestsFromNames([
+              "tests.test_topic_policy",
+              "tests.test_editorial_freshness_policy",
+          ])
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() else 1)
+          PY

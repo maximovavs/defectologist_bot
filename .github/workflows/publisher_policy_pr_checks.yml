@@ -13,6 +13,7 @@ on:
       - "tests/test_editorial_freshness_policy.py"
       - "tests/test_myth_fact_fidelity.py"
       - "tests/test_parent_age_evidence_fidelity.py"
+      - "tests/test_parent_modality_fidelity.py"
       - ".github/workflows/publisher_policy_pr_checks.yml"
 
 permissions:
@@ -51,7 +52,8 @@ jobs:
             tests/test_topic_policy.py \
             tests/test_editorial_freshness_policy.py \
             tests/test_myth_fact_fidelity.py \
-            tests/test_parent_age_evidence_fidelity.py
+            tests/test_parent_age_evidence_fidelity.py \
+            tests/test_parent_modality_fidelity.py
 
       - name: Run publisher policy regressions offline
         env:
@@ -91,6 +93,7 @@ jobs:
               "tests.test_editorial_freshness_policy",
               "tests.test_myth_fact_fidelity",
               "tests.test_parent_age_evidence_fidelity",
+              "tests.test_parent_modality_fidelity",
           ])
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() else 1)

@@ -958,6 +958,183 @@ def _validate_parent_age_evidence_output(text: str, evidence_text: str) -> Tuple
     return False, "parent_age_not_grounded"
 
 
+PARENT_SOFT_MODALITY_RE = re.compile(
+    r"(?:\b(?:may|might|can|often|typically|usually|generally|sometimes|commonly)\b|"
+    r"\bmost\s+children\b|\bmany\s+children\b|\btend(?:s|ed|ing)?\s+to\b|"
+    r"\b(?:может|могут|часто|обычно|нередко|иногда)\b|"
+    r"\bкак\s+правило\b|\bу\s+многих\b|\bбольшинство\s+детей\b|\bв\s+среднем\b)",
+    re.IGNORECASE,
+)
+PARENT_HARD_MODALITY_RE = re.compile(
+    r"(?:\b(?:реб[её]нок|дети|малыш\w*)\b.{0,60}\bдолж\w*|"
+    r"\b(?:реб[её]нок|дети|малыш\w*)\b.{0,60}\bобязан\w*|"
+    r"\bэто\s+норма\b|\bв\s+норме\s+(?:реб[её]нок|дети|малыш\w*)\b|"
+    r"\bнормой\s+(?:явля\w*|счита\w*)|"
+    r"\b(?:child|children|toddler)s?\b.{0,60}\b(?:must|should)\b|"
+    r"\b(?:child|children|toddler)s?\b.{0,60}\b(?:is|are)\s+expected\s+to\b|"
+    r"\bis\s+the\s+norm\b|\bnormal\s+for\s+(?:a\s+)?(?:child|children|toddler)s?\b)",
+    re.IGNORECASE,
+)
+PARENT_MODALITY_AGE_CONTEXT_RE = re.compile(
+    r"(?:\bв\s+этом\s+возрасте\b|\bк\s+этому\s+возрасту\b|"
+    r"\b(?:в|к)\s+\d{1,3}\s*(?:мес\w*|год\w*|лет)\b|"
+    r"\b(?:aged|at\s+age|by\s+age)\s+\d{1,3}\b|"
+    r"\b\d{1,3}\s*(?:months?|years?)\s+old\b|"
+    r"\bchildren\s+aged\s+\d{1,3}\b)",
+    re.IGNORECASE,
+)
+PARENT_MODALITY_CHILD_SUBJECT_RE = re.compile(
+    r"\b(?:реб[её]нок|дети|малыш\w*|child|children|toddler)s?\b",
+    re.IGNORECASE,
+)
+PARENT_MODALITY_ADULT_SUBJECT_RE = re.compile(
+    r"\b(?:родител\w*|взросл\w*|мам\w*|пап\w*|специалист\w*|логопед\w*|педагог\w*|"
+    r"parent\w*|adult\w*|caregiver\w*|therapist\w*)\b",
+    re.IGNORECASE,
+)
+PARENT_MODALITY_FAMILY_PATTERNS = {
+    "phrase": (
+        r"\b(?:фраз\w*|сочета\w*.{0,30}слов\w*|два\s+слов\w*|двух\s+слов\w*|"
+        r"two[-\s]+word\w*|combine\w*.{0,30}words?\b|short\s+phrases?)",
+    ),
+    "gesture": (r"\b(?:жест\w*|указательн\w*|показыва\w*|point\w*|gesture\w*)\b",),
+    "understanding": (r"\b(?:понима\w*|understand\w*|comprehens\w*)\b",),
+    "speech_sound": (
+        r"\b(?:звукопроизнош\w*|произнош\w*|фонем\w*|speech\s+sounds?|pronunciation|phoneme\w*)\b",
+    ),
+    "vocabulary": (r"\b(?:словар\w*|vocabular\w*)\b",),
+    "word": (
+        r"\b(?:перв\w*\s+слов\w*|говор\w*.{0,20}слов\w*|произнос\w*.{0,20}слов\w*|"
+        r"first\s+words?|say\w*.{0,20}words?)\b",
+    ),
+}
+PARENT_MODALITY_NUMBER_WORDS = {
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "один": "1",
+    "одна": "1",
+    "два": "2",
+    "две": "2",
+    "двух": "2",
+    "три": "3",
+    "трех": "3",
+    "четыре": "4",
+    "пять": "5",
+}
+
+
+def _parent_modality_segments(text: str) -> List[str]:
+    segments: List[str] = []
+    for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^🔴\s*Миф\s*[:：]", line, flags=re.IGNORECASE):
+            continue
+        lowered = line.lower()
+        if line.startswith("#") or lowered.startswith("источник:") or line.startswith("🔗"):
+            continue
+        segments.extend(
+            part.strip()
+            for part in re.split(r"(?<=[.!?;])\s+", line)
+            if part.strip()
+        )
+    return segments
+
+
+def _parent_modality_claim_families(text: str) -> set[str]:
+    normalized = _normalize_scan_text(text)
+    return {
+        family
+        for family, patterns in PARENT_MODALITY_FAMILY_PATTERNS.items()
+        if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
+    }
+
+
+def _parent_modality_is_adult_instruction(segment: str) -> bool:
+    hard = re.search(r"\b(?:долж\w*|обязан\w*|must|should)\b", segment, flags=re.IGNORECASE)
+    if not hard:
+        return False
+    prefix = segment[:hard.start()]
+    adult = PARENT_MODALITY_ADULT_SUBJECT_RE.search(prefix)
+    child = PARENT_MODALITY_CHILD_SUBJECT_RE.search(prefix)
+    return bool(adult and not child)
+
+
+def _parent_modality_is_hard_developmental_claim(segment: str) -> bool:
+    if not _parent_modality_claim_families(segment):
+        return False
+    if _parent_modality_is_adult_instruction(segment):
+        return False
+    if PARENT_HARD_MODALITY_RE.search(segment):
+        return True
+    return bool(
+        PARENT_MODALITY_CHILD_SUBJECT_RE.search(segment)
+        and PARENT_MODALITY_AGE_CONTEXT_RE.search(segment)
+        and not PARENT_SOFT_MODALITY_RE.search(segment)
+    )
+
+
+def _parent_modality_claim_numbers(text: str) -> set[str]:
+    normalized = _normalize_scan_text(text)
+    normalized = re.sub(
+        rf"\b\d{{1,3}}\s*({PARENT_AGE_UNIT_PATTERN})\b",
+        " ",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    numbers = set(re.findall(r"(?<!\w)\d+(?!\w)", normalized))
+    for word, value in PARENT_MODALITY_NUMBER_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\b", normalized, flags=re.IGNORECASE):
+            numbers.add(value)
+    return numbers
+
+
+def _parent_modality_hard_claims(text: str) -> List[tuple[str, set[str], set[tuple[int, int]], set[str]]]:
+    claims: List[tuple[str, set[str], set[tuple[int, int]], set[str]]] = []
+    for segment in _parent_modality_segments(text):
+        if not _parent_modality_is_hard_developmental_claim(segment):
+            continue
+        claims.append(
+            (
+                segment,
+                _parent_modality_claim_families(segment),
+                _extract_evidence_age_ranges(segment),
+                _parent_modality_claim_numbers(segment),
+            )
+        )
+    return claims
+
+
+def _validate_parent_modality_fidelity_output(text: str, evidence_text: str) -> Tuple[bool, str]:
+    parsed_age = _parse_parent_age_range(text)
+    output_age: set[tuple[int, int]] = set()
+    if parsed_age and parsed_age.min_months is not None and parsed_age.max_months is not None:
+        output_age.add((parsed_age.min_months, parsed_age.max_months))
+
+    evidence_hard_claims = _parent_modality_hard_claims(evidence_text)
+    for _claim, families, claim_ages, claim_numbers in _parent_modality_hard_claims(text):
+        effective_ages = claim_ages or output_age
+        supported = False
+        for _evidence_claim, evidence_families, evidence_ages, evidence_numbers in evidence_hard_claims:
+            if not (families & evidence_families):
+                continue
+            if effective_ages and evidence_ages and not (effective_ages & evidence_ages):
+                continue
+            if claim_numbers and not evidence_numbers:
+                continue
+            if claim_numbers and not claim_numbers.issubset(evidence_numbers):
+                continue
+            supported = True
+            break
+        if not supported:
+            return False, "parent_modality_not_grounded"
+    return True, "ok"
+
+
 def _strip_unsupported_repaired_myth_age_line(
     text: str,
     evidence_text: str,
@@ -1927,6 +2104,7 @@ def _validate_output(
     if rf in PARENT_CONTENT_FORMATS:
         for validator in (
             lambda value: _validate_parent_age_evidence_output(value, evidence_text),
+            lambda value: _validate_parent_modality_fidelity_output(value, evidence_text),
             _validate_parent_age_range_width,
             _validate_parent_age_action_fit,
             _validate_parent_hearing_inference_output,
@@ -3337,6 +3515,7 @@ def build_pro_friendly_repair_prompt(
 
 PARENT_CONTENT_REPAIR_REASONS = {
     "parent_age_not_grounded",
+    "parent_modality_not_grounded",
     "parent_age_range_too_broad",
     "parent_age_action_mismatch",
     "parent_nonobservable_benefit",
@@ -3355,6 +3534,21 @@ PARENT_CONTENT_REPAIR_INSTRUCTION = (
     "не называй игру проверкой слуха; не переноси английские звуки, примеры или нормы в русский текст; "
     "объедини близкие действия, чтобы осталось не более четырех нумерованных шагов. Не добавляй новых материалов, примеров, чисел или упражнений."
 )
+
+PARENT_MODALITY_REPAIR_INSTRUCTION = (
+    "Сохрани модальность EVIDENCE. may/might/can/often/typically/usually/generally/most children/many children/tend to "
+    "и «может/могут/часто/обычно/как правило/у многих/большинство детей/нередко» остаются мягкими формулировками. "
+    "Не усиливай их до «ребёнок должен», «дети должны», «обязан», «это норма», «в норме ребёнок» или эквивалентной "
+    "категорической developmental/normative формулировки. Если EVIDENCE мягкий, используй поддержанную мягкую формулировку. "
+    "Не добавляй новый milestone, возраст, число или факт."
+)
+
+
+def _parent_content_repair_instruction(reason: str) -> str:
+    if reason == "parent_modality_not_grounded":
+        return PARENT_MODALITY_REPAIR_INSTRUCTION
+    return PARENT_CONTENT_REPAIR_INSTRUCTION
+
 
 BILINGUAL_PARENTS_REPAIR_EXACT_REASONS = {
     "no_data_in_source",
@@ -3392,6 +3586,7 @@ PARENT_EDITORIAL_PROMPT_RULE = (
     "разрешены взгляд, улыбка, поворот, поиск глазами, жест, звук, лепет, показ и ожидание продолжения. "
     "В блоке пользы описывай только наблюдаемое действие или реакцию ребенка, без обещаний развития, механизмов, слуховых проверок и диагнозов. "
     "Не называй игру домашней проверкой слуха. Не переноси русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
+    "Сохраняй модальность EVIDENCE: «может», «часто», «обычно» и аналогичные мягкие формулировки не превращай в «должен», «обязан», «это норма» или другую категорическую возрастную норму. "
     "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
     "с правильным согласованием, без длинной инструкции в H1."
 )
@@ -3465,7 +3660,7 @@ def build_bilingual_parents_repair_prompt(
             else ""
         )
         + (
-            "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            "\n" + _parent_content_repair_instruction(reason)
             if reason in PARENT_CONTENT_REPAIR_REASONS
             else ""
         )
@@ -3533,7 +3728,7 @@ def build_thematic_parents_repair_prompt(
             else ""
         )
         + (
-            "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            "\n" + _parent_content_repair_instruction(reason)
             if reason in PARENT_CONTENT_REPAIR_REASONS
             else ""
         )
@@ -3641,6 +3836,7 @@ async def generate_post_plain_from_evidence_async(
         return "", False, "provider:none"
 
     groq_err = ""
+    groq_fail_closed_reason = ""
     repair_prompt = ""
     def build_generic_repair_prompt(reason: str) -> str:
         repair = (
@@ -3674,7 +3870,7 @@ async def generate_post_plain_from_evidence_async(
         if reason == "parent_ambiguous_latin_phoneme":
             repair += "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
         if reason in PARENT_CONTENT_REPAIR_REASONS:
-            repair += "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+            repair += "\n" + _parent_content_repair_instruction(reason)
 
         if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
             repair += (
@@ -3713,6 +3909,8 @@ async def generate_post_plain_from_evidence_async(
             ok, reason = validate(out)
             if ok:
                 return out, True, "ok:groq"
+            if reason == "parent_modality_not_grounded":
+                groq_fail_closed_reason = reason
 
             if is_pro_format:
                 repair_prompt = build_pro_friendly_repair_prompt(
@@ -3748,12 +3946,12 @@ async def generate_post_plain_from_evidence_async(
                 if ok2:
                     return out2, True, "ok:groq_retry"
                 groq_err = f"invalid_groq_retry:{reason2}"
-                if repaired_age_removed or reason2 == "parent_age_not_grounded":
+                if repaired_age_removed or reason2 in {"parent_age_not_grounded", "parent_modality_not_grounded"}:
                     return "", False, groq_err
             else:
                 groq_err = f"invalid_groq:{reason}"
 
-            if reason == "parent_age_not_grounded":
+            if reason in {"parent_age_not_grounded", "parent_modality_not_grounded"}:
                 return "", False, groq_err
 
             if prov == "groq":
@@ -3762,6 +3960,8 @@ async def generate_post_plain_from_evidence_async(
             print(f"[LLM][groq] invalid output, falling back to gemini: {groq_err}", flush=True)
         except Exception as e:
             groq_err = str(e)
+            if groq_fail_closed_reason == "parent_modality_not_grounded":
+                return "", False, f"groq_failed_after_modality_repair:{e}"
             if prov == "groq":
                 return "", False, f"groq_failed:{groq_err}"
 

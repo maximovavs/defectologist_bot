@@ -3151,10 +3151,10 @@ async def generate_image_prompt_async(
         return compiled, bool(compiled), compile_reason
 
     async def _try_with_repair(
-        generate,
+        generate: Callable[[str], object],
         provider_name: str,
     ) -> Tuple[str, bool, str]:
-        raw = await generate(prompt)
+        raw = await generate(prompt)  # type: ignore[misc]
         compiled, ok, reason = await _compile_raw(str(raw))
         if ok:
             return compiled, True, f"ok:{provider_name}"
@@ -3167,7 +3167,7 @@ async def generate_image_prompt_async(
             f"{prompt}\nThe previous response was invalid ({reason}). "
             f"{repair_hint} Repair it once. Return only valid JSON with action, setting, and props."
         )
-        repaired_raw = await generate(repair_prompt)
+        repaired_raw = await generate(repair_prompt)  # type: ignore[misc]
         repaired, repaired_ok, repaired_reason = await _compile_raw(str(repaired_raw))
         if repaired_ok:
             return repaired, True, f"ok:{provider_name}_retry"

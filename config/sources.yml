@@ -108,6 +108,9 @@ quality:
     - "cdc.gov"
     - "healthychildren.org"
     - "mayoclinic.org"
+    - "gosh.nhs.uk"
+    - "nationwidechildrens.org"
+    - "blog.cincinnatichildrens.org"
 
 sources:
   - id: logopediya_documents_rss

@@ -7,9 +7,11 @@ on:
     paths:
       - "src/publisher/run_publisher.py"
       - "src/services/topic_policy.py"
+      - "src/services/llm_generator.py"
       - "config/sources.yml"
       - "tests/test_topic_policy.py"
       - "tests/test_editorial_freshness_policy.py"
+      - "tests/test_myth_fact_fidelity.py"
       - ".github/workflows/publisher_policy_pr_checks.yml"
 
 permissions:
@@ -44,8 +46,10 @@ jobs:
           python -m py_compile \
             src/publisher/run_publisher.py \
             src/services/topic_policy.py \
+            src/services/llm_generator.py \
             tests/test_topic_policy.py \
-            tests/test_editorial_freshness_policy.py
+            tests/test_editorial_freshness_policy.py \
+            tests/test_myth_fact_fidelity.py
 
       - name: Run publisher policy regressions offline
         env:
@@ -83,6 +87,7 @@ jobs:
           suite = unittest.defaultTestLoader.loadTestsFromNames([
               "tests.test_topic_policy",
               "tests.test_editorial_freshness_policy",
+              "tests.test_myth_fact_fidelity",
           ])
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() else 1)

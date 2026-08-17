@@ -57,6 +57,7 @@ from src.services.llm_generator import (
     gemini_text_provider_status,
     generate_image_prompt_async,
     generate_post_plain_from_evidence_async,
+    validate_myth_fact_evidence_for_generation,
     validate_pro_evidence_for_generation,
 )
 from src.services.publication_store import PublicationStore
@@ -224,6 +225,13 @@ SOFT_SKIP_REASONS = {
     "rubric_topic_mismatch_source",
     "rubric_topic_mismatch_post",
     "source_authority_required",
+    "myth_evidence_missing_refutation_anchor",
+    "myth_missing_claim",
+    "myth_topic_mismatch",
+    "myth_unsupported_sensitive_claim",
+    "myth_unsupported_numeric_detail",
+    "myth_unsupported_phoneme_detail",
+    "myth_claim_not_grounded",
     "tip_of_day_post_too_generic",
     "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
@@ -287,6 +295,13 @@ HARD_SKIP_REASONS = {
 
 VALIDATION_SKIP_REASONS = {
     "no_data_in_source",
+    "myth_evidence_missing_refutation_anchor",
+    "myth_missing_claim",
+    "myth_topic_mismatch",
+    "myth_unsupported_sensitive_claim",
+    "myth_unsupported_numeric_detail",
+    "myth_unsupported_phoneme_detail",
+    "myth_claim_not_grounded",
     "empty",
     "too_short",
     "template_leak",
@@ -2427,6 +2442,26 @@ async def amain() -> None:
                         if effective_topic_id == "bilingualism"
                         else "thematic_parents"
                     )
+
+                if llm_rubric_format == "myth_fact":
+                    myth_evidence_ok, myth_evidence_reason = validate_myth_fact_evidence_for_generation(
+                        evidence,
+                        effective_topic_id,
+                    )
+                    if not myth_evidence_ok:
+                        kind = note(myth_evidence_reason, canon)
+                        print(
+                            f"[SKIP][{kind}] {myth_evidence_reason} "
+                            f"stage=pre_llm source={candidate_source_id} url={canon}",
+                            flush=True,
+                        )
+                        if kind == "hard":
+                            rubric_skips += 1
+                        if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                            note("max_skips_per_rubric", rubric_id)
+                            print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                            break
+                        continue
 
                 pro_evidence_prevalidated = False
                 if rf == "pro_friendly":

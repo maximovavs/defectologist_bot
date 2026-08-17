@@ -300,6 +300,201 @@ def _contains_any_fragment(text: str, fragments: List[str]) -> Optional[str]:
     return None
 
 
+
+MYTH_FACT_REFUTATION_PATTERNS = (
+    r"\bmyth\b",
+    r"\bmisconception\b",
+    r"\bnot true\b",
+    r"\bnot necessarily\b",
+    r"\bno evidence\b",
+    r"\bdoes not cause\b",
+    r"\bdoesn't cause\b",
+    r"\bdoes not mean\b",
+    r"\bdoesn't mean\b",
+    r"\bis not caused by\b",
+    r"\baren't caused by\b",
+    r"\bмиф\b",
+    r"\bзаблуждени\w*\b",
+    r"\bнеправд\w*\b",
+    r"\bнет доказательств\b",
+    r"\bне вызыва\w*\b",
+    r"\bне означа\w*\b",
+    r"\bне явля\w*\b",
+    r"\bне всегда\b",
+    r"\bне обязательно\b",
+)
+
+MYTH_FACT_FAMILY_PATTERNS = {
+    "bilingualism": (
+        r"\bбилингв\w*\b", r"\bдвуязыч\w*\b", r"\bдва язык\w*\b", r"\bдвух язык\w*\b",
+        r"\bbilingual\w*\b", r"\bmultilingual\w*\b", r"\bdual language\w*\b", r"\bhome language\w*\b",
+    ),
+    "hearing": (
+        r"\bслух\w*\b", r"\bслыш\w*\b", r"\bhearing\b", r"\bhearing loss\b",
+        r"\bhearing screening\b", r"\bauditory\b", r"\blisten\w*\b",
+    ),
+    "developmental_risk": (
+        r"\bзадерж\w*\b", r"\bрегресс\w*\b", r"\bпотер\w*.{0,30}\bнавык\w*\b",
+        r"\bпереста\w*.{0,30}\bговор\w*\b", r"\bне понима\w*.{0,30}\bреч\w*\b",
+        r"\bрасстройств\w*\b", r"\bдиагноз\w*\b", r"\bдиагност\w*\b",
+        r"\bdelay\w*\b", r"\bregress\w*\b", r"\bloss of skills?\b", r"\bstopped talking\b",
+        r"\blanguage disorder\w*\b", r"\bspeech disorder\w*\b", r"\bdiagnos\w*\b",
+    ),
+    "age_milestone": (
+        r"\bвозраст\w*\b", r"\bмесяц\w*\b", r"\bгод\w*\b", r"\bлет\b",
+        r"\bmilestone\w*\b", r"\bmonths? old\b", r"\byears? old\b", r"\bby age\b",
+        r"\bage[- ]related\b", r"\bdevelopmental milestone\w*\b",
+    ),
+    "speech_sounds": (
+        r"\bзвукопроизнош\w*\b", r"\bартикуляц\w*\b", r"\bзвуки? речи\b", r"\bфонем\w*\b",
+        r"\bspeech sounds?\b", r"\barticulation\b", r"\bpronunciation\b", r"\bphoneme\w*\b",
+        r"\bconsonants?\b",
+    ),
+    "early_communication": (
+        r"\bранн\w* коммуникац\w*\b", r"\bсовместн\w* внимани\w*\b", r"\bуказательн\w* жест\w*\b",
+        r"\bearly communication\b", r"\bjoint attention\b", r"\bgestures?\b", r"\bfirst words?\b",
+    ),
+    "everyday_communication": (
+        r"\bповседневн\w* общени\w*\b", r"\bежедневн\w* ситуац\w*\b",
+        r"\beveryday communication\b", r"\bdaily routines?\b", r"\bfamily interaction\b",
+        r"\bconversation\b",
+    ),
+    "preliteracy": (
+        r"\bподготов\w* к чтени\w*\b", r"\bпредчтени\w*\b", r"\bчтени\w*\b",
+        r"\bpreliteracy\b", r"\bemergent literacy\b", r"\breading readiness\b", r"\bprint awareness\b",
+        r"\bshared reading\b", r"\bbooks?\b", r"\bкниг\w*\b",
+    ),
+    "vocabulary_phrase": (
+        r"\bсловар\w*\b", r"\bфразов\w* реч\w*\b", r"\bдва слова\b",
+        r"\bvocabulary\b", r"\bphrase speech\b", r"\btwo[- ]word\b",
+    ),
+}
+
+MYTH_FACT_TOPIC_FAMILY = {
+    "bilingualism": "bilingualism",
+    "hearing_and_speech": "hearing",
+    "speech_sounds": "speech_sounds",
+    "early_communication": "early_communication",
+    "everyday_communication": "everyday_communication",
+    "preliteracy": "preliteracy",
+    "vocabulary_phrase": "vocabulary_phrase",
+}
+
+MYTH_FACT_SENSITIVE_FAMILIES = frozenset({
+    "bilingualism",
+    "hearing",
+    "developmental_risk",
+    "age_milestone",
+    "speech_sounds",
+})
+
+MYTH_FACT_LINE_RE = re.compile(
+    r"^🔴\s*Миф\s*[:：]\s*(.+\S)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _myth_fact_has_refutation_anchor(evidence_text: str) -> bool:
+    blob = _normalize_scan_text(evidence_text)
+    return any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in MYTH_FACT_REFUTATION_PATTERNS)
+
+
+def _myth_fact_families(text: str) -> set[str]:
+    blob = _normalize_scan_text(text)
+    return {
+        family
+        for family, patterns in MYTH_FACT_FAMILY_PATTERNS.items()
+        if any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in patterns)
+    }
+
+
+def validate_myth_fact_evidence_for_generation(
+    evidence_text: str,
+    topic_id: str = "",
+) -> Tuple[bool, str]:
+    if not _myth_fact_has_refutation_anchor(evidence_text):
+        return False, "myth_evidence_missing_refutation_anchor"
+    topic = (topic_id or "").strip().lower()
+    expected_family = MYTH_FACT_TOPIC_FAMILY.get(topic)
+    if not expected_family:
+        return False, "myth_topic_mismatch"
+    if expected_family not in _myth_fact_families(evidence_text):
+        return False, "myth_topic_mismatch"
+    return True, "ok"
+
+
+def _extract_myth_fact_claim(text: str) -> str:
+    match = MYTH_FACT_LINE_RE.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _myth_fact_numeric_details(text: str) -> set[str]:
+    return set(re.findall(r"(?<!\w)\d+(?:[.,]\d+)?(?!\w)", text or ""))
+
+
+def _myth_fact_phoneme_details(text: str) -> set[str]:
+    blob = (text or "").lower().replace("ё", "е")
+    out = {
+        token.lower()
+        for token in re.findall(r"(?:/|\[)\s*([a-zа-я]{1,3})\s*(?:/|\])", blob, flags=re.IGNORECASE)
+    }
+    out.update(
+        token.lower()
+        for token in re.findall(
+            r"(?:звук|фонем\w*|sound|phoneme)\s+(?:[«\"'“]\s*)?([a-zа-я])(?:\s*[»\"'”])?",
+            blob,
+            flags=re.IGNORECASE,
+        )
+    )
+    return out
+
+
+def _validate_myth_fact_output(
+    text: str,
+    evidence_text: str,
+    topic_id: str = "",
+) -> Tuple[bool, str]:
+    evidence_ok, evidence_reason = validate_myth_fact_evidence_for_generation(evidence_text, topic_id)
+    if not evidence_ok:
+        return False, evidence_reason
+
+    claim = _extract_myth_fact_claim(text)
+    if not claim:
+        return False, "myth_missing_claim"
+
+    evidence_families = _myth_fact_families(evidence_text)
+    claim_families = _myth_fact_families(claim)
+    expected_family = MYTH_FACT_TOPIC_FAMILY.get((topic_id or "").strip().lower(), "")
+    if expected_family and expected_family not in claim_families:
+        return False, "myth_topic_mismatch"
+
+    claim_numbers = _myth_fact_numeric_details(claim)
+    if claim_numbers - _myth_fact_numeric_details(evidence_text):
+        return False, "myth_unsupported_numeric_detail"
+
+    claim_phonemes = _myth_fact_phoneme_details(claim)
+    if claim_phonemes - _myth_fact_phoneme_details(evidence_text):
+        return False, "myth_unsupported_phoneme_detail"
+
+    introduced_sensitive = (claim_families & MYTH_FACT_SENSITIVE_FAMILIES) - evidence_families
+    if introduced_sensitive:
+        return False, "myth_unsupported_sensitive_claim"
+
+    if not (claim_families & evidence_families):
+        return False, "myth_claim_not_grounded"
+
+    return True, "ok"
+
+
+MYTH_FACT_REPAIR_REASONS = frozenset({
+    "myth_missing_claim",
+    "myth_topic_mismatch",
+    "myth_unsupported_sensitive_claim",
+    "myth_unsupported_numeric_detail",
+    "myth_unsupported_phoneme_detail",
+    "myth_claim_not_grounded",
+})
+
 RISKY_MECHANISM_CLAIMS: List[Tuple[str, str, List[str]]] = [
     (r"спастик\w*\s+диафрагм\w*", "спастика диафрагмы", ["спастик", "диафрагм"]),
     (r"снима\w+\s+спастик\w*", "снимает спастику", ["снима", "спастик"]),
@@ -1644,6 +1839,11 @@ def _validate_output(
     rf = (rubric_format or "").strip().lower()
     aud = (audience or "").strip().lower()
 
+    if rf == "myth_fact":
+        ok, reason = _validate_myth_fact_output(out, evidence_text, topic_id=topic_id)
+        if not ok:
+            return False, reason
+
     if rf in PARENT_ORAL_SAFETY_FORMATS:
         ok, reason = _validate_parent_oral_safety_output(out)
         if not ok:
@@ -2278,7 +2478,8 @@ def _build_generation_prompt_raw(
         template = (
             "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
-            "🔴 Миф: коротко сформулируй заблуждение из темы статьи.\n\n"
+            "🔴 Миф: используй только утверждение, которое EVIDENCE явно называет ошибочным или прямо опровергает.\n"
+            "Не придумывай популярный миф из собственных знаний. Если в EVIDENCE нет явного опровергаемого утверждения — верни НЕТ_ДАННЫХ.\n\n"
             "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
             "🧩 Что попробовать сегодня:\n"
             "Дай один практический прием или микро-упражнение без канцелярита.\n\n"
@@ -3300,6 +3501,12 @@ async def generate_post_plain_from_evidence_async(
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     is_bilingual_format = rf == "bilingual_parents"
     is_thematic_format = rf == "thematic_parents"
+    is_myth_fact_format = rf == "myth_fact"
+
+    if is_myth_fact_format:
+        myth_evidence_ok, myth_evidence_reason = validate_myth_fact_evidence_for_generation(ev, topic_id)
+        if not myth_evidence_ok:
+            return "", False, myth_evidence_reason
 
     prompt = build_generation_prompt(
         day_key=dk,
@@ -3387,6 +3594,14 @@ async def generate_post_plain_from_evidence_async(
             repair += "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
         if reason in PARENT_CONTENT_REPAIR_REASONS:
             repair += "\n" + PARENT_CONTENT_REPAIR_INSTRUCTION
+
+        if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
+            repair += (
+                "\\nДля myth_fact сохрани одну непустую строку 🔴 Миф:. "
+                "Исправляй только исходный claim из EVIDENCE: не придумывай новый миф, "
+                "новую чувствительную тему, возраст, число или фонему. "
+                "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."
+            )
 
         if dk == "FR" or rf == "question_week":
             repair += (
@@ -3515,6 +3730,14 @@ async def generate_post_plain_from_evidence_async(
                     if ok2:
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
                     return "", False, f"invalid_gemini_retry:{reason2}"
+
+            elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
+                gemini_repair_prompt = build_generic_repair_prompt(reason)
+                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                ok2, reason2 = validate(out2)
+                if ok2:
+                    return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
+                return "", False, f"invalid_gemini_retry:{reason2}"
 
             elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)

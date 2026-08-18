@@ -1863,6 +1863,104 @@ def _validate_parent_observable_benefit_output(text: str, thematic: bool = False
     return True, "ok"
 
 
+PARENT_DIAGNOSTIC_TARGET_RE = re.compile(
+    r"(?:\bзадерж\w*\s+(?:реч\w*|речев\w*\s+развити\w*)\b|"
+    r"\b(?:речев\w*|языков\w*)\s+расстройств\w*\b|"
+    r"\bрасстройств\w*\s+(?:реч\w*|язык\w*|развити\w*)\b|"
+    r"\b(?:алали\w*|аутиз\w*|рас\b|диагноз\w*)\b|"
+    r"\b(?:speech|language|developmental)\s+delay\b|"
+    r"\b(?:speech|language|developmental)\s+disorder\b|"
+    r"\b(?:autism|autism\s+spectrum\s+disorder|asd|diagnos(?:is|es))\b)",
+    re.IGNORECASE,
+)
+PARENT_DIAGNOSTIC_PREEXISTING_RE = re.compile(
+    r"(?:\bесли\s+у\s+(?:реб[её]нка|малыш\w*)\s+уже\s+диагностир\w*|"
+    r"\b(?:для\s+)?дет\w*\s+с\s+(?:уже\s+)?диагностир\w*|"
+    r"\bfor\s+children\s+with\s+(?:an?\s+)?diagnosed\b|"
+    r"\bif\s+(?:a|the|your)\s+child\s+(?:already\s+)?has\s+(?:a\s+)?diagnosed\b)",
+    re.IGNORECASE,
+)
+PARENT_DIAGNOSTIC_NEGATED_RE = re.compile(
+    r"(?:\bне\s+означа\w*\b|\bне\s+явля\w*\s+диагноз\w*\b|"
+    r"\bнельзя\s+(?:по\s+\w+\s+){0,3}(?:диагностир\w*|подтверд\w*|исключ\w*)\b|"
+    r"\bне\s+(?:диагностир\w*|подтвержда\w*|подтверд\w*|исключа\w*)\b|"
+    r"\bне\s+позволя\w*.{0,45}\b(?:диагностир\w*|подтверд\w*|исключ\w*)\b|"
+    r"\bdoes\s+not\s+mean\b|\bdoesn't\s+mean\b|"
+    r"\b(?:does\s+not|doesn't|cannot|can't)\s+(?:diagnos\w*|confirm\w*|detect\w*)\b|"
+    r"\b(?:does\s+not|doesn't|cannot|can't)\s+rule\s+out\b|"
+    r"\bis\s+not\s+(?:a\s+)?diagnos\w*\b|"
+    r"\bcannot\s+be\s+(?:diagnosed|established|confirmed)\b)",
+    re.IGNORECASE,
+)
+PARENT_DIAGNOSTIC_CHILD_ASSIGNMENT_RE = re.compile(
+    r"(?:\bу\s+(?:(?:вашего|этого)\s+)?(?:реб[её]нка|малыш\w*)\b|\bу\s+(?:него|не[её])\b)"
+    r".{0,35}" + PARENT_DIAGNOSTIC_TARGET_RE.pattern + r"|"
+    r"\b(?:(?:этот|ваш)\s+)?(?:реб[её]нок|малыш\w*)\b.{0,25}\b(?:име\w*|страда\w*)\b.{0,25}"
+    + PARENT_DIAGNOSTIC_TARGET_RE.pattern + r"|"
+    r"\b(?:your|the|this)\s+(?:child|toddler)\b.{0,25}\bhas\b.{0,25}"
+    + PARENT_DIAGNOSTIC_TARGET_RE.pattern,
+    re.IGNORECASE,
+)
+PARENT_DIAGNOSTIC_INFERENCE_RE = re.compile(
+    r"(?:\bесли\b|\bкогда\b|\bif\b|\bwhen\b).{0,140}"
+    r"(?:\bзначит\b|\bознача\w*\b|\bэто\s+признак\b|\bпоэтому\b|\bthat\s+means\b|\btherefore\b)"
+    r".{0,100}" + PARENT_DIAGNOSTIC_TARGET_RE.pattern + r"|"
+    r"(?:\bпоэтому\b|\bзначит\b|\bэто\s+означа\w*\b|\bэто\s+признак\b|\bthat\s+means\b|\btherefore\b)"
+    r".{0,100}" + PARENT_DIAGNOSTIC_TARGET_RE.pattern,
+    re.IGNORECASE,
+)
+PARENT_DIAGNOSTIC_HOME_TOOL_RE = re.compile(
+    r"(?:\bпо\s+(?:этой|этому)?\s*(?:игр\w*|упражнен\w*|тест\w*|задани\w*)\b|"
+    r"\b(?:домашн\w*\s+)?(?:игр\w*|упражнен\w*|тест\w*|задани\w*)\b)"
+    r".{0,90}\b(?:выявля\w*|подтвержда\w*|подтверд\w*|диагностир\w*|исключа\w*|определя\w*)\b"
+    r".{0,90}" + PARENT_DIAGNOSTIC_TARGET_RE.pattern + r"|"
+    r"\b(?:this|the|a)\s+(?:home\s+)?(?:game|exercise|task|test)\b.{0,90}"
+    r"\b(?:detect\w*|confirm\w*|diagnos\w*|rule\s+out)\b.{0,90}"
+    + PARENT_DIAGNOSTIC_TARGET_RE.pattern,
+    re.IGNORECASE,
+)
+
+
+def _parent_diagnostic_segments(text: str) -> List[str]:
+    segments: List[str] = []
+    for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^🔴\s*Миф\s*[:：]", line, flags=re.IGNORECASE):
+            continue
+        lowered = line.lower()
+        if line.startswith("#") or lowered.startswith("источник:") or line.startswith("🔗"):
+            continue
+        segments.extend(
+            part.strip()
+            for part in re.split(r"(?<=[.!?;])\s+", line)
+            if part.strip()
+        )
+    return segments
+
+
+def _parent_diagnostic_role_violation(segment: str) -> bool:
+    if not PARENT_DIAGNOSTIC_TARGET_RE.search(segment):
+        return False
+    if PARENT_DIAGNOSTIC_PREEXISTING_RE.search(segment):
+        return False
+    if PARENT_DIAGNOSTIC_NEGATED_RE.search(segment):
+        return False
+    return bool(
+        PARENT_DIAGNOSTIC_CHILD_ASSIGNMENT_RE.search(segment)
+        or PARENT_DIAGNOSTIC_INFERENCE_RE.search(segment)
+        or PARENT_DIAGNOSTIC_HOME_TOOL_RE.search(segment)
+    )
+
+
+def _validate_parent_diagnostic_role_output(text: str) -> Tuple[bool, str]:
+    for segment in _parent_diagnostic_segments(text):
+        if _parent_diagnostic_role_violation(segment):
+            return False, "parent_diagnostic_role_violation"
+    return True, "ok"
+
+
 PARENT_HEARING_INFERENCE_RE = re.compile(
     r"(?:увид\w*|пойм\w*|узна\w*|определ\w*|проверь\w*|проверя\w*|проверите|показыва\w*|"
     r"позволя\w*\s+(?:проверить|сделать\s+вывод)|"
@@ -2108,6 +2206,7 @@ def _validate_output(
             _validate_parent_age_range_width,
             _validate_parent_age_action_fit,
             _validate_parent_hearing_inference_output,
+            _validate_parent_diagnostic_role_output,
             lambda value: _validate_cross_language_sound_output(value, evidence_text),
             _validate_parent_numbered_steps,
         ):
@@ -3516,6 +3615,7 @@ def build_pro_friendly_repair_prompt(
 PARENT_CONTENT_REPAIR_REASONS = {
     "parent_age_not_grounded",
     "parent_modality_not_grounded",
+    "parent_diagnostic_role_violation",
     "parent_age_range_too_broad",
     "parent_age_action_mismatch",
     "parent_nonobservable_benefit",
@@ -3543,10 +3643,20 @@ PARENT_MODALITY_REPAIR_INSTRUCTION = (
     "Не добавляй новый milestone, возраст, число или факт."
 )
 
+PARENT_DIAGNOSTIC_ROLE_REPAIR_INSTRUCTION = (
+    "Убери индивидуальный диагностический вывод из домашнего наблюдения, игры, упражнения или ответа. "
+    "Не ставь и не исключай диагноз по домашней реакции. Замени вывод только на непосредственно наблюдаемое поведение "
+    "и, если это поддержано EVIDENCE, спокойную рекомендацию обсудить устойчивые вопросы с квалифицированным специалистом. "
+    "Домашнюю игру, упражнение или тест не называй способом выявить, подтвердить, диагностировать или исключить нарушение. "
+    "Не добавляй новый диагноз, причину, тест, число, возраст, milestone или факт."
+)
+
 
 def _parent_content_repair_instruction(reason: str) -> str:
     if reason == "parent_modality_not_grounded":
         return PARENT_MODALITY_REPAIR_INSTRUCTION
+    if reason == "parent_diagnostic_role_violation":
+        return PARENT_DIAGNOSTIC_ROLE_REPAIR_INSTRUCTION
     return PARENT_CONTENT_REPAIR_INSTRUCTION
 
 
@@ -3587,6 +3697,7 @@ PARENT_EDITORIAL_PROMPT_RULE = (
     "В блоке пользы описывай только наблюдаемое действие или реакцию ребенка, без обещаний развития, механизмов, слуховых проверок и диагнозов. "
     "Не называй игру домашней проверкой слуха. Не переноси русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
     "Сохраняй модальность EVIDENCE: «может», «часто», «обычно» и аналогичные мягкие формулировки не превращай в «должен», «обязан», «это норма» или другую категорическую возрастную норму. "
+    "Домашнее наблюдение, игра, упражнение или ответ не являются основанием ставить, подтверждать или исключать диагноз; описывай наблюдение и при необходимости calibrated referral без индивидуального диагностического вывода. "
     "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
     "с правильным согласованием, без длинной инструкции в H1."
 )
@@ -3909,7 +4020,7 @@ async def generate_post_plain_from_evidence_async(
             ok, reason = validate(out)
             if ok:
                 return out, True, "ok:groq"
-            if reason == "parent_modality_not_grounded":
+            if reason in {"parent_modality_not_grounded", "parent_diagnostic_role_violation"}:
                 groq_fail_closed_reason = reason
 
             if is_pro_format:
@@ -3946,12 +4057,12 @@ async def generate_post_plain_from_evidence_async(
                 if ok2:
                     return out2, True, "ok:groq_retry"
                 groq_err = f"invalid_groq_retry:{reason2}"
-                if repaired_age_removed or reason2 in {"parent_age_not_grounded", "parent_modality_not_grounded"}:
+                if repaired_age_removed or reason2 in {"parent_age_not_grounded", "parent_modality_not_grounded", "parent_diagnostic_role_violation"}:
                     return "", False, groq_err
             else:
                 groq_err = f"invalid_groq:{reason}"
 
-            if reason in {"parent_age_not_grounded", "parent_modality_not_grounded"}:
+            if reason in {"parent_age_not_grounded", "parent_modality_not_grounded", "parent_diagnostic_role_violation"}:
                 return "", False, groq_err
 
             if prov == "groq":
@@ -3962,6 +4073,8 @@ async def generate_post_plain_from_evidence_async(
             groq_err = str(e)
             if groq_fail_closed_reason == "parent_modality_not_grounded":
                 return "", False, f"groq_failed_after_modality_repair:{e}"
+            if groq_fail_closed_reason == "parent_diagnostic_role_violation":
+                return "", False, f"groq_failed_after_diagnostic_repair:{e}"
             if prov == "groq":
                 return "", False, f"groq_failed:{groq_err}"
 

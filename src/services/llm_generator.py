@@ -4234,3 +4234,463 @@ def generate_post_plain_from_evidence(
     raise RuntimeError(
         "generate_post_plain_from_evidence called inside running event loop; use generate_post_plain_from_evidence_async()."
     )
+
+
+# -----------------------
+# P2D — Exercise coherence / parent professional-role safety
+# -----------------------
+
+import contextvars as _contextvars
+
+P2D_EXERCISE_REASON = "exercise_coherence_violation"
+P2D_PARENT_ROLE_REASON = "parent_professional_role_violation"
+P2D_FAIL_CLOSED_REASONS = frozenset({P2D_EXERCISE_REASON, P2D_PARENT_ROLE_REASON})
+
+EXERCISE_SKILL_FAMILY_PATTERNS = {
+    "sound_discrimination": (
+        r"фонемат\w*\s+(?:слух|восприяти|различ)|различ\w*.{0,35}(?:звук|фонем)|"
+        r"слыш\w*.{0,35}(?:звук|фонем)|sound\s+discrimin|phonem\w*\s+discrimin|auditory\s+discrimin",
+    ),
+    "speech_sound_production": (
+        r"звукопроизнош\w*|speech[-\s]*sound\w*\s+production|pronunciation|"
+        r"(?:произнос|повтор|ска(?:з|ж)|назов)\w*.{0,35}(?:звук|слог|слов)|"
+        r"(?:звук|слог|слов).{0,35}(?:произнос|повтор)\w*|"
+        r"(?:автоматиз|корректир|коррекц|постав|постанов)\w*.{0,45}(?:звук|произнош|слог)|"
+        r"(?:звук|произнош|слог).{0,45}(?:автоматиз|корректир|коррекц|постав|постанов)\w*",
+    ),
+    "articulation": (
+        r"артикуляц\w*|артикуляционн\w*|уклад\w*|положени\w*.{0,25}(?:язык|губ)|"
+        r"articulat\w*|tongue\s+position|lip\s+position",
+    ),
+    "syllable_rhythm": (
+        r"слогов\w*\s+структур\w*|слог\w*|ритм\w*|хлоп\w*|такт\w*|"
+        r"syllab\w*|rhythm\w*|clap\w*|beat\w*",
+    ),
+    "vocabulary_naming": (
+        r"словар\w*|лексик\w*|называ\w*.{0,35}(?:предмет|картин|слов)|"
+        r"назван\w*.{0,35}(?:предмет|картин|слов)|повтор\w*.{0,25}слов\w*|"
+        r"vocabular\w*|nam(?:e|es|ing)\w*.{0,35}(?:object|picture|word)|repeat\w*.{0,25}word",
+    ),
+    "phrase_grammar": (
+        r"фраз\w*|предложени\w*|граммат\w*|падеж\w*|окончани\w*|согласован\w*|"
+        r"phrase\w*|sentence\w*|grammar\w*|grammatical\w*",
+    ),
+    "narrative_connected_speech": (
+        r"пересказ\w*|рассказ\w*|истори\w*|связн\w*\s+реч\w*|"
+        r"retell\w*|narrative\w*|story\w*|connected\s+speech",
+    ),
+    "breath_airflow": (
+        r"дыхани\w*|выдох\w*|воздушн\w*\s+(?:стру|поток)|дуть|дует|"
+        r"breath\w*|exhal\w*|airflow|air\s+stream|blow\w*",
+    ),
+    "selection_matching": (
+        r"выбира\w*|выбер\w*|выбрат\w*|выбрал\w*|выбери\w*|отбер\w*|"
+        r"покаж\w*.{0,25}(?:картин|предмет)|укаж\w*|сортир\w*|соедин\w*|сопостав\w*|"
+        r"select\w*|choos\w*|match\w*|sort\w*|point\w*",
+    ),
+    "motor_sequence": (
+        r"кулак\w*|ребро\s+ладон\w*|ладон\w*|моторн\w*|двигательн\w*|"
+        r"последовательност\w*.{0,30}движени\w*|движени\w*.{0,30}(?:рук|кист)|"
+        r"motor\w*|movement\s+sequence|hand\s+movement",
+    ),
+}
+
+EXERCISE_COMPATIBLE_FAMILY_PAIRS = frozenset({
+    frozenset(("speech_sound_production", "articulation")),
+    frozenset(("speech_sound_production", "syllable_rhythm")),
+    frozenset(("syllable_rhythm", "motor_sequence")),
+    frozenset(("vocabulary_naming", "selection_matching")),
+    frozenset(("vocabulary_naming", "phrase_grammar")),
+    frozenset(("phrase_grammar", "narrative_connected_speech")),
+})
+
+EXERCISE_SPEECH_AUTOMATION_RE = re.compile(
+    r"(?:автоматиз|корректир|коррекц|постав|постанов)\w*.{0,55}(?:звук|произнош|слог|реч)|"
+    r"(?:звук|произнош|слог|реч).{0,55}(?:автоматиз|корректир|коррекц|постав|постанов)\w*|"
+    r"(?:automat|correct|establish)\w*.{0,55}(?:speech|sound|pronunciation|syllab)",
+    re.IGNORECASE,
+)
+EXERCISE_EXPLICIT_SPEECH_ACTION_RE = re.compile(
+    r"(?:реб[её]нок|child).{0,45}(?:повтор|произнос|говор|ска(?:з|ж)|называ|repeat|pronounc|say|name)\w*.{0,45}"
+    r"(?:звук|слог|слов|фраз|sound|syllab|word|phrase)|"
+    r"(?:повтор|произнос|говор|ска(?:з|ж)|называ|repeat|pronounc|say|name)\w*.{0,35}"
+    r"(?:звук|слог|слов|фраз|sound|syllab|word|phrase)",
+    re.IGNORECASE,
+)
+EXERCISE_REQUIRED_PROP_RE = re.compile(
+    r"карточ\w*|картин\w*|игруш\w*|мяч\w*|зеркал\w*|таймер\w*|компьютер\w*|планшет\w*|"
+    r"книг\w*|предмет\w*|кубик\w*|фишк\w*|барабан\w*|бубен\w*|метроном\w*|карандаш\w*|"
+    r"бумаг\w*|пазл\w*|cards?|pictures?|toys?|balls?|mirrors?|timers?|computers?|tablets?|"
+    r"books?|objects?|blocks?|counters?|drums?|tambourines?|metronomes?|pencils?|paper|puzzles?",
+    re.IGNORECASE,
+)
+EXERCISE_EVIDENCE_NEGATION_RE = re.compile(
+    r"\b(?:не|без|нельзя|not|without|cannot|can't|does\s+not|doesn't)\b",
+    re.IGNORECASE,
+)
+
+P2D_PARENT_ACTION_HEADERS = (
+    r"^🎲\s*Как играть\s*[:：]?\s*",
+    r"^🧩\s*Что попробовать сегодня\s*[:：]?\s*",
+    r"^🏠\s*Что можно попробовать дома\s*[:：]?\s*",
+    r"^🏠\s*Что можно понаблюдать дома\s*[:：]?\s*",
+    r"^🌍\s*Что помогает в двуязычной семье\s*[:：]?\s*",
+)
+P2D_PARENT_ACTION_STOPS = [
+    r"^💡", r"^Источник\s*:", r"^🔗", r"^#", r"^👶", r"^❓", r"^🧩", r"^🏠", r"^🎲",
+    r"^🌍", r"^🔴", r"^🧭", r"^Ориентиры\s*:", r"^👄", r"^📊", r"^💬",
+]
+P2D_PROFESSIONAL_TARGET_RE = re.compile(
+    r"фонемат\w*\s+(?:слух|восприяти|различ)|"
+    r"уровен\w*.{0,30}(?:речев\w*\s+развити|развити\w*\s+реч|реч\w*)|"
+    r"phonemic\s+(?:hearing|awareness|perception)|speech\s+development\s+level",
+    re.IGNORECASE,
+)
+P2D_PROFESSIONAL_INFERENCE_RE = re.compile(
+    r"оцен\w*|определ\w*|установ\w*|классифицир\w*|assess\w*|determin\w*|classif\w*",
+    re.IGNORECASE,
+)
+P2D_SPECIALIST_ACTOR_RE = re.compile(
+    r"(?:специалист\w*|логопед\w*|дефектолог\w*|педагог\w*|therapist\w*|specialist\w*)"
+    r".{0,45}(?:может\s+)?(?:оцен|определ|assess|determin)\w*",
+    re.IGNORECASE,
+)
+P2D_PARENT_SOUND_WORK_RE = re.compile(
+    r"(?:постав|постанов|корректир|коррекц|исправля|автоматиз|закрепля)\w*.{0,55}(?:звук|произнош|артикуляц)|"
+    r"(?:звук|произнош|артикуляц).{0,55}(?:постав|постанов|корректир|коррекц|исправля|автоматиз|закрепля)\w*",
+    re.IGNORECASE,
+)
+
+
+def _exercise_skill_families(text: str) -> set[str]:
+    blob = _normalize_scan_text(text)
+    if not blob:
+        return set()
+    return {
+        family
+        for family, patterns in EXERCISE_SKILL_FAMILY_PATTERNS.items()
+        if any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in patterns)
+    }
+
+
+def _exercise_evidence_families(text: str) -> set[str]:
+    families: set[str] = set()
+    for raw in re.split(r"(?<=[.!?;])\s+|\n+", text or ""):
+        segment = norm_space(raw)
+        if not segment or EXERCISE_EVIDENCE_NEGATION_RE.search(segment):
+            continue
+        families.update(_exercise_skill_families(segment))
+    return families
+
+
+def _exercise_family_sets_conflict(left: set[str], right: set[str]) -> bool:
+    if not left or not right or left & right:
+        return False
+    return not any(
+        frozenset((left_family, right_family)) in EXERCISE_COMPATIBLE_FAMILY_PAIRS
+        for left_family in left
+        for right_family in right
+    )
+
+
+def _extract_parent_action_section(text: str) -> str:
+    for header in P2D_PARENT_ACTION_HEADERS:
+        section = _extract_section_after_header(text, header, P2D_PARENT_ACTION_STOPS)
+        if section:
+            return section
+    return ""
+
+
+def _pro_internal_material_contradiction(text: str) -> bool:
+    materials = _pro_section(text, r"^🧰\s*Материалы\s*[:：]?\s*")
+    steps = _pro_section(text, r"^🔁\s*Как провести\s*[:：]?\s*")
+    return bool(
+        materials
+        and steps
+        and PRO_EVIDENCE_NO_MATERIALS_RE.search(_normalize_scan_text(materials))
+        and EXERCISE_REQUIRED_PROP_RE.search(_normalize_scan_text(steps))
+    )
+
+
+def _validate_pro_exercise_coherence_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
+    goal = _pro_section(text, r"^🎯\s*Цель\s*[:：]?\s*")
+    materials = _pro_section(text, r"^🧰\s*Материалы\s*[:：]?\s*")
+    steps = _pro_section(text, r"^🔁\s*Как провести\s*[:：]?\s*")
+    observation = _pro_section(text, r"^✅\s*На что смотреть\s*[:：]?\s*")
+    complication = _pro_section(text, r"^💡\s*Вариант усложнения\s*[:：]?\s*")
+    if not goal or not steps:
+        return True, "ok"
+
+    if EXERCISE_SPEECH_AUTOMATION_RE.search(goal) and not EXERCISE_EXPLICIT_SPEECH_ACTION_RE.search(steps):
+        return False, P2D_EXERCISE_REASON
+
+    goal_families = _exercise_skill_families(goal)
+    step_families = _exercise_skill_families(steps)
+    core_families = goal_families | step_families
+    if _exercise_family_sets_conflict(goal_families, step_families):
+        return False, P2D_EXERCISE_REASON
+
+    observation_families = _exercise_skill_families(observation)
+    if observation and _exercise_family_sets_conflict(core_families, observation_families):
+        return False, P2D_EXERCISE_REASON
+
+    evidence_families = _exercise_evidence_families(evidence_text)
+    complication_families = _exercise_skill_families(complication)
+    if complication and _exercise_family_sets_conflict(core_families, complication_families):
+        if not evidence_families or _exercise_family_sets_conflict(evidence_families, complication_families):
+            return False, P2D_EXERCISE_REASON
+
+    if evidence_families and _exercise_family_sets_conflict(core_families, evidence_families):
+        return False, P2D_EXERCISE_REASON
+
+    if (
+        materials
+        and PRO_EVIDENCE_NO_MATERIALS_RE.search(_normalize_scan_text(materials))
+        and EXERCISE_REQUIRED_PROP_RE.search(_normalize_scan_text(steps))
+    ):
+        return False, P2D_EXERCISE_REASON
+
+    return True, "ok"
+
+
+def _validate_parent_exercise_coherence_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
+    del evidence_text
+    action = _extract_parent_action_section(text)
+    benefit = _extract_parent_benefit_section(text)
+    if not action or not benefit:
+        return True, "ok"
+    if _exercise_family_sets_conflict(
+        _exercise_skill_families(action),
+        _exercise_skill_families(benefit),
+    ):
+        return False, P2D_EXERCISE_REASON
+    return True, "ok"
+
+
+def _validate_parent_professional_role_output(text: str) -> Tuple[bool, str]:
+    action = _extract_parent_action_section(text)
+    if not action:
+        return True, "ok"
+    for segment in (
+        part.strip()
+        for part in re.split(r"(?<=[.!?;])\s+|\n+", action)
+        if part.strip()
+    ):
+        if P2D_SPECIALIST_ACTOR_RE.search(segment):
+            continue
+        if P2D_PARENT_SOUND_WORK_RE.search(segment):
+            return False, P2D_PARENT_ROLE_REASON
+        if P2D_PROFESSIONAL_TARGET_RE.search(segment) and P2D_PROFESSIONAL_INFERENCE_RE.search(segment):
+            return False, P2D_PARENT_ROLE_REASON
+    return True, "ok"
+
+
+_P2D_VALIDATE_OUTPUT_BASE = _validate_output
+
+
+def _validate_output(
+    text: str,
+    day_key: str = "",
+    rubric_format: str = "",
+    audience: str = "",
+    evidence_text: str = "",
+    topic_id: str = "",
+) -> Tuple[bool, str]:
+    rf = (rubric_format or "").strip().lower()
+    aud = (audience or "").strip().lower()
+    ok, reason = _P2D_VALIDATE_OUTPUT_BASE(
+        text,
+        day_key=day_key,
+        rubric_format=rubric_format,
+        audience=audience,
+        evidence_text=evidence_text,
+        topic_id=topic_id,
+    )
+    if not ok:
+        if rf == "pro_friendly" and _pro_internal_material_contradiction(text):
+            _p2d_record_failure(P2D_EXERCISE_REASON)
+            return False, P2D_EXERCISE_REASON
+        return False, reason
+
+    if rf in PARENT_CONTENT_FORMATS:
+        ok, reason = _validate_parent_professional_role_output(text)
+        if not ok:
+            _p2d_record_failure(reason)
+            return False, reason
+        ok, reason = _validate_parent_exercise_coherence_output(text, evidence_text)
+        if not ok:
+            _p2d_record_failure(reason)
+            return False, reason
+    elif rf == "pro_friendly" or aud == "pros":
+        ok, reason = _validate_pro_exercise_coherence_output(text, evidence_text)
+        if not ok:
+            _p2d_record_failure(reason)
+            return False, reason
+
+    _p2d_clear_failure()
+    return True, "ok"
+
+
+PRO_FRIENDLY_REPAIR_EXACT_REASONS.add(P2D_EXERCISE_REASON)
+PARENT_CONTENT_REPAIR_REASONS.update(P2D_FAIL_CLOSED_REASONS)
+BILINGUAL_PARENTS_REPAIR_EXACT_REASONS.update(P2D_FAIL_CLOSED_REASONS)
+THEMATIC_PARENTS_REPAIR_EXACT_REASONS.update(P2D_FAIL_CLOSED_REASONS)
+
+P2D_EXERCISE_COHERENCE_REPAIR_INSTRUCTION = (
+    "Исправь только coherence mismatch: приведи цель, наблюдаемый результат/benefit и вариант усложнения к уже "
+    "описанной процедуре/action и EVIDENCE. Не меняй процедуру или домашнее действие и не добавляй новый навык. "
+    "Не добавляй diagnosis, cause, test, material, exercise, number, age, milestone, repetition count или progression stage. "
+    "Если в процедуре нет речевого действия ребёнка, не заявляй постановку, коррекцию или автоматизацию речевого навыка."
+)
+P2D_PARENT_PROFESSIONAL_ROLE_REPAIR_INSTRUCTION = (
+    "Убери professional-role overreach из домашней инструкции. Родитель может наблюдать, записывать или считать ответы "
+    "без профессионального вывода; профессиональную оценку оставляй специалисту. Не поручай родителю постановку, "
+    "коррекцию или автоматизацию звука. Не добавляй новый skill, diagnosis, cause, test, material, exercise, number, age, "
+    "milestone, repetition count или progression stage."
+)
+
+_P2D_LAST_TEXT_PROVIDER = _contextvars.ContextVar("p2d_last_text_provider", default="")
+_P2D_LAST_RAW_OUTPUT = _contextvars.ContextVar("p2d_last_raw_output", default="")
+_P2D_FAIL_REASON = _contextvars.ContextVar("p2d_fail_reason", default="")
+_P2D_FAIL_ORIGIN_PROVIDER = _contextvars.ContextVar("p2d_fail_origin_provider", default="")
+_P2D_REQUESTED_PROVIDER = _contextvars.ContextVar("p2d_requested_provider", default="")
+
+
+def _p2d_record_failure(reason: str) -> None:
+    if reason in P2D_FAIL_CLOSED_REASONS and not _P2D_FAIL_REASON.get():
+        _P2D_FAIL_REASON.set(reason)
+        _P2D_FAIL_ORIGIN_PROVIDER.set(_P2D_LAST_TEXT_PROVIDER.get())
+
+
+def _p2d_clear_failure() -> None:
+    if _P2D_FAIL_REASON.get():
+        _P2D_FAIL_REASON.set("")
+        _P2D_FAIL_ORIGIN_PROVIDER.set("")
+
+
+_P2D_PARENT_CONTENT_REPAIR_INSTRUCTION_BASE = _parent_content_repair_instruction
+
+
+def _parent_content_repair_instruction(reason: str) -> str:
+    if reason == P2D_EXERCISE_REASON:
+        instruction = P2D_EXERCISE_COHERENCE_REPAIR_INSTRUCTION
+    elif reason == P2D_PARENT_ROLE_REASON:
+        instruction = P2D_PARENT_PROFESSIONAL_ROLE_REPAIR_INSTRUCTION
+    else:
+        return _P2D_PARENT_CONTENT_REPAIR_INSTRUCTION_BASE(reason)
+    previous = _P2D_LAST_RAW_OUTPUT.get().strip()
+    prefix = "ПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous + "\n\n" if previous else ""
+    return prefix + instruction
+
+
+_P2D_BUILD_PRO_REPAIR_BASE = build_pro_friendly_repair_prompt
+
+
+def build_pro_friendly_repair_prompt(
+    base_prompt: str,
+    reason: str,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> str:
+    if reason != P2D_EXERCISE_REASON:
+        return _P2D_BUILD_PRO_REPAIR_BASE(
+            base_prompt,
+            reason,
+            evidence_prevalidated=evidence_prevalidated,
+            topic_id=topic_id,
+            topic_title=topic_title,
+        )
+    previous = _P2D_LAST_RAW_OUTPUT.get().strip()
+    previous_note = "\n\nПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous if previous else ""
+    return (
+        (base_prompt or "")
+        + _topic_instruction(topic_id, topic_title)
+        + previous_note
+        + "\n\nP2D REPAIR. Точная причина: exercise_coherence_violation.\n"
+        + P2D_EXERCISE_COHERENCE_REPAIR_INSTRUCTION
+        + "\nВерни полный pro_friendly method card в исходном формате без новых фактов."
+    )
+
+
+_P2D_GROQ_CHAT_BASE = groq_chat
+_P2D_GEMINI_GENERATE_BASE = gemini_generate
+
+
+async def groq_chat(prompt: str, api_key: str) -> str:
+    _P2D_LAST_TEXT_PROVIDER.set("groq")
+    result = await _P2D_GROQ_CHAT_BASE(prompt, api_key)
+    _P2D_LAST_RAW_OUTPUT.set(result or "")
+    return result
+
+
+async def gemini_generate(prompt: str, api_key: str) -> str:
+    if (
+        _P2D_REQUESTED_PROVIDER.get() == "auto"
+        and _P2D_FAIL_REASON.get() in P2D_FAIL_CLOSED_REASONS
+        and _P2D_FAIL_ORIGIN_PROVIDER.get() == "groq"
+    ):
+        raise RuntimeError(f"p2d_provider_fallback_blocked:{_P2D_FAIL_REASON.get()}")
+    _P2D_LAST_TEXT_PROVIDER.set("gemini")
+    result = await _P2D_GEMINI_GENERATE_BASE(prompt, api_key)
+    _P2D_LAST_RAW_OUTPUT.set(result or "")
+    return result
+
+
+_P2D_GENERATE_POST_BASE = generate_post_plain_from_evidence_async
+
+
+async def generate_post_plain_from_evidence_async(
+    rubric_title: str,
+    rubric_format: str,
+    audience: str,
+    title_suffix: str,
+    source_domain: str,
+    source_url: str,
+    evidence_text: str,
+    disclaimer: str,
+    hashtags: List[str],
+    provider: str,
+    groq_key: str,
+    gemini_key: str,
+    max_chars: int,
+    day_key: Optional[str] = None,
+    evidence_prevalidated: bool = False,
+    topic_id: str = "",
+    topic_title: str = "",
+) -> Tuple[str, bool, str]:
+    provider_token = _P2D_REQUESTED_PROVIDER.set((provider or "auto").strip().lower())
+    fail_token = _P2D_FAIL_REASON.set("")
+    origin_token = _P2D_FAIL_ORIGIN_PROVIDER.set("")
+    last_provider_token = _P2D_LAST_TEXT_PROVIDER.set("")
+    last_output_token = _P2D_LAST_RAW_OUTPUT.set("")
+    try:
+        text, ok, note = await _P2D_GENERATE_POST_BASE(
+            rubric_title=rubric_title,
+            rubric_format=rubric_format,
+            audience=audience,
+            title_suffix=title_suffix,
+            source_domain=source_domain,
+            source_url=source_url,
+            evidence_text=evidence_text,
+            disclaimer=disclaimer,
+            hashtags=hashtags,
+            provider=provider,
+            groq_key=groq_key,
+            gemini_key=gemini_key,
+            max_chars=max_chars,
+            day_key=day_key,
+            evidence_prevalidated=evidence_prevalidated,
+            topic_id=topic_id,
+            topic_title=topic_title,
+        )
+        reason = _P2D_FAIL_REASON.get()
+        if not ok and reason in P2D_FAIL_CLOSED_REASONS:
+            return "", False, f"p2d_fail_closed:{reason}:{note}"
+        return text, ok, note
+    finally:
+        _P2D_LAST_RAW_OUTPUT.reset(last_output_token)
+        _P2D_LAST_TEXT_PROVIDER.reset(last_provider_token)
+        _P2D_FAIL_ORIGIN_PROVIDER.reset(origin_token)
+        _P2D_FAIL_REASON.reset(fail_token)
+        _P2D_REQUESTED_PROVIDER.reset(provider_token)

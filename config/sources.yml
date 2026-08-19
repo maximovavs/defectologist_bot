@@ -33,7 +33,6 @@ quality:
     - "gosh.nhs.uk"
     - "parents.com"
     - "verywellfamily.com"
-    - "readingrockets.org"
 
   deny_keywords:
     - "форум"
@@ -394,13 +393,13 @@ sources:
     urls:
       - "https://www.verywellfamily.com/benefits-of-letting-baby-play-with-household-objects-5208533"
 
-  # ---------- P2F myth/fact refutation coverage ----------
+  # ---------- P2G myth/fact runtime viability ----------
 
-  - id: asha_single_sound_error
-    name: "ASHA — It Might Not Be Just Artic"
+  - id: mayoclinic_cas_speech_muscle_myth
+    name: "Mayo Clinic — CAS speech muscle exercises evidence"
     type: static
     urls:
-      - "https://pubs.asha.org/doi/10.1044/2018_PERS-SIG1-2018-0019"
+      - "https://www.mayoclinic.org/diseases-conditions/childhood-apraxia-of-speech/diagnosis-treatment/drc-20352051"
 
   - id: asha_newborn_hearing_screening
     name: "ASHA — Newborn Hearing Screening"
@@ -414,8 +413,8 @@ sources:
     urls:
       - "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/one-year-old--Should-she-be-talking-by-now.aspx"
 
-  - id: readingrockets_reading_myths
-    name: "Reading Rockets — Popular myths about reading instruction"
+  - id: healthychildren_crawling_reading_myth
+    name: "HealthyChildren — Crawling and later reading myth"
     type: static
     urls:
-      - "https://www.readingrockets.org/blogs/shanahan-on-literacy/laying-waste-5-popular-myths-about-reading-instruction"
+      - "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/if-a-baby-skips-crawling-trouble-reading.aspx"

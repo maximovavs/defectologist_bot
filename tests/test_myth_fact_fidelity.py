@@ -53,6 +53,29 @@ PRELITERACY_EVIDENCE = (
     "and let the child join the conversation during a familiar book."
 )
 
+P2F_SPEECH_SOURCE_EVIDENCE = (
+    "A common misconception is that a single speech sound error is always just an articulation problem. "
+    "A single speech sound error does not mean the difficulty is only articulation. "
+    "Speech sound assessment considers speech sounds and phoneme patterns."
+)
+
+P2F_HEARING_SOURCE_EVIDENCE = (
+    "A common myth is that passing a newborn hearing screening means hearing is typical across all frequencies. "
+    "Passing a hearing screening does not mean hearing is typical across all frequencies. "
+    "Hearing screening can identify newborns who need further hearing assessment."
+)
+
+P2F_EARLY_SOURCE_EVIDENCE = (
+    "A common misconception is that every one-year-old must already be talking. Not necessarily. "
+    "Early communication includes gestures, babbling, and first words, and children develop these communication skills over time."
+)
+
+P2F_PRELITERACY_SOURCE_EVIDENCE = (
+    "A common myth is that simply reading more books automatically guarantees better reading. "
+    "Reading more books does not mean reading skill improves by itself. "
+    "Books and shared reading can support reading development."
+)
+
 P2F_CANONICAL_COVERAGE = {
     "bilingualism": (
         "healthychildren_bilingual_myths",
@@ -62,22 +85,22 @@ P2F_CANONICAL_COVERAGE = {
     "speech_sounds": (
         "asha_single_sound_error",
         "https://pubs.asha.org/doi/10.1044/2018_PERS-SIG1-2018-0019",
-        SPEECH_SOUND_EVIDENCE,
+        P2F_SPEECH_SOURCE_EVIDENCE,
     ),
     "hearing_and_speech": (
         "asha_newborn_hearing_screening",
         "https://www.asha.org/Practice-Portal/Professional-Issues/Newborn-Hearing-Screening/",
-        HEARING_EVIDENCE,
+        P2F_HEARING_SOURCE_EVIDENCE,
     ),
     "early_communication": (
         "healthychildren_one_year_talking",
         "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/one-year-old--Should-she-be-talking-by-now.aspx",
-        REGRESSION_EVIDENCE,
+        P2F_EARLY_SOURCE_EVIDENCE,
     ),
     "preliteracy": (
         "readingrockets_reading_myths",
         "https://www.readingrockets.org/blogs/shanahan-on-literacy/laying-waste-5-popular-myths-about-reading-instruction",
-        PRELITERACY_EVIDENCE,
+        P2F_PRELITERACY_SOURCE_EVIDENCE,
     ),
 }
 
@@ -302,7 +325,7 @@ class MythFactSourceCoverageTest(unittest.TestCase):
         self.assertNotIn("readingrockets.org", scientific_domains)
         self.assertFalse(publisher.is_scientific_domain("readingrockets.org", scientific_domains))
         self.assertFalse(
-            publisher._requires_tier1_source("myth_fact", "preliteracy", PRELITERACY_EVIDENCE)
+            publisher._requires_tier1_source("myth_fact", "preliteracy", P2F_PRELITERACY_SOURCE_EVIDENCE)
         )
 
 

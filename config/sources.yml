@@ -33,6 +33,7 @@ quality:
     - "gosh.nhs.uk"
     - "parents.com"
     - "verywellfamily.com"
+    - "readingrockets.org"
 
   deny_keywords:
     - "форум"
@@ -392,3 +393,29 @@ sources:
     type: static
     urls:
       - "https://www.verywellfamily.com/benefits-of-letting-baby-play-with-household-objects-5208533"
+
+  # ---------- P2F myth/fact refutation coverage ----------
+
+  - id: asha_single_sound_error
+    name: "ASHA — It Might Not Be Just Artic"
+    type: static
+    urls:
+      - "https://pubs.asha.org/doi/10.1044/2018_PERS-SIG1-2018-0019"
+
+  - id: asha_newborn_hearing_screening
+    name: "ASHA — Newborn Hearing Screening"
+    type: static
+    urls:
+      - "https://www.asha.org/Practice-Portal/Professional-Issues/Newborn-Hearing-Screening/"
+
+  - id: healthychildren_one_year_talking
+    name: "HealthyChildren — Should a one-year-old be talking?"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/one-year-old--Should-she-be-talking-by-now.aspx"
+
+  - id: readingrockets_reading_myths
+    name: "Reading Rockets — Popular myths about reading instruction"
+    type: static
+    urls:
+      - "https://www.readingrockets.org/blogs/shanahan-on-literacy/laying-waste-5-popular-myths-about-reading-instruction"

@@ -223,6 +223,8 @@ class ProbeIsolationContractTest(unittest.TestCase):
         self.assertNotIn("push", workflow["on"])
         self.assertNotIn("schedule", workflow["on"])
         self.assertNotIn("${{ secrets.", raw)
+        self.assertIn("run: python -m scripts.probe_myth_fact_sources", raw)
+        self.assertNotIn("run: python scripts/probe_myth_fact_sources.py", raw)
 
         for forbidden in (
             "TELEGRAM_BOT_TOKEN",

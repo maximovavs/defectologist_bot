@@ -29,4 +29,4 @@ jobs:
             "Pillow>=10.3.0"
 
       - name: Probe configured myth_fact sources
-        run: python scripts/probe_myth_fact_sources.py
+        run: python -m scripts.probe_myth_fact_sources

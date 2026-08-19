@@ -9,6 +9,8 @@ on:
       - "src/services/topic_policy.py"
       - "src/services/llm_generator.py"
       - "config/sources.yml"
+      - "config/topics.yml"
+      - "config/rubrics.yml"
       - "tests/test_topic_policy.py"
       - "tests/test_editorial_freshness_policy.py"
       - "tests/test_myth_fact_fidelity.py"

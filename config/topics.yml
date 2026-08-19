@@ -11,6 +11,7 @@ topics:
       - healthychildren_language_development
       - asha_developmental_milestones
       - parents_baby_language_activities
+      - healthychildren_one_year_talking
 
   vocabulary_phrase:
     source_ids:
@@ -28,6 +29,7 @@ topics:
       - logopedy_articles_latest
       - logoportal_latest
       - logorina_latest
+      - asha_single_sound_error
 
   phonemic_awareness:
     source_ids:
@@ -60,6 +62,7 @@ topics:
       - kidskey_speech_games
       - naeyc_family_communication
       - parents_language_activities
+      - readingrockets_reading_myths
 
   hearing_and_speech:
     source_ids:
@@ -68,6 +71,7 @@ topics:
       - nationwidechildrens_speech_language
       - actionforchildren_communication_milestones
       - gosh_speech_language_12_24_months
+      - asha_newborn_hearing_screening
 
   bilingualism:
     source_ids:

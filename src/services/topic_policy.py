@@ -106,8 +106,7 @@ RUBRIC_TOPIC_ROTATION: dict[str, tuple[str, ...]] = {
         "everyday_communication",
     ),
     "myth_fact": (
-        "bilingualism", "speech_sounds", "hearing_and_speech", "early_communication",
-        "everyday_communication", "preliteracy",
+        "bilingualism", "speech_sounds", "hearing_and_speech", "early_communication", "preliteracy",
     ),
     "bilingual_corner": (
         "bilingualism", "hearing_and_speech", "speech_sounds", "early_communication",

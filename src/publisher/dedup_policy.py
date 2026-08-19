@@ -422,7 +422,13 @@ def normalize_domain(domain: str | None) -> str:
     value = (domain or "").strip().lower()
     value = re.sub(r"^https?://", "", value)
     value = value.split("/", 1)[0]
-    return value[4:] if value.startswith("www.") else value
+    if value.startswith("www."):
+        value = value[4:]
+    if value.endswith(":443"):
+        value = value[:-4]
+    elif value.endswith(":80"):
+        value = value[:-3]
+    return value
 
 
 def is_recent_source_domain(domain: str | None, recent_domains) -> bool:

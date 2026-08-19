@@ -1,10 +1,17 @@
 import inspect
 import unittest
 from pathlib import Path
+from urllib.parse import urlparse
 from unittest.mock import patch
 
+import yaml
+
+from src.publisher import run_publisher as publisher
 from src.publisher.run_publisher import _extract_validation_skip_reason
 from src.services import llm_generator as llm
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 BILINGUAL_EVIDENCE = (
@@ -45,6 +52,34 @@ PRELITERACY_EVIDENCE = (
     "Shared reading does not have to be a formal lesson. Families can talk about pictures, notice print, "
     "and let the child join the conversation during a familiar book."
 )
+
+P2F_CANONICAL_COVERAGE = {
+    "bilingualism": (
+        "healthychildren_bilingual_myths",
+        "https://www.healthychildren.org/English/ages-stages/gradeschool/school/Pages/7-Myths-Facts-Bilingual-Children-Learning-Language.aspx",
+        BILINGUAL_EVIDENCE,
+    ),
+    "speech_sounds": (
+        "asha_single_sound_error",
+        "https://pubs.asha.org/doi/10.1044/2018_PERS-SIG1-2018-0019",
+        SPEECH_SOUND_EVIDENCE,
+    ),
+    "hearing_and_speech": (
+        "asha_newborn_hearing_screening",
+        "https://www.asha.org/Practice-Portal/Professional-Issues/Newborn-Hearing-Screening/",
+        HEARING_EVIDENCE,
+    ),
+    "early_communication": (
+        "healthychildren_one_year_talking",
+        "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/one-year-old--Should-she-be-talking-by-now.aspx",
+        REGRESSION_EVIDENCE,
+    ),
+    "preliteracy": (
+        "readingrockets_reading_myths",
+        "https://www.readingrockets.org/blogs/shanahan-on-literacy/laying-waste-5-popular-myths-about-reading-instruction",
+        PRELITERACY_EVIDENCE,
+    ),
+}
 
 VALID_BILINGUAL_CARD = (
     "Два языка не вызывают задержку сами по себе\n\n"
@@ -215,6 +250,60 @@ class MythFactClaimValidationTest(unittest.TestCase):
     def test_missing_myth_line_is_rejected(self):
         card = VALID_BILINGUAL_CARD.replace("🔴 Миф: Два языка вызывают задержку речи.\n\n", "")
         self.assert_reason(card, BILINGUAL_EVIDENCE, "bilingualism", "myth_missing_claim")
+
+
+class MythFactSourceCoverageTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sources_cfg = yaml.safe_load((ROOT / "config" / "sources.yml").read_text(encoding="utf-8"))
+        cls.topics_cfg = yaml.safe_load((ROOT / "config" / "topics.yml").read_text(encoding="utf-8"))
+        cls.rubrics_cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
+        cls.sources_by_id = {
+            item["id"]: item for item in (cls.sources_cfg.get("sources", []) or [])
+        }
+        cls.myth_fact = next(
+            item
+            for item in cls.rubrics_cfg["audiences"]["parents"]["rubrics"]
+            if item.get("id") == "myth_fact"
+        )
+
+    def test_each_remaining_topic_has_canonical_refutation_source(self):
+        for topic_id, (source_id, expected_url, evidence) in P2F_CANONICAL_COVERAGE.items():
+            with self.subTest(topic_id=topic_id, source_id=source_id):
+                self.assertIn(source_id, self.sources_by_id)
+                source = self.sources_by_id[source_id]
+                self.assertEqual(source.get("type"), "static")
+                self.assertIn(expected_url, source.get("urls", []))
+                topic_sources = self.topics_cfg["topics"][topic_id]["source_ids"]
+                self.assertIn(source_id, topic_sources)
+                self.assertIn(source_id, self.myth_fact["sources"])
+                self.assertEqual(
+                    llm.validate_myth_fact_evidence_for_generation(evidence, topic_id),
+                    (True, "ok"),
+                )
+
+    def test_sensitive_canonical_sources_are_tier1(self):
+        scientific_domains = self.sources_cfg["quality"]["scientific_domains"]
+        for topic_id in (
+            "bilingualism",
+            "speech_sounds",
+            "hearing_and_speech",
+            "early_communication",
+        ):
+            source_id, expected_url, _evidence = P2F_CANONICAL_COVERAGE[topic_id]
+            domain = urlparse(expected_url).netloc.lower()
+            with self.subTest(topic_id=topic_id, source_id=source_id, domain=domain):
+                self.assertTrue(publisher.is_scientific_domain(domain, scientific_domains))
+
+    def test_reading_rockets_is_allowlisted_but_not_tier1(self):
+        allow_domains = self.sources_cfg["quality"]["allow_domains"]
+        scientific_domains = self.sources_cfg["quality"]["scientific_domains"]
+        self.assertIn("readingrockets.org", allow_domains)
+        self.assertNotIn("readingrockets.org", scientific_domains)
+        self.assertFalse(publisher.is_scientific_domain("readingrockets.org", scientific_domains))
+        self.assertFalse(
+            publisher._requires_tier1_source("myth_fact", "preliteracy", PRELITERACY_EVIDENCE)
+        )
 
 
 class MythFactIntegrationContractTest(unittest.TestCase):

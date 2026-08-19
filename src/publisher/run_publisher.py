@@ -2391,6 +2391,8 @@ async def amain() -> None:
                     candidate_domain,
                     scientific_domains,
                 ):
+                    # Canonical soft-skip call remains the same; P2E only adds stage provenance.
+                    # note("source_authority_required", canon)
                     kind = note("source_authority_required", canon, stage="source_authority")
                     print(
                         f"[SKIP][{kind}] source_authority_required source={candidate_source_id} "

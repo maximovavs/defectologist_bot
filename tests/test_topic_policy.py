@@ -20,6 +20,40 @@ from src.services.topic_policy import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+EXPECTED_MYTH_FACT_ROTATION = (
+    "bilingualism",
+    "speech_sounds",
+    "hearing_and_speech",
+    "early_communication",
+    "preliteracy",
+)
+
+EXPECTED_NON_MYTH_ROTATIONS = {
+    "tip_of_day": (
+        "early_communication", "vocabulary_phrase", "everyday_communication", "hearing_and_speech",
+        "speech_sounds", "bilingualism",
+    ),
+    "play_and_speak": (
+        "vocabulary_phrase", "phonemic_awareness", "grammar", "narrative_speech", "preliteracy",
+        "everyday_communication",
+    ),
+    "bilingual_corner": (
+        "bilingualism", "hearing_and_speech", "speech_sounds", "early_communication",
+        "vocabulary_phrase", "preliteracy",
+    ),
+    "question_week": (
+        "early_communication", "vocabulary_phrase", "speech_sounds", "phonemic_awareness", "grammar",
+        "narrative_speech", "preliteracy", "hearing_and_speech", "bilingualism", "everyday_communication",
+    ),
+    "method_piggybank": (
+        "speech_sounds", "phonemic_awareness", "vocabulary_phrase", "grammar", "narrative_speech",
+        "preliteracy",
+    ),
+    "age_norms": (
+        "early_communication", "vocabulary_phrase", "speech_sounds", "hearing_and_speech",
+    ),
+}
+
 
 class TopicPolicyTest(unittest.TestCase):
     def test_all_topics_have_complete_definitions(self):
@@ -155,6 +189,23 @@ class TopicPolicyTest(unittest.TestCase):
         for evidence in examples:
             with self.subTest(evidence=evidence):
                 self.assertIn("hearing_and_speech", detect_evidence_topics(evidence))
+
+    def test_myth_fact_rotation_is_five_covered_topics(self):
+        self.assertEqual(RUBRIC_TOPIC_ROTATION["myth_fact"], EXPECTED_MYTH_FACT_ROTATION)
+        self.assertNotIn("everyday_communication", RUBRIC_TOPIC_ROTATION["myth_fact"])
+        self.assertIn("everyday_communication", TOPICS)
+        self.assertGreater(
+            len(RUBRIC_TOPIC_ROTATION["myth_fact"]) * 7,
+            publisher.SOURCE_COOLDOWN_DAYS,
+        )
+
+    def test_other_rotations_are_unchanged_by_p2f(self):
+        actual = {
+            rubric_id: rotation
+            for rubric_id, rotation in RUBRIC_TOPIC_ROTATION.items()
+            if rubric_id != "myth_fact"
+        }
+        self.assertEqual(actual, EXPECTED_NON_MYTH_ROTATIONS)
 
     def test_age_norms_rotation_excludes_everyday_communication(self):
         self.assertNotIn("everyday_communication", RUBRIC_TOPIC_ROTATION["age_norms"])

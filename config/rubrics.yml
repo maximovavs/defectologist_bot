@@ -118,6 +118,10 @@ audiences:
           - "parents_toddler_language_boost"
           - "parents_sensory_play_language"
           - "parents_baby_language_activities"
+          - "asha_single_sound_error"
+          - "asha_newborn_hearing_screening"
+          - "healthychildren_one_year_talking"
+          - "readingrockets_reading_myths"
         format: "myth_fact"
         media: ["image_card"]
 

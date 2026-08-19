@@ -343,6 +343,11 @@ class MythFactSourceCoverageTest(unittest.TestCase):
         self.assertIn("mayoclinic.org", scientific_domains)
         self.assertTrue(publisher.is_scientific_domain("www.mayoclinic.org", scientific_domains))
 
+    def test_default_ports_do_not_break_tier1_matching(self):
+        scientific_domains = self.sources_cfg["quality"]["scientific_domains"]
+        self.assertTrue(publisher.is_scientific_domain("www.healthychildren.org:443", scientific_domains))
+        self.assertTrue(publisher.is_scientific_domain("www.healthychildren.org:80", scientific_domains))
+
 
 class MythFactIntegrationContractTest(unittest.TestCase):
     def test_validation_reasons_are_preserved_by_publisher(self):

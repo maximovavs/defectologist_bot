@@ -207,6 +207,35 @@ RUBRIC_TAGS_BY_DAY = {
     "SU": "#возрастная_норма",
 }
 
+POLICY_OWNERSHIP_REASONS = frozenset({
+    "myth_claim_not_grounded",
+    "parent_age_not_grounded",
+    "parent_modality_not_grounded",
+    "parent_diagnostic_role_violation",
+    "parent_false_hearing_inference",
+    "parent_risky_oral_manipulation",
+    "exercise_coherence_violation",
+    "parent_professional_role_violation",
+})
+
+PUBLISHER_DIAGNOSTIC_STAGES = (
+    "url_cooldown",
+    "evidence",
+    "source_authority",
+    "pre_llm",
+    "llm_validation",
+)
+
+LEGACY_VALIDATION_NOTE_ALIASES = {
+    "groq_failed_after_modality_repair:": "parent_modality_not_grounded",
+    "groq_failed_after_diagnostic_repair:": "parent_diagnostic_role_violation",
+}
+
+QUOTA_SKIP_REASONS = (
+    "gemini_quota_exhausted_cached",
+    "gemini_quota_exhausted",
+)
+
 SOFT_SKIP_REASONS = {
     "bad_candidate_url",
     "skip_non_html_asset",
@@ -231,7 +260,6 @@ SOFT_SKIP_REASONS = {
     "myth_unsupported_sensitive_claim",
     "myth_unsupported_numeric_detail",
     "myth_unsupported_phoneme_detail",
-    "myth_claim_not_grounded",
     "tip_of_day_post_too_generic",
     "unsupported_mechanism_claim",
     "pro_unsupported_concrete_detail",
@@ -265,12 +293,10 @@ SOFT_SKIP_REASONS = {
     "thematic_unsupported_mechanism",
     "thematic_missing_heading",
     "thematic_nonobservable_benefit",
-    "parent_risky_oral_manipulation",
     "parent_ambiguous_latin_phoneme",
     "parent_age_range_too_broad",
     "parent_age_action_mismatch",
     "parent_nonobservable_benefit",
-    "parent_false_hearing_inference",
     "parent_cross_language_sound_norm",
     "parent_too_many_numbered_steps",
     "missing_parent_safety_note",
@@ -282,6 +308,7 @@ SOFT_SKIP_REASONS = {
     "final_invalid_output",
     "no_candidates",
     "max_skips_per_rubric",
+    *POLICY_OWNERSHIP_REASONS,
 }
 HARD_SKIP_REASONS = {
     "source_fetch_failed",
@@ -301,7 +328,6 @@ VALIDATION_SKIP_REASONS = {
     "myth_unsupported_sensitive_claim",
     "myth_unsupported_numeric_detail",
     "myth_unsupported_phoneme_detail",
-    "myth_claim_not_grounded",
     "empty",
     "too_short",
     "template_leak",
@@ -317,12 +343,10 @@ VALIDATION_SKIP_REASONS = {
     "thematic_unsupported_mechanism",
     "thematic_missing_heading",
     "thematic_nonobservable_benefit",
-    "parent_risky_oral_manipulation",
     "parent_ambiguous_latin_phoneme",
     "parent_age_range_too_broad",
     "parent_age_action_mismatch",
     "parent_nonobservable_benefit",
-    "parent_false_hearing_inference",
     "parent_cross_language_sound_norm",
     "parent_too_many_numbered_steps",
     "pro_insufficient_evidence",
@@ -339,6 +363,7 @@ VALIDATION_SKIP_REASONS = {
     "pro_old_academic_structure",
     "pro_risky_manual_technique",
     "pro_missing_method_card_heading",
+    *POLICY_OWNERSHIP_REASONS,
 }
 
 VALIDATION_SKIP_PREFIXES = (
@@ -542,31 +567,84 @@ def _skip_kind(reason: str) -> str:
     return "hard" if reason in HARD_SKIP_REASONS else "soft"
 
 
+def _canonical_validation_candidate(candidate: str) -> str:
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return ""
+    if "=" in candidate:
+        candidate = candidate.split("=", 1)[1].strip()
+    if candidate.startswith("p2d_fail_closed:"):
+        parts = candidate.split(":", 2)
+        candidate = parts[1].strip() if len(parts) >= 2 else ""
+    elif candidate.startswith("invalid_") and ":" in candidate:
+        candidate = candidate.split(":", 1)[1].strip()
+    if candidate in VALIDATION_SKIP_REASONS:
+        return candidate
+    if any(candidate.startswith(prefix + ":") for prefix in VALIDATION_SKIP_PREFIXES):
+        return candidate
+    return ""
+
+
 def _extract_validation_skip_reason(llm_note: str) -> str:
     note = norm_space(llm_note)
     if not note:
         return ""
 
-    candidates = []
-    candidates.extend(re.findall(r"invalid_(?:groq|groq_retry|gemini|gemini_retry):([^|]+)", note))
+    candidates: List[str] = []
+    candidates.extend(re.findall(r"p2d_fail_closed:[^|]+", note))
+    candidates.extend(re.findall(r"invalid_(?:groq_retry|groq|gemini_retry|gemini):([^|]+)", note))
     candidates.extend(re.split(r"\s*\|\s*", note))
 
     for candidate in candidates:
-        candidate = candidate.strip()
-        if "=" in candidate:
-            candidate = candidate.split("=", 1)[1].strip()
-        if candidate.startswith("invalid_") and ":" in candidate:
-            candidate = candidate.split(":", 1)[1].strip()
-        if candidate in VALIDATION_SKIP_REASONS:
-            return candidate
-        if any(candidate.startswith(prefix + ":") for prefix in VALIDATION_SKIP_PREFIXES):
-            return candidate
+        canonical = _canonical_validation_candidate(candidate)
+        if canonical:
+            return canonical
+
+    for segment in re.split(r"\s*\|\s*", note):
+        probe = segment.strip()
+        if "=" in probe:
+            probe = probe.split("=", 1)[1].strip()
+        for prefix, canonical in LEGACY_VALIDATION_NOTE_ALIASES.items():
+            if probe.startswith(prefix):
+                return canonical
     return ""
+
+
+def _resolve_llm_skip(llm_note: str) -> tuple[str, str]:
+    validation_reason = _extract_validation_skip_reason(llm_note)
+    if validation_reason:
+        return validation_reason, "llm_validation"
+    note = llm_note or ""
+    for reason in QUOTA_SKIP_REASONS:
+        if reason in note:
+            return reason, ""
+    return "llm_invalid_output", ""
 
 
 def _extract_pro_validation_skip_reason(llm_note: str) -> str:
     """Backward-compatible alias for callers using the former pro-only helper."""
     return _extract_validation_skip_reason(llm_note)
+
+
+def _record_skip(
+    reason: str,
+    url: str,
+    soft_skip_reasons: Dict[str, int],
+    hard_skip_reasons: Dict[str, int],
+    samples: List[str],
+    *,
+    stage_skip_reasons: Optional[Dict[str, Dict[str, int]]] = None,
+    stage: str = "",
+) -> str:
+    kind = _skip_kind(reason)
+    target = hard_skip_reasons if kind == "hard" else soft_skip_reasons
+    target[reason] = target.get(reason, 0) + 1
+    if stage and stage in PUBLISHER_DIAGNOSTIC_STAGES and stage_skip_reasons is not None:
+        bucket = stage_skip_reasons.setdefault(stage, {})
+        bucket[reason] = bucket.get(reason, 0) + 1
+    if len(samples) < 10:
+        samples.append(f"[{kind}] {reason}: {url}")
+    return kind
 
 
 def _build_posted_zero_alert_plain(
@@ -582,6 +660,7 @@ def _build_posted_zero_alert_plain(
     db_name: str,
     attempted_rubrics: List[str],
     topic_preference: str = "auto",
+    stage_skip_reasons: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> str:
     soft_total = sum(soft_skip_reasons.values())
     hard_total = sum(hard_skip_reasons.values())
@@ -605,6 +684,15 @@ def _build_posted_zero_alert_plain(
     if soft_top:
         parts.extend(["", "Soft skip reasons:"])
         parts.extend([f"• {reason}: {count}" for reason, count in soft_top])
+
+    stage_lines: List[str] = []
+    for stage in PUBLISHER_DIAGNOSTIC_STAGES:
+        counts = (stage_skip_reasons or {}).get(stage, {})
+        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+            stage_lines.append(f"• {stage} | {reason}: {count}")
+    if stage_lines:
+        parts.extend(["", "Skip stage attribution:"])
+        parts.extend(stage_lines)
 
     visual_qa_status = (
         "separate_key"
@@ -1996,19 +2084,23 @@ async def amain() -> None:
     posted = 0
     soft_skip_reasons: Dict[str, int] = {}
     hard_skip_reasons: Dict[str, int] = {}
+    skip_stage_reasons: Dict[str, Dict[str, int]] = {}
     samples: List[str] = []
     attempted_rubrics: List[str] = []
     seen_urls_this_run: set[str] = set()
     seen_body_hashes_this_run: set[str] = set()
     seen_evidence_hashes_this_run: set[str] = set()
 
-    def note(reason: str, url: str) -> str:
-        kind = _skip_kind(reason)
-        target = hard_skip_reasons if kind == "hard" else soft_skip_reasons
-        target[reason] = target.get(reason, 0) + 1
-        if len(samples) < 10:
-            samples.append(f"[{kind}] {reason}: {url}")
-        return kind
+    def note(reason: str, url: str, stage: str = "") -> str:
+        return _record_skip(
+            reason,
+            url,
+            soft_skip_reasons,
+            hard_skip_reasons,
+            samples,
+            stage_skip_reasons=skip_stage_reasons,
+            stage=stage,
+        )
 
     for aud in aud_list:
         if posted >= max_posts:
@@ -2185,7 +2277,7 @@ async def amain() -> None:
                     if url_within_cooldown:
                         # Inside the cooldown the URL is blocked for every rubric,
                         # including evergreen ones.
-                        kind = note("dup_url_recent", canon)
+                        kind = note("dup_url_recent", canon, stage="url_cooldown")
                         print(
                             f"[SKIP][{kind}] dup_url_recent source={candidate_source_id} url={canon} "
                             f"cooldown_days={SOURCE_COOLDOWN_DAYS}",
@@ -2236,7 +2328,7 @@ async def amain() -> None:
                     continue
 
                 if len((evidence or "").strip()) < 260:
-                    kind = note("no_evidence_short", canon)
+                    kind = note("no_evidence_short", canon, stage="evidence")
                     print(f"[SKIP][{kind}] no_evidence_short source={candidate_source_id} url={canon}", flush=True)
                     if kind == "hard":
                         rubric_skips += 1
@@ -2299,7 +2391,9 @@ async def amain() -> None:
                     candidate_domain,
                     scientific_domains,
                 ):
-                    kind = note("source_authority_required", canon)
+                    # Canonical soft-skip call remains the same; P2E only adds stage provenance.
+                    # note("source_authority_required", canon)
+                    kind = note("source_authority_required", canon, stage="source_authority")
                     print(
                         f"[SKIP][{kind}] source_authority_required source={candidate_source_id} "
                         f"rubric={rubric_id} topic={effective_topic_id or '(none)'} "
@@ -2449,7 +2543,7 @@ async def amain() -> None:
                         effective_topic_id,
                     )
                     if not myth_evidence_ok:
-                        kind = note(myth_evidence_reason, canon)
+                        kind = note(myth_evidence_reason, canon, stage="pre_llm")
                         print(
                             f"[SKIP][{kind}] {myth_evidence_reason} "
                             f"stage=pre_llm source={candidate_source_id} url={canon}",
@@ -2467,7 +2561,7 @@ async def amain() -> None:
                 if rf == "pro_friendly":
                     pro_evidence_ok, pro_evidence_reason = validate_pro_evidence_for_generation(evidence)
                     if not pro_evidence_ok:
-                        kind = note(pro_evidence_reason, canon)
+                        kind = note(pro_evidence_reason, canon, stage="pre_llm")
                         print(
                             f"[SKIP][{kind}] {pro_evidence_reason} "
                             f"stage=pre_llm source={candidate_source_id} url={canon}",
@@ -2531,17 +2625,8 @@ async def amain() -> None:
                     continue
 
                 if not ok or not plain_raw:
-                    validation_reason = _extract_validation_skip_reason(llm_note)
-                    quota_reason = next(
-                        (
-                            reason
-                            for reason in ("gemini_quota_exhausted_cached", "gemini_quota_exhausted")
-                            if reason in (llm_note or "")
-                        ),
-                        "",
-                    )
-                    skip_reason = validation_reason or quota_reason or "llm_invalid_output"
-                    kind = note(skip_reason, canon)
+                    skip_reason, skip_stage = _resolve_llm_skip(llm_note)
+                    kind = note(skip_reason, canon, stage=skip_stage)
                     print(
                         f"[SKIP][{kind}] {llm_note} reason={skip_reason} "
                         f"source={candidate_source_id} url={canon}",
@@ -2998,6 +3083,7 @@ async def amain() -> None:
                         db_name=db_path.name,
                         attempted_rubrics=attempted_rubrics,
                         topic_preference=POST_TOPIC_ID,
+                        stage_skip_reasons=skip_stage_reasons,
                     ),
                 )
             except Exception as e:

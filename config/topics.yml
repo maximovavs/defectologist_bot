@@ -29,7 +29,7 @@ topics:
       - logopedy_articles_latest
       - logoportal_latest
       - logorina_latest
-      - asha_single_sound_error
+      - mayoclinic_cas_speech_muscle_myth
 
   phonemic_awareness:
     source_ids:
@@ -62,7 +62,7 @@ topics:
       - kidskey_speech_games
       - naeyc_family_communication
       - parents_language_activities
-      - readingrockets_reading_myths
+      - healthychildren_crawling_reading_myth
 
   hearing_and_speech:
     source_ids:

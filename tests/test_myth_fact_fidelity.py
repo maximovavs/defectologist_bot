@@ -53,60 +53,60 @@ PRELITERACY_EVIDENCE = (
     "and let the child join the conversation during a familiar book."
 )
 
-P2G_SPEECH_SOURCE_EVIDENCE = (
-    "A common misconception is that exercises to strengthen speech muscles treat childhood apraxia of speech. "
-    "There is no evidence that exercises to strengthen speech muscles help childhood apraxia of speech. "
-    "Treatment instead focuses on practicing speech sounds, words, and phrases."
+P2I_SPEECH_SOURCE_EVIDENCE = (
+    "Multilingual children may show speech sound patterns influenced by another language. "
+    "These cross-linguistic influences do not indicate a speech sound disorder. "
+    "Speech sound assessment considers articulation and phonology in each language a child uses."
 )
 
-P2G_HEARING_SOURCE_EVIDENCE = (
+P2I_HEARING_SOURCE_EVIDENCE = (
     "A common myth is that passing a newborn hearing screening means hearing is typical across all frequencies. "
     "Passing a hearing screening does not mean hearing is typical across all frequencies. "
     "Hearing screening can identify newborns who need further hearing assessment."
 )
 
-P2G_EARLY_SOURCE_EVIDENCE = (
-    "A common misconception is that every one-year-old must already be talking. Not necessarily. "
+P2I_EARLY_SOURCE_EVIDENCE = (
+    "Parents may ask whether every one-year-old must already be talking. Not necessarily. "
     "Early communication includes gestures, babbling, and first words, and children develop these communication skills over time."
 )
 
-P2G_PRELITERACY_SOURCE_EVIDENCE = (
-    "A common myth is that a baby who skips crawling will have trouble reading later. "
+P2I_PRELITERACY_SOURCE_EVIDENCE = (
+    "Parents sometimes hear that a baby who skips crawling will have trouble reading later. "
     "There is no scientific evidence that skipping crawling causes later reading problems. "
     "Early literacy can be supported through books and shared reading over time."
 )
 
-P2G_CANONICAL_COVERAGE = {
+P2I_CANONICAL_COVERAGE = {
     "bilingualism": (
         "healthychildren_bilingual_myths",
         "https://www.healthychildren.org/English/ages-stages/gradeschool/school/Pages/7-Myths-Facts-Bilingual-Children-Learning-Language.aspx",
         BILINGUAL_EVIDENCE,
     ),
     "speech_sounds": (
-        "mayoclinic_cas_speech_muscle_myth",
-        "https://www.mayoclinic.org/diseases-conditions/childhood-apraxia-of-speech/diagnosis-treatment/drc-20352051",
-        P2G_SPEECH_SOURCE_EVIDENCE,
+        "asha_speech_sound_multilingual_influence",
+        "https://www.asha.org/practice-portal/clinical-topics/articulation-and-phonology/",
+        P2I_SPEECH_SOURCE_EVIDENCE,
     ),
     "hearing_and_speech": (
         "asha_newborn_hearing_screening",
         "https://www.asha.org/Practice-Portal/Professional-Issues/Newborn-Hearing-Screening/",
-        P2G_HEARING_SOURCE_EVIDENCE,
+        P2I_HEARING_SOURCE_EVIDENCE,
     ),
     "early_communication": (
         "healthychildren_one_year_talking",
         "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/one-year-old--Should-she-be-talking-by-now.aspx",
-        P2G_EARLY_SOURCE_EVIDENCE,
+        P2I_EARLY_SOURCE_EVIDENCE,
     ),
     "preliteracy": (
         "healthychildren_crawling_reading_myth",
         "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/if-a-baby-skips-crawling-trouble-reading.aspx",
-        P2G_PRELITERACY_SOURCE_EVIDENCE,
+        P2I_PRELITERACY_SOURCE_EVIDENCE,
     ),
 }
 
-P2G_MYTH_FACT_SOURCE_POOL = [
+P2I_MYTH_FACT_SOURCE_POOL = [
     "healthychildren_bilingual_myths",
-    "mayoclinic_cas_speech_muscle_myth",
+    "asha_speech_sound_multilingual_influence",
     "asha_newborn_hearing_screening",
     "healthychildren_one_year_talking",
     "healthychildren_crawling_reading_myth",
@@ -137,6 +137,41 @@ class MythFactEvidenceGateTest(unittest.TestCase):
         self.assertEqual(
             llm.validate_myth_fact_evidence_for_generation(BILINGUAL_EVIDENCE, "bilingualism"),
             (True, "ok"),
+        )
+
+    def test_p2i_exact_explicit_refutation_forms_are_accepted(self):
+        cases = (
+            (
+                "Parents ask whether first words are mandatory by one year. It isn't necessarily a concern; "
+                "early communication includes gestures and first words.",
+                "early_communication",
+            ),
+            (
+                "There is no scientific evidence that skipping crawling causes later reading problems; "
+                "shared reading and books support preliteracy experiences.",
+                "preliteracy",
+            ),
+            (
+                "Cross-linguistic influences do not indicate a speech sound disorder; articulation and speech sounds "
+                "must be considered in each language.",
+                "speech_sounds",
+            ),
+        )
+        for evidence, topic in cases:
+            with self.subTest(topic=topic):
+                self.assertEqual(
+                    llm.validate_myth_fact_evidence_for_generation(evidence, topic),
+                    (True, "ok"),
+                )
+
+    def test_generic_negative_language_does_not_become_a_refutation_anchor(self):
+        evidence = (
+            "Bilingual children are not identical in how they use two languages. "
+            "Language disorder information can be discussed with families."
+        )
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(evidence, "bilingualism"),
+            (False, "myth_evidence_missing_refutation_anchor"),
         )
 
     def test_effective_topic_mismatch_is_rejected(self):
@@ -299,7 +334,7 @@ class MythFactSourceCoverageTest(unittest.TestCase):
         )
 
     def test_each_remaining_topic_has_canonical_refutation_source(self):
-        for topic_id, (source_id, expected_url, evidence) in P2G_CANONICAL_COVERAGE.items():
+        for topic_id, (source_id, expected_url, evidence) in P2I_CANONICAL_COVERAGE.items():
             with self.subTest(topic_id=topic_id, source_id=source_id):
                 self.assertIn(source_id, self.sources_by_id)
                 source = self.sources_by_id[source_id]
@@ -314,13 +349,19 @@ class MythFactSourceCoverageTest(unittest.TestCase):
                 )
 
     def test_myth_fact_runtime_pool_is_exactly_five_canonical_sources(self):
-        self.assertEqual(self.myth_fact["sources"], P2G_MYTH_FACT_SOURCE_POOL)
+        self.assertEqual(self.myth_fact["sources"], P2I_MYTH_FACT_SOURCE_POOL)
+        self.assertNotIn("mayoclinic_cas_speech_muscle_myth", self.myth_fact["sources"])
         self.assertNotIn("asha_single_sound_error", self.myth_fact["sources"])
         self.assertNotIn("readingrockets_reading_myths", self.myth_fact["sources"])
 
     def test_runtime_incompatible_sources_are_removed_from_source_config_and_topics(self):
+        self.assertNotIn("mayoclinic_cas_speech_muscle_myth", self.sources_by_id)
         self.assertNotIn("asha_single_sound_error", self.sources_by_id)
         self.assertNotIn("readingrockets_reading_myths", self.sources_by_id)
+        self.assertNotIn(
+            "mayoclinic_cas_speech_muscle_myth",
+            self.topics_cfg["topics"]["speech_sounds"]["source_ids"],
+        )
         self.assertNotIn(
             "asha_single_sound_error",
             self.topics_cfg["topics"]["speech_sounds"]["source_ids"],
@@ -333,15 +374,15 @@ class MythFactSourceCoverageTest(unittest.TestCase):
 
     def test_all_canonical_runtime_sources_are_tier1(self):
         scientific_domains = self.sources_cfg["quality"]["scientific_domains"]
-        for topic_id, (source_id, expected_url, _evidence) in P2G_CANONICAL_COVERAGE.items():
+        for topic_id, (source_id, expected_url, _evidence) in P2I_CANONICAL_COVERAGE.items():
             domain = urlparse(expected_url).netloc.lower()
             with self.subTest(topic_id=topic_id, source_id=source_id, domain=domain):
                 self.assertTrue(publisher.is_scientific_domain(domain, scientific_domains))
 
-    def test_mayo_source_is_existing_tier1_without_expanding_scientific_domains(self):
+    def test_asha_replacement_uses_existing_tier1_domain_without_expansion(self):
         scientific_domains = self.sources_cfg["quality"]["scientific_domains"]
-        self.assertIn("mayoclinic.org", scientific_domains)
-        self.assertTrue(publisher.is_scientific_domain("www.mayoclinic.org", scientific_domains))
+        self.assertIn("asha.org", scientific_domains)
+        self.assertTrue(publisher.is_scientific_domain("www.asha.org", scientific_domains))
 
     def test_default_ports_do_not_break_tier1_matching(self):
         scientific_domains = self.sources_cfg["quality"]["scientific_domains"]

@@ -393,13 +393,13 @@ sources:
     urls:
       - "https://www.verywellfamily.com/benefits-of-letting-baby-play-with-household-objects-5208533"
 
-  # ---------- P2G myth/fact runtime viability ----------
+  # ---------- P2I myth/fact runtime viability ----------
 
-  - id: mayoclinic_cas_speech_muscle_myth
-    name: "Mayo Clinic — CAS speech muscle exercises evidence"
+  - id: asha_speech_sound_multilingual_influence
+    name: "ASHA — Speech sound multilingual influence"
     type: static
     urls:
-      - "https://www.mayoclinic.org/diseases-conditions/childhood-apraxia-of-speech/diagnosis-treatment/drc-20352051"
+      - "https://www.asha.org/practice-portal/clinical-topics/articulation-and-phonology/"
 
   - id: asha_newborn_hearing_screening
     name: "ASHA — Newborn Hearing Screening"

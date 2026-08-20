@@ -188,7 +188,13 @@ def extract_evidence_from_html(html_text: str, max_chars: int = MAX_EVIDENCE_CHA
     if h1:
         chunks.append(norm_space(h1.get_text(" ", strip=True)))
 
-    for el in root.select("h2, h3, p, li"):
+    fallback_root = root is soup.body or root is soup
+    elements = (
+        h1.find_all_next(["h2", "h3", "p", "li"])
+        if fallback_root and h1
+        else root.select("h2, h3, p, li")
+    )
+    for el in elements:
         txt = norm_space(el.get_text(" ", strip=True))
         if len(txt) < 20:
             continue

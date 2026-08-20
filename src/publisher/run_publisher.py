@@ -1558,14 +1558,23 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
-    root = soup.select_one("div#dle-content") or soup.find("article") or soup.find("main") or soup.body or soup
+    root = soup.select_one("div#dle-content") or soup.find("article") or soup.find("main")
+    fallback_root = False
+    if root is None:
+        root = soup.body or soup
+        fallback_root = True
 
     chunks: List[str] = []
     h1 = soup.find("h1")
     if h1:
         chunks.append(norm_space(h1.get_text(" ", strip=True)))
 
-    for el in root.select("h2, h3, p, li"):
+    elements = (
+        h1.find_all_next(["h2", "h3", "p", "li"])
+        if fallback_root and h1
+        else root.select("h2, h3, p, li")
+    )
+    for el in elements:
         txt = norm_space(el.get_text(" ", strip=True))
         if len(txt) < 20:
             continue
@@ -2275,8 +2284,6 @@ async def amain() -> None:
                     url_within_cooldown = store.has_url_since(canon, source_cooldown_since_iso)
                     evergreen_url_reuse = should_bypass_duplicate_reason(rubric_id, "dup_url_db")
                     if url_within_cooldown:
-                        # Inside the cooldown the URL is blocked for every rubric,
-                        # including evergreen ones.
                         kind = note("dup_url_recent", canon, stage="url_cooldown")
                         print(
                             f"[SKIP][{kind}] dup_url_recent source={candidate_source_id} url={canon} "
@@ -2291,8 +2298,6 @@ async def amain() -> None:
                             break
                         continue
                     if evergreen_url_reuse:
-                        # Cooldown elapsed: an allowed evergreen source is usable again
-                        # instead of being blocked permanently.
                         print(
                             f"[WARN] dup_url_db_ignored evergreen_reuse rubric={rubric_id} "
                             f"source={candidate_source_id} url={canon} "
@@ -2391,7 +2396,6 @@ async def amain() -> None:
                     candidate_domain,
                     scientific_domains,
                 ):
-                    # Canonical soft-skip call remains the same; P2E only adds stage provenance.
                     # note("source_authority_required", canon)
                     kind = note("source_authority_required", canon, stage="source_authority")
                     print(
@@ -2460,9 +2464,6 @@ async def amain() -> None:
                             break
                         continue
 
-                # Scoped to the same 28-day window as the exact URL/evidence
-                # cooldowns. Comparing against the whole history would block an
-                # allowed evergreen source forever on one old semantic match.
                 sem_source_hit = store.find_semantic_duplicate(
                     evidence,
                     threshold=SEMANTIC_THRESHOLD_SOURCE,
@@ -2471,17 +2472,6 @@ async def amain() -> None:
                     compare="evidence",
                 )
                 if sem_source_hit:
-                    # method_piggybank is a methodological/professional rubric.
-                    # Source-level semantic dedup is too aggressive here:
-                    # many different method articles use the same professional vocabulary
-                    # and can score very high while still producing different practical posts.
-                    #
-                    # URL/evidence hash DB checks follow their own rubric policy.
-                    # We still keep the final post checks:
-                    # - dup_body_hash_db
-                    # - dup_semantic_post
-                    #
-                    # So for this rubric we only warn and continue to LLM.
                     if should_bypass_source_semantic_dedup(rubric_id):
                         print(
                             f"[WARN] semantic_source_match_ignored rubric={rubric_id} "
@@ -2782,11 +2772,6 @@ async def amain() -> None:
                         break
                     continue
 
-                # Cross-rubric editorial freshness. Runs after LLM generation and the
-                # deterministic content validation above, and before any visual work, so a
-                # rejected candidate never spends image generation. Fails open when the
-                # semantic model is unavailable: the exact URL/evidence/body checks above
-                # have already run and stay authoritative.
                 editorial_core = extract_editorial_core(plain)
                 if editorial_core:
                     core_threshold = semantic_editorial_core_threshold()

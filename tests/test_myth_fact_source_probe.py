@@ -10,6 +10,7 @@ from unittest.mock import patch
 import yaml
 
 from scripts import probe_myth_fact_sources as probe
+from src.publisher import run_publisher as publisher
 from src.services import llm_generator
 
 
@@ -19,7 +20,7 @@ WORKFLOW_PATH = ROOT / ".github" / "workflows" / "myth_fact_source_probe.yml"
 
 EXPECTED_SOURCE_IDS = [
     "healthychildren_bilingual_myths",
-    "mayoclinic_cas_speech_muscle_myth",
+    "asha_speech_sound_multilingual_influence",
     "asha_newborn_hearing_screening",
     "healthychildren_one_year_talking",
     "healthychildren_crawling_reading_myth",
@@ -114,6 +115,80 @@ class ProbeExtractionContractTest(unittest.TestCase):
         self.assertNotIn("tiny", evidence)
         self.assertEqual(descriptor, "tag=article id=- class=-")
 
+    def test_body_fallback_skips_navigation_before_h1(self) -> None:
+        navigation = "Navigation menu item with enough characters to consume evidence budget. " * 90
+        html = (
+            "<html><body><p>" + navigation + "</p>"
+            "<h1>Real HealthyChildren article title</h1>"
+            "<p>It is a myth that multilingual exposure causes confusion.</p>"
+            "<p>Bilingual children can learn more than one language and this does not mean language delay.</p>"
+            "</body></html>"
+        )
+        evidence, descriptor = probe.extract_evidence_from_html(html)
+        self.assertEqual(descriptor, "tag=body id=- class=-")
+        self.assertTrue(evidence.startswith("Real HealthyChildren article title\n"))
+        self.assertNotIn("Navigation menu item", evidence)
+        self.assertIn("multilingual exposure causes confusion", evidence)
+        self.assertIn("does not mean language delay", evidence)
+
+    def test_article_and_main_roots_keep_pre_h1_root_semantics(self) -> None:
+        cases = (
+            (
+                "article",
+                "<html><body><article><p>Article paragraph before the global H1 remains extractable.</p>"
+                "<h1>Article title</h1><p>Article paragraph after H1 remains extractable.</p></article></body></html>",
+                "Article paragraph before the global H1 remains extractable.",
+            ),
+            (
+                "main",
+                "<html><body><main><p>Main paragraph before the global H1 remains extractable.</p>"
+                "<h1>Main title</h1><p>Main paragraph after H1 remains extractable.</p></main></body></html>",
+                "Main paragraph before the global H1 remains extractable.",
+            ),
+        )
+        for expected_tag, html, before_text in cases:
+            with self.subTest(root=expected_tag):
+                evidence, descriptor = probe.extract_evidence_from_html(html)
+                self.assertIn(before_text, evidence)
+                self.assertTrue(descriptor.startswith(f"tag={expected_tag} "))
+
+    def test_body_without_h1_keeps_existing_fallback_behavior(self) -> None:
+        html = (
+            "<html><body>"
+            "<p>Navigation-like paragraph remains when there is no H1 on the page.</p>"
+            "<p>Later evidence paragraph also remains under the legacy body fallback.</p>"
+            "</body></html>"
+        )
+        evidence, descriptor = probe.extract_evidence_from_html(html)
+        self.assertEqual(descriptor, "tag=body id=- class=-")
+        self.assertIn("Navigation-like paragraph remains", evidence)
+        self.assertIn("Later evidence paragraph", evidence)
+
+    def test_evidence_limit_remains_3600_characters(self) -> None:
+        paragraphs = "".join(
+            f"<p>Evidence paragraph {index} with sufficiently long content for extraction and validation.</p>"
+            for index in range(150)
+        )
+        html = f"<html><body><h1>Evidence title</h1>{paragraphs}</body></html>"
+        evidence, _descriptor = probe.extract_evidence_from_html(html)
+        self.assertLessEqual(len(evidence), probe.MAX_EVIDENCE_CHARS)
+        self.assertEqual(probe.MAX_EVIDENCE_CHARS, 3600)
+
+    def test_probe_and_production_extraction_semantics_match(self) -> None:
+        navigation = "Pre-H1 navigation text that must not consume the evidence budget. " * 80
+        html = (
+            "<html><body><p>" + navigation + "</p>"
+            "<h1>Shared extraction title</h1>"
+            "<p>A myth about reading appears in the actual article after the heading.</p>"
+            "<p>There is no scientific evidence that this reading claim is true.</p>"
+            "</body></html>"
+        )
+        expected, _descriptor = probe.extract_evidence_from_html(html)
+        response = _FakeResponse(html, url="https://example.test/shared")
+        with patch.object(publisher.requests, "get", return_value=response):
+            actual = publisher.extract_evidence_text("https://example.test/shared")
+        self.assertEqual(actual, expected)
+
     def test_probe_uses_existing_p1b_validator_and_patterns(self) -> None:
         self.assertIs(
             probe.validate_myth_fact_evidence_for_generation,
@@ -132,7 +207,7 @@ class ProbeExtractionContractTest(unittest.TestCase):
             (True, "ok"),
         )
 
-    def test_telemetry_tracks_requested_phrases_without_changing_validator(self) -> None:
+    def test_telemetry_tracks_requested_phrases_and_exact_p2i_anchors(self) -> None:
         text = (
             "Myth. It isn't necessarily a concern. There is no scientific evidence. "
             "This does not mean delay and these differences do not indicate disorder."
@@ -143,10 +218,9 @@ class ProbeExtractionContractTest(unittest.TestCase):
         self.assertTrue(presence["no scientific evidence"])
         self.assertTrue(presence["does not mean"])
         self.assertTrue(presence["do not indicate"])
-        # Telemetry-only phrases are not silently added to P1B's regex tuple.
-        self.assertNotIn(r"\bisn't necessarily\b", probe.MYTH_FACT_REFUTATION_PATTERNS)
-        self.assertNotIn(r"\bno scientific evidence\b", probe.MYTH_FACT_REFUTATION_PATTERNS)
-        self.assertNotIn(r"\bdo not indicate\b", probe.MYTH_FACT_REFUTATION_PATTERNS)
+        self.assertIn(r"\bisn't necessarily\b", probe.MYTH_FACT_REFUTATION_PATTERNS)
+        self.assertIn(r"\bno scientific evidence\b", probe.MYTH_FACT_REFUTATION_PATTERNS)
+        self.assertIn(r"\bdo not indicate\b", probe.MYTH_FACT_REFUTATION_PATTERNS)
 
 
 class ProbeHttpContractTest(unittest.TestCase):

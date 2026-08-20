@@ -2396,6 +2396,7 @@ async def amain() -> None:
                     candidate_domain,
                     scientific_domains,
                 ):
+                    # note("source_authority_required", canon)
                     kind = note("source_authority_required", canon, stage="source_authority")
                     print(
                         f"[SKIP][{kind}] source_authority_required source={candidate_source_id} "

@@ -211,6 +211,46 @@ class TopicPolicyTest(unittest.TestCase):
         self.assertNotIn("everyday_communication", RUBRIC_TOPIC_ROTATION["age_norms"])
         self.assertIn("hearing_and_speech", RUBRIC_TOPIC_ROTATION["age_norms"])
 
+    def test_bilingual_corner_w34_prefers_hearing_and_speech(self):
+        self.assertEqual(
+            select_topic_plan("bilingual_corner", "2026-W34").preferred_topic_id,
+            "hearing_and_speech",
+        )
+
+    def test_bilingual_corner_rotation_topics_have_rubric_source_coverage(self):
+        topics_cfg = yaml.safe_load((ROOT / "config" / "topics.yml").read_text(encoding="utf-8"))
+        rubrics_cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
+        thursday = next(
+            item
+            for item in rubrics_cfg["audiences"]["parents"]["rubrics"]
+            if item.get("id") == "bilingual_corner"
+        )
+        thursday_sources = set(thursday["sources"])
+        for topic_id in RUBRIC_TOPIC_ROTATION["bilingual_corner"]:
+            topic_sources = set(topics_cfg["topics"][topic_id]["source_ids"])
+            with self.subTest(topic_id=topic_id):
+                self.assertTrue(topic_sources & thursday_sources)
+
+    def test_bilingual_corner_hearing_includes_canonical_tier1_screening_source(self):
+        source_id = "asha_newborn_hearing_screening"
+        expected_url = "https://www.asha.org/Practice-Portal/Professional-Issues/Newborn-Hearing-Screening/"
+        source_cfg = yaml.safe_load((ROOT / "config" / "sources.yml").read_text(encoding="utf-8"))
+        topics_cfg = yaml.safe_load((ROOT / "config" / "topics.yml").read_text(encoding="utf-8"))
+        rubrics_cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
+        sources_by_id = {item.get("id"): item for item in source_cfg.get("sources", [])}
+        thursday = next(
+            item
+            for item in rubrics_cfg["audiences"]["parents"]["rubrics"]
+            if item.get("id") == "bilingual_corner"
+        )
+
+        self.assertIn(source_id, sources_by_id)
+        self.assertEqual(sources_by_id[source_id].get("urls"), [expected_url])
+        self.assertIn(source_id, topics_cfg["topics"]["hearing_and_speech"]["source_ids"])
+        self.assertIn(source_id, thursday["sources"])
+        scientific_domains = source_cfg["quality"]["scientific_domains"]
+        self.assertTrue(publisher.is_scientific_domain("asha.org", scientific_domains))
+
     def test_thursday_config_and_diagnostics_are_topic_aware(self):
         cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
         self.assertNotIn("#билингвизм", cfg["channel"]["hashtags"])
@@ -236,6 +276,7 @@ class TopicPolicyTest(unittest.TestCase):
                 "raisingchildren_bilingual",
                 "zerotothree_dual_language",
                 "asha_public_speech_sound_disorders",
+                "asha_newborn_hearing_screening",
                 "asha_developmental_milestones",
                 "healthychildren_language_development",
                 "hanen_parent_tips",

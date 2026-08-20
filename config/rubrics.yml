@@ -97,7 +97,7 @@ audiences:
         byweekday: ["WE"]
         sources:
           - "healthychildren_bilingual_myths"
-          - "mayoclinic_cas_speech_muscle_myth"
+          - "asha_speech_sound_multilingual_influence"
           - "asha_newborn_hearing_screening"
           - "healthychildren_one_year_talking"
           - "healthychildren_crawling_reading_myth"

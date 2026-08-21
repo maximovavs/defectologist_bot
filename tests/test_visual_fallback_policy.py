@@ -11,13 +11,18 @@ import requests
 from src.services.visual_pipeline import (
     DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL,
     DEFAULT_GEMINI_VISUAL_QA_MODEL,
+    VISUAL_QA_HARD_REASONS,
     VISUAL_STYLE_TAIL,
+    VisualBrief,
+    _compile_visual_prompt,
     _enforce_object_visual_qa,
     _object_scene_category,
+    _parse_compiled_visual_prompt,
     _visual_qa_model_candidates,
     _visual_qa_key_candidates,
     build_object_only_visual_prompt,
     build_post_visual,
+    build_visual_retry_prompt,
     build_visual_role_rule,
     evaluate_visual_quality,
 )
@@ -27,7 +32,7 @@ def _qa_response(status_code, payload=None, text=""):
     response = Mock(status_code=status_code)
     response.text = text
     response.json.return_value = payload or {
-        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false}'}]}}]
+        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false, "character_roles_match": true}'}]}}]
     }
     return response
 
@@ -172,6 +177,146 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             'GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-2.5-flash"',
             workflow,
         )
+
+    def test_gemini_human_qa_prompt_requires_character_roles_match_and_exact_child_age(self):
+        expected = (
+            "Expected roles: Exactly one adult parent and exactly one 2-year-old toddler, "
+            "visibly different in age and height, no other people.\n"
+            "Expected action: the parent rolls a ball while the child names it\n"
+            "Allowed props: ball"
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=_qa_response(200)
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                expected_prompt=expected,
+            )
+
+        qa_prompt = request.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("character_roles_match (boolean)", qa_prompt)
+        self.assertIn("counts alone are not enough", qa_prompt)
+        self.assertIn("adult parent from an adult speech specialist", qa_prompt)
+        self.assertIn("child age descriptor", qa_prompt)
+        self.assertIn("2-year-old toddler", qa_prompt)
+
+    def test_gemini_character_roles_match_true_keeps_pass(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": true}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+        self.assertIs(result["character_roles_match"], True)
+
+    def test_gemini_character_roles_match_false_forces_wrong_character_roles(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": false}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "wrong_character_roles")
+        self.assertIs(result["character_roles_match"], False)
+
+    def test_gemini_missing_character_roles_match_fails_closed(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "character_roles_unknown")
+        self.assertEqual(result["character_roles_match"], "unknown")
+        self.assertIn("character_roles_unknown", VISUAL_QA_HARD_REASONS)
+
+    def test_gemini_malformed_character_roles_match_fails_closed(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": "maybe"}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "character_roles_unknown")
+        self.assertEqual(result["character_roles_match"], "unknown")
+
+    def test_gemini_wrong_character_roles_retry_strengthens_role_only(self):
+        action = "The parent rolls a ball while the child names it"
+        prompt = _compile_visual_prompt(
+            VisualBrief(
+                rubric_id="tip_of_day",
+                role_rule=build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"),
+                age_descriptor="2-year-old toddler",
+                setting="simple home play area",
+                action=action,
+                props=("ball",),
+            )
+        )
+        retry = build_visual_retry_prompt(
+            prompt,
+            rubric_id="tip_of_day",
+            qa_reason="wrong_character_roles",
+        )
+        brief = _parse_compiled_visual_prompt(retry, rubric_id="tip_of_day")
+
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.action, action)
+        self.assertIn("2-year-old toddler", brief.role_rule)
+        self.assertIn("unmistakably mature", brief.role_rule.lower())
+
+    def test_gemini_character_roles_unknown_retry_strengthens_role_only(self):
+        action = "The parent rolls a ball while the child names it"
+        prompt = _compile_visual_prompt(
+            VisualBrief(
+                rubric_id="tip_of_day",
+                role_rule=build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"),
+                age_descriptor="2-year-old toddler",
+                setting="simple home play area",
+                action=action,
+                props=("ball",),
+            )
+        )
+        retry = build_visual_retry_prompt(
+            prompt,
+            rubric_id="tip_of_day",
+            qa_reason="character_roles_unknown",
+        )
+        brief = _parse_compiled_visual_prompt(retry, rubric_id="tip_of_day")
+
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.action, action)
+        self.assertIn("2-year-old toddler", brief.role_rule)
+        self.assertIn("unmistakably mature", brief.role_rule.lower())
 
     def test_visual_key_403_then_general_pass_keeps_human_image(self):
         with patch.dict(

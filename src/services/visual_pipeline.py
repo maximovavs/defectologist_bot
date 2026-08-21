@@ -973,6 +973,7 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "too_many_adults",
         "wrong_character_roles",
         "character_counts_unknown",
+        "character_roles_unknown",
         "deformed_hands",
         "extra_limbs",
         "missing_limbs",
@@ -991,6 +992,29 @@ VISUAL_QA_HARD_REASONS = frozenset(
 
 def _normalize_visual_qa_reason(value: object) -> str:
     return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+
+
+def _enforce_production_human_character_roles(result: Dict[str, object]) -> Dict[str, object]:
+    """Fail closed when production human QA cannot verify Expected roles.
+
+    This gate is intentionally applied only inside evaluate_visual_quality for
+    qa_mode=human. Custom/offline QA callables keep their legacy contract.
+    """
+    normalized = {**result}
+    if str(normalized.get("status", "")).strip().lower() == "skipped":
+        return normalized
+
+    role_match = _coerce_bool(normalized.get("character_roles_match"))
+    normalized["character_roles_match"] = role_match if role_match is not None else "unknown"
+    reason = _normalize_visual_qa_reason(normalized.get("reason"))
+
+    if reason in VISUAL_QA_HARD_REASONS:
+        return normalized
+    if role_match is False:
+        normalized.update({"status": "fail", "pass": False, "reason": "wrong_character_roles"})
+    elif role_match is None and bool(normalized.get("pass", False)):
+        normalized.update({"status": "fail", "pass": False, "reason": "character_roles_unknown"})
+    return normalized
 
 
 def _enforce_visual_qa_hard_failures(result: Dict[str, object], rubric_id: str) -> Dict[str, object]:
@@ -1203,7 +1227,7 @@ def build_visual_retry_prompt(
     # Role problems are corrected in the role rule; style problems are corrected
     # in the provider style tail. Neither rewrites the educational action.
     retry_role_rule = brief.role_rule
-    if reason == "wrong_character_roles":
+    if reason in {"wrong_character_roles", "character_roles_unknown"}:
         retry_role_rule = _role_rule_for_wrong_character_roles(brief.role_rule, brief.rubric_id or rubric_id)
 
     retry_brief = VisualBrief(
@@ -1294,6 +1318,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     ppe_detected = _coerce_bool(parsed.get("ppe_detected"))
     text_detected = _coerce_bool(parsed.get("text_detected"))
     style_match = _coerce_bool(parsed.get("illustration_style_match"))
+    role_match_present = "character_roles_match" in parsed
+    role_match = _coerce_bool(parsed.get("character_roles_match")) if role_match_present else None
     topic_present = "object_topic_match" in parsed
     topic_match = _coerce_bool(parsed.get("object_topic_match")) if topic_present else None
     normalized = {
@@ -1307,6 +1333,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         "text_detected": text_detected if text_detected is not None else "unknown",
         "illustration_style_match": style_match if style_match is not None else "unknown",
     }
+    if role_match_present:
+        normalized["character_roles_match"] = role_match if role_match is not None else "unknown"
     if topic_present:
         normalized["object_topic_match"] = topic_match if topic_match is not None else "unknown"
     return normalized
@@ -1465,11 +1493,17 @@ def evaluate_visual_quality(
         qa_prompt = (
             "You are a strict visual QA checker for a Telegram educational cover. "
             "Return JSON only with keys pass (boolean), reason (short string), people_count (integer or unknown), "
-            "adult_count (integer or unknown), child_count (integer or unknown), ppe_detected (boolean), and text_detected (boolean). "
+            "adult_count (integer or unknown), child_count (integer or unknown), ppe_detected (boolean), text_detected (boolean), "
+            "and character_roles_match (boolean). "
             "Count adults, children, and all visible people separately. Count every visible human face, head, torso, "
             "reflection, background person, and partially visible person. "
             "A floating head, disconnected torso, silhouette, duplicate, ghosted, merged, or partially formed human figure counts as a person. "
             "Do not ignore small background figures. "
+            "Set character_roles_match=true only when every visible person matches Expected roles; counts alone are not enough. "
+            "Distinguish an adult parent from an adult speech specialist, and distinguish adults from children. "
+            "Required absence of extra people is part of this verdict. If Expected roles include a child age descriptor, "
+            "the visible child must be compatible with that descriptor; a visibly incompatible child age means character_roles_match=false. "
+            "Use reason wrong_character_roles whenever character_roles_match=false. "
             "Pass only when the image is a 2D hand-painted watercolor and gouache editorial illustration with subtle paper texture, "
             "warm muted pastel colors, soft natural daylight, a gentle educational mood, clean composition, natural proportions, "
             "and a professional but approachable appearance. Reject photorealistic imagery, 3D renders, anime, glossy digital art, "
@@ -1671,6 +1705,8 @@ def evaluate_visual_quality(
             }
         if object_only and expected_prompt and "object_topic_match" not in parsed:
             parsed["object_topic_match"] = "unknown"
+        if not object_only:
+            parsed = _enforce_production_human_character_roles(parsed)
         normalized = _enforce_visual_qa_hard_failures(parsed, rubric_id)
         normalized.update(_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger))
         print(
@@ -1750,6 +1786,8 @@ def _safe_visual_qa(
             result.get("qa_key_fallback_trigger", result.get("human_qa_key_fallback_trigger", ""))
         ),
     }
+    if "character_roles_match" in result:
+        normalized["character_roles_match"] = result.get("character_roles_match", "unknown")
     if "text_detected" in result:
         normalized["text_detected"] = result.get("text_detected", "unknown")
     if "illustration_style_match" in result:

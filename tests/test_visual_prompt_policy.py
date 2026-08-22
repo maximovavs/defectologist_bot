@@ -956,7 +956,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
     def test_visual_qa_prefers_separate_key_over_shared_key(self):
         response = Mock(status_code=200)
         response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1}'}]}}]
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "character_roles_match": true, "action_match": true}'}]}}]
         }
         with patch.dict(
             os.environ,

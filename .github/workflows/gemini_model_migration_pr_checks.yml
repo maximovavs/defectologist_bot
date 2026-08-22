@@ -9,6 +9,7 @@ on:
       - "src/services/visual_pipeline.py"
       - "tests/test_groq_model_migration.py"
       - "tests/test_visual_fallback_policy.py"
+      - "tests/test_visual_*.py"
       - ".github/workflows/post.yml"
       - ".github/workflows/gemini_model_migration_pr_checks.yml"
 
@@ -42,9 +43,10 @@ jobs:
       - name: Compile migration paths
         run: |
           python -m py_compile \
+            src/services/llm_generator.py \
             src/services/visual_pipeline.py \
             tests/test_groq_model_migration.py \
-            tests/test_visual_fallback_policy.py
+            tests/test_visual_*.py
 
       - name: Run Gemini model migration tests offline
         env:
@@ -70,3 +72,18 @@ jobs:
             -k key \
             -k timeout \
             tests.test_visual_fallback_policy
+
+      - name: Run full visual regression suite offline
+        env:
+          GEMINI_API_KEY: ""
+          GEMINI_VISUAL_QA_API_KEY: ""
+          GROQ_API_KEY: ""
+          TELEGRAM_BOT_TOKEN: ""
+          POLLINATIONS_TOKEN: ""
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python -m unittest discover -v \
+            -s tests \
+            -p 'test_visual_*.py'

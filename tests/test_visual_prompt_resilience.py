@@ -1,6 +1,7 @@
 from io import BytesIO
 import json
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -89,6 +90,8 @@ class VisualPromptResilienceTest(unittest.TestCase):
             "child_count": 1,
             "ppe_detected": False,
             "text_detected": False,
+            "character_roles_match": True,
+            "action_match": True,
         }
         with patch.dict(
             os.environ,
@@ -197,6 +200,34 @@ class VisualPromptResilienceTest(unittest.TestCase):
         ):
             with self.subTest(rejected=phrase):
                 self.assertIn(phrase, qa_prompt)
+
+    def test_p3c_workflow_runs_full_visual_suite_offline(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github/workflows/gemini_model_migration_pr_checks.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('      - "tests/test_visual_*.py"', workflow)
+        self.assertIn("src/services/llm_generator.py", workflow)
+        self.assertIn("tests/test_visual_*.py", workflow)
+        self.assertIn("python -m unittest discover -v \\", workflow)
+        self.assertIn("-s tests \\", workflow)
+        self.assertIn("-p 'test_visual_*.py'", workflow)
+        for variable in (
+            "GEMINI_API_KEY",
+            "GEMINI_VISUAL_QA_API_KEY",
+            "GROQ_API_KEY",
+            "TELEGRAM_BOT_TOKEN",
+            "POLLINATIONS_TOKEN",
+        ):
+            with self.subTest(variable=variable):
+                self.assertIn(f'{variable}: ""', workflow)
+        for proxy in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            with self.subTest(proxy=proxy):
+                self.assertIn(f'{proxy}: "http://127.0.0.1:9"', workflow)
+        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertNotIn("run_publisher.py", workflow)
+        self.assertNotIn("python -m src.publisher", workflow)
 
 
 if __name__ == "__main__":

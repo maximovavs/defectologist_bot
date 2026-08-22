@@ -32,7 +32,7 @@ def _qa_response(status_code, payload=None, text=""):
     response = Mock(status_code=status_code)
     response.text = text
     response.json.return_value = payload or {
-        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false, "character_roles_match": true}'}]}}]
+        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false, "character_roles_match": true, "action_match": true}'}]}}]
     }
     return response
 
@@ -206,7 +206,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         response = _qa_response(200, {
             "candidates": [{"content": {"parts": [{"text": (
                 '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
-                '"child_count": 1, "ppe_detected": false, "character_roles_match": true}'
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": true, "action_match": true}'
             )}]}}]
         })
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
@@ -222,7 +222,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         response = _qa_response(200, {
             "candidates": [{"content": {"parts": [{"text": (
                 '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
-                '"child_count": 1, "ppe_detected": false, "character_roles_match": false}'
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": false, "action_match": true}'
             )}]}}]
         })
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
@@ -239,7 +239,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         response = _qa_response(200, {
             "candidates": [{"content": {"parts": [{"text": (
                 '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
-                '"child_count": 1, "ppe_detected": false}'
+                '"child_count": 1, "ppe_detected": false, "action_match": true}'
             )}]}}]
         })
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
@@ -257,7 +257,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         response = _qa_response(200, {
             "candidates": [{"content": {"parts": [{"text": (
                 '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
-                '"child_count": 1, "ppe_detected": false, "character_roles_match": "maybe"}'
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": "maybe", "action_match": true}'
             )}]}}]
         })
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
@@ -317,6 +317,167 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(brief.action, action)
         self.assertIn("2-year-old toddler", brief.role_rule)
         self.assertIn("unmistakably mature", brief.role_rule.lower())
+
+    def test_gemini_human_qa_prompt_requires_structured_action_match(self):
+        expected = (
+            "Expected roles: Exactly one adult parent and exactly one 2-year-old toddler, no other people.\n"
+            "Expected action: the parent rolls a ball toward the child while the child reaches for it\n"
+            "Allowed props: ball"
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=_qa_response(200)
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                rubric_id="tip_of_day",
+                expected_prompt=expected,
+            )
+
+        qa_prompt = request.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("action_match (boolean)", qa_prompt)
+        self.assertIn("main visible action materially matches the exact Expected action", qa_prompt)
+        self.assertIn("actor, visible action, target/object/prop relationship", qa_prompt)
+        self.assertIn("exact spoken word", qa_prompt)
+        self.assertIn("reading, drawing, or ordinary conversation", qa_prompt)
+        self.assertIn("the parent rolls a ball toward the child while the child reaches for it", qa_prompt)
+
+    def test_gemini_action_match_true_keeps_pass(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": true, "action_match": true}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+        self.assertIs(result["action_match"], True)
+
+    def test_gemini_action_match_false_forces_action_mismatch(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": true, "action_match": false}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "action_mismatch")
+        self.assertIs(result["action_match"], False)
+
+    def test_gemini_missing_action_match_fails_closed(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": true}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "action_match_unknown")
+        self.assertEqual(result["action_match"], "unknown")
+        self.assertIn("action_match_unknown", VISUAL_QA_HARD_REASONS)
+
+    def test_gemini_malformed_action_match_fails_closed(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": true, "action_match": "maybe"}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "action_match_unknown")
+        self.assertEqual(result["action_match"], "unknown")
+
+    def test_gemini_action_match_unknown_retry_keeps_exact_expected_action(self):
+        action = "The parent rolls a ball while the child reaches for it"
+        prompt = _compile_visual_prompt(
+            VisualBrief(
+                rubric_id="tip_of_day",
+                role_rule=build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"),
+                age_descriptor="2-year-old toddler",
+                setting="simple home play area",
+                action=action,
+                props=("ball",),
+            )
+        )
+        retry = build_visual_retry_prompt(
+            prompt,
+            rubric_id="tip_of_day",
+            qa_reason="action_match_unknown",
+            expected_action=action,
+        )
+        brief = _parse_compiled_visual_prompt(retry, rubric_id="tip_of_day")
+
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.action, action)
+        self.assertEqual(brief.role_rule, build_visual_role_rule("tip_of_day", age_descriptor="2-year-old toddler"))
+
+    def test_gemini_character_role_failure_precedes_action_failure(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, '
+                '"child_count": 1, "ppe_detected": false, "character_roles_match": false, "action_match": false}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ):
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason"], "wrong_character_roles")
+        self.assertIs(result["character_roles_match"], False)
+        self.assertIs(result["action_match"], False)
+
+    def test_gemini_object_qa_does_not_require_action_match(self):
+        response = _qa_response(200, {
+            "candidates": [{"content": {"parts": [{"text": (
+                '{"pass": true, "reason": "ok", "people_count": 0, "adult_count": 0, '
+                '"child_count": 0, "ppe_detected": false, "text_detected": false, '
+                '"illustration_style_match": true, "object_topic_match": true}'
+            )}]}}]
+        })
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=response
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"),
+                qa_mode="object",
+                expected_prompt=(
+                    "Expected roles: zero people, zero adults, zero children; object-only still life.\n"
+                    "Expected action: show one recognizable ball.\n"
+                    "Allowed props: ball"
+                ),
+            )
+
+        qa_prompt = request.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+        self.assertNotIn("action_match (boolean)", qa_prompt)
+        self.assertNotIn("action_match", result)
 
     def test_visual_key_403_then_general_pass_keeps_human_image(self):
         with patch.dict(

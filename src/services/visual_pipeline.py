@@ -964,6 +964,7 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "merged_people",
         "partial_human_figure",
         "action_mismatch",
+        "action_match_unknown",
         "adult_only_scene",
         "stretched_face",
         "stretched_body",
@@ -1014,6 +1015,30 @@ def _enforce_production_human_character_roles(result: Dict[str, object]) -> Dict
         normalized.update({"status": "fail", "pass": False, "reason": "wrong_character_roles"})
     elif role_match is None and bool(normalized.get("pass", False)):
         normalized.update({"status": "fail", "pass": False, "reason": "character_roles_unknown"})
+    return normalized
+
+
+def _enforce_production_human_action(result: Dict[str, object]) -> Dict[str, object]:
+    """Fail closed when production human QA cannot verify the exact Expected action.
+
+    Applied only after the production human role gate. Custom/offline QA callables
+    and object QA keep their existing contracts.
+    """
+    normalized = {**result}
+    if str(normalized.get("status", "")).strip().lower() == "skipped":
+        return normalized
+
+    action_match = _coerce_bool(normalized.get("action_match"))
+    normalized["action_match"] = action_match if action_match is not None else "unknown"
+    reason = _normalize_visual_qa_reason(normalized.get("reason"))
+
+    # Existing hard failures — especially the P3A role verdicts — keep priority.
+    if reason in VISUAL_QA_HARD_REASONS:
+        return normalized
+    if action_match is False:
+        normalized.update({"status": "fail", "pass": False, "reason": "action_mismatch"})
+    elif action_match is None and bool(normalized.get("pass", False)):
+        normalized.update({"status": "fail", "pass": False, "reason": "action_match_unknown"})
     return normalized
 
 
@@ -1217,7 +1242,7 @@ def build_visual_retry_prompt(
             "or human-shaped decorations"
         )
 
-    if reason == "action_mismatch":
+    if reason in {"action_mismatch", "action_match_unknown"}:
         retry_action = action
     elif correction:
         retry_action = f"{action}, and {correction[0].lower() + correction[1:]}"
@@ -1320,6 +1345,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     style_match = _coerce_bool(parsed.get("illustration_style_match"))
     role_match_present = "character_roles_match" in parsed
     role_match = _coerce_bool(parsed.get("character_roles_match")) if role_match_present else None
+    action_match_present = "action_match" in parsed
+    action_match = _coerce_bool(parsed.get("action_match")) if action_match_present else None
     topic_present = "object_topic_match" in parsed
     topic_match = _coerce_bool(parsed.get("object_topic_match")) if topic_present else None
     normalized = {
@@ -1335,6 +1362,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
     }
     if role_match_present:
         normalized["character_roles_match"] = role_match if role_match is not None else "unknown"
+    if action_match_present:
+        normalized["action_match"] = action_match if action_match is not None else "unknown"
     if topic_present:
         normalized["object_topic_match"] = topic_match if topic_match is not None else "unknown"
     return normalized
@@ -1494,7 +1523,7 @@ def evaluate_visual_quality(
             "You are a strict visual QA checker for a Telegram educational cover. "
             "Return JSON only with keys pass (boolean), reason (short string), people_count (integer or unknown), "
             "adult_count (integer or unknown), child_count (integer or unknown), ppe_detected (boolean), text_detected (boolean), "
-            "and character_roles_match (boolean). "
+            "character_roles_match (boolean), and action_match (boolean). "
             "Count adults, children, and all visible people separately. Count every visible human face, head, torso, "
             "reflection, background person, and partially visible person. "
             "A floating head, disconnected torso, silhouette, duplicate, ghosted, merged, or partially formed human figure counts as a person. "
@@ -1504,6 +1533,12 @@ def evaluate_visual_quality(
             "Required absence of extra people is part of this verdict. If Expected roles include a child age descriptor, "
             "the visible child must be compatible with that descriptor; a visibly incompatible child age means character_roles_match=false. "
             "Use reason wrong_character_roles whenever character_roles_match=false. "
+            "Set action_match=true only when the main visible action materially matches the exact Expected action. "
+            "Judge the actor, visible action, target/object/prop relationship, and child/adult interaction when it is part of Expected action. "
+            "Matching characters or props alone is not enough. Set action_match=false and use reason action_mismatch when the visible action differs. "
+            "Do not require visual proof of invisible speech content or the exact spoken word. For articulation or speech exercises, "
+            "accept a clearly depicted exercise when the exercise action is evident; reading, drawing, or ordinary conversation does not match "
+            "when Expected action is different. "
             "Pass only when the image is a 2D hand-painted watercolor and gouache editorial illustration with subtle paper texture, "
             "warm muted pastel colors, soft natural daylight, a gentle educational mood, clean composition, natural proportions, "
             "and a professional but approachable appearance. Reject photorealistic imagery, 3D renders, anime, glossy digital art, "
@@ -1524,7 +1559,7 @@ def evaluate_visual_quality(
             "If Expected roles explicitly require zero people or an object-only still life, pass only when people_count=0, "
             "adult_count=0, child_count=0, ppe_detected=false, and no face, head, body, hand, human silhouette, or human reflection is visible. "
             "For that object-only case use reason object_contains_person for any visible human element and object_counts_unknown if the counts cannot be determined. "
-            "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, action_mismatch, "
+            "Use one of too_many_people, ghosted_figure, duplicate_figure, merged_people, partial_human_figure, action_mismatch, action_match_unknown, "
             "adult_only_scene, missing_required_child, too_many_adults, wrong_character_roles, stretched_face, widened_torso, "
             "stretched_body, horizontal_stretch, deformed_hands, extra_limbs, missing_limbs, panoramic_distortion, unexpected_ppe, "
             "object_contains_person, object_contains_text, or object_counts_unknown when applicable. "
@@ -1707,6 +1742,7 @@ def evaluate_visual_quality(
             parsed["object_topic_match"] = "unknown"
         if not object_only:
             parsed = _enforce_production_human_character_roles(parsed)
+            parsed = _enforce_production_human_action(parsed)
         normalized = _enforce_visual_qa_hard_failures(parsed, rubric_id)
         normalized.update(_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger))
         print(
@@ -1788,6 +1824,8 @@ def _safe_visual_qa(
     }
     if "character_roles_match" in result:
         normalized["character_roles_match"] = result.get("character_roles_match", "unknown")
+    if "action_match" in result:
+        normalized["action_match"] = result.get("action_match", "unknown")
     if "text_detected" in result:
         normalized["text_detected"] = result.get("text_detected", "unknown")
     if "illustration_style_match" in result:

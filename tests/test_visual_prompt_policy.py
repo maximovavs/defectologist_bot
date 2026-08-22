@@ -329,7 +329,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         )
 
         self.assertLessEqual(len(prompt), 900)
-        self.assertEqual(prompt.count(VISUAL_STYLE_TAIL), 1)
+        self.assertEqual(prompt.lower().count("warm soft editorial illustration"), 1)
         self.assertEqual(prompt.lower().count("normal 50mm perspective"), 1)
         self.assertEqual(prompt.lower().count("allowed props:"), 1)
 
@@ -956,7 +956,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
     def test_visual_qa_prefers_separate_key_over_shared_key(self):
         response = Mock(status_code=200)
         response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1}'}]}}]
+            "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "character_roles_match": true, "action_match": true}'}]}}]
         }
         with patch.dict(
             os.environ,
@@ -993,40 +993,59 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["visual_qa_attempts"], "1")
 
     def test_method_piggybank_qa_http_429_uses_fallback_without_retry(self):
-        first = BytesIO(b"first")
+        qa_results = iter([
+            {
+                "status": "skipped",
+                "pass": True,
+                "reason": "qa_http_429",
+                "people_count": "unknown",
+            },
+            {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 0,
+                "adult_count": 0,
+                "child_count": 0,
+                "ppe_detected": False,
+                "text_detected": False,
+                "illustration_style_match": True,
+            },
+        ])
 
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
-            return_value=(first, {"attempts_used": "1", "final_reason": "ok"}),
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"object"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
         ) as download:
             buffer, meta = build_post_visual(
                 title="Method card",
                 day_key="SA",
                 image_prompt="speech specialist and child play a drum rhythm balance game",
-                visual_qa_fn=lambda *_args, **_kwargs: {
-                    "status": "skipped",
-                    "pass": True,
-                    "reason": "qa_http_429",
-                    "people_count": "unknown",
-                },
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
                 rubric_id="method_piggybank",
             )
 
         self.assertEqual(download.call_count, 2)
-        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(buffer.getvalue(), b"object")
         self.assertEqual(meta["mode"], "ai_object_fallback")
         self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
         self.assertEqual(meta["visual_qa_required"], "True")
-        self.assertEqual(meta["visual_qa"], "not_run")
-        self.assertEqual(meta["visual_qa_status"], "not_run")
         self.assertEqual(meta["human_qa_first_status"], "skipped")
         self.assertEqual(meta["human_qa_first_reason"], "qa_http_429")
         self.assertEqual(meta["visual_qa_attempts"], "1")
+        self.assertEqual(meta["object_qa_status"], "pass")
 
     def test_method_piggybank_missing_visual_qa_key_uses_fallback(self):
         with patch.dict(os.environ, {"GEMINI_VISUAL_QA_API_KEY": "", "GEMINI_API_KEY": ""}, clear=False), patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
-            return_value=(BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"object-1"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"object-2"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
         ) as download:
             buffer, meta = build_post_visual(
                 title="Method card",
@@ -1035,36 +1054,54 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="method_piggybank",
             )
 
-        self.assertEqual(download.call_count, 2)
-        self.assertEqual(buffer.getvalue(), b"first")
-        self.assertEqual(meta["mode"], "ai_object_fallback")
-        self.assertEqual(meta["visual_qa_reason"], "object_only_no_human_qa")
+        self.assertEqual(download.call_count, 3)
+        self.assertNotIn(buffer.getvalue(), {b"first", b"object-1", b"object-2"})
+        self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["human_qa_first_reason"], "gemini_key_missing")
-        self.assertEqual(meta["visual_qa_attempts"], "1")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertEqual(meta["object_generation_attempts"], "2")
 
     def test_method_piggybank_invalid_qa_response_uses_fallback(self):
+        qa_results = iter([
+            {
+                "status": "skipped",
+                "pass": True,
+                "reason": "invalid_qa_response",
+                "people_count": "unknown",
+            },
+            {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 0,
+                "adult_count": 0,
+                "child_count": 0,
+                "ppe_detected": False,
+                "text_detected": False,
+                "illustration_style_match": True,
+            },
+        ])
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
-            return_value=(BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"object"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
         ) as download:
-            _, meta = build_post_visual(
+            buffer, meta = build_post_visual(
                 title="Method card",
                 day_key="SA",
                 image_prompt="speech specialist and child play a drum rhythm balance game",
-                visual_qa_fn=lambda *_args, **_kwargs: {
-                    "status": "skipped",
-                    "pass": True,
-                    "reason": "invalid_qa_response",
-                    "people_count": "unknown",
-                },
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
                 rubric_id="method_piggybank",
             )
 
         self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"object")
         self.assertEqual(meta["mode"], "ai_object_fallback")
-        self.assertEqual(meta["visual_qa_reason"], "object_only_no_human_qa")
         self.assertEqual(meta["human_qa_first_reason"], "invalid_qa_response")
         self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
+        self.assertEqual(meta["object_qa_status"], "pass")
 
     def test_method_piggybank_visual_qa_pass_uses_ai_image(self):
         first = BytesIO(b"first")
@@ -1185,6 +1222,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
             side_effect=[
                 (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
                 (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+                RuntimeError("object generation failed 1"),
+                RuntimeError("object generation failed 2"),
             ],
         ) as download:
             buffer, meta = build_post_visual(
@@ -1195,12 +1234,12 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="tip_of_day",
             )
 
-        self.assertEqual(download.call_count, 3)
+        self.assertEqual(download.call_count, 4)
         self.assertNotIn(buffer.getvalue(), {b"first", b"second"})
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["object_generation_status"], "failed")
         self.assertEqual(meta["human_qa_retry_reason"], "character_counts_unknown")
-        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertEqual(meta["visual_qa_attempts"], "0")
 
     def test_method_piggybank_visual_qa_fail_then_retry_pass_uses_retry_image(self):
         qa_results = iter([
@@ -1231,32 +1270,48 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["visual_qa_attempts"], "2")
 
     def test_parent_rubric_skipped_visual_qa_uses_fallback_without_retry(self):
-        first = BytesIO(b"first")
+        qa_results = iter([
+            {
+                "status": "skipped",
+                "pass": True,
+                "reason": "qa_http_429",
+                "people_count": "unknown",
+            },
+            {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 0,
+                "adult_count": 0,
+                "child_count": 0,
+                "ppe_detected": False,
+                "text_detected": False,
+                "illustration_style_match": True,
+            },
+        ])
 
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
-            return_value=(first, {"attempts_used": "1", "final_reason": "ok"}),
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"object"), {"attempts_used": "1", "final_reason": "ok"}),
+            ],
         ) as download:
             buffer, meta = build_post_visual(
                 title="Speech game",
                 day_key="MO",
                 image_prompt="an adult and child practicing a speech game",
-                visual_qa_fn=lambda *_args, **_kwargs: {
-                    "status": "skipped",
-                    "pass": True,
-                    "reason": "qa_http_429",
-                    "people_count": "unknown",
-                },
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
                 rubric_id="tip_of_day",
             )
 
         self.assertEqual(download.call_count, 2)
-        self.assertEqual(buffer.getvalue(), b"first")
+        self.assertEqual(buffer.getvalue(), b"object")
         self.assertEqual(meta["mode"], "ai_object_fallback")
         self.assertEqual(meta["fallback_reason"], "qa_unavailable_for_required_rubric")
         self.assertEqual(meta["visual_qa_required"], "True")
-        self.assertEqual(meta["visual_qa_status"], "not_run")
         self.assertEqual(meta["human_qa_first_status"], "skipped")
+        self.assertEqual(meta["object_qa_status"], "pass")
 
     def test_visual_qa_required_rubrics_env_parses_multiple_ids(self):
         with patch.dict(os.environ, {"VISUAL_QA_REQUIRED_RUBRICS": "method_piggybank, tip_of_day age_norms"}):
@@ -1276,6 +1331,8 @@ class VisualPromptPolicyTest(unittest.TestCase):
             side_effect=[
                 (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
                 (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+                RuntimeError("object generation failed 1"),
+                RuntimeError("object generation failed 2"),
             ],
         ) as download:
             _, meta = build_post_visual(
@@ -1286,11 +1343,11 @@ class VisualPromptPolicyTest(unittest.TestCase):
                 rubric_id="tip_of_day",
             )
 
-        self.assertEqual(download.call_count, 3)
+        self.assertEqual(download.call_count, 4)
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["object_generation_status"], "failed")
         self.assertEqual(meta["human_qa_retry_reason"], "duplicate_figure")
-        self.assertIn("duplicate_figure", meta["reason"])
+        self.assertEqual(meta["reason"], "object generation failed 2")
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

@@ -855,6 +855,9 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         with patch(
             "src.services.visual_pipeline.download_pollinations_image_with_meta",
             side_effect=[(BytesIO(b"object-1"), {}), (BytesIO(b"object-2"), {})],
+        ), patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"text-fallback"),
         ):
             buffer, meta = build_post_visual(
                 title="Разговоры во время бытовых дел",

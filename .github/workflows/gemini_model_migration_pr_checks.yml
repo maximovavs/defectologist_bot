@@ -38,7 +38,14 @@ jobs:
           python-version: "3.11"
 
       - name: Install existing runtime dependencies used by the tests
-        run: python -m pip install "requests>=2.31.0,<3" "Pillow>=10.3.0"
+        run: |
+          python -m pip install \
+            "requests>=2.31.0,<3" \
+            "Pillow>=10.3.0" \
+            "feedparser>=6.0.11" \
+            "beautifulsoup4>=4.12.2" \
+            "PyYAML>=6.0.1" \
+            "python-dateutil>=2.9.0.post0"
 
       - name: Compile migration paths
         run: |
@@ -84,6 +91,20 @@ jobs:
           HTTPS_PROXY: "http://127.0.0.1:9"
           ALL_PROXY: "http://127.0.0.1:9"
         run: |
-          python -m unittest discover -v \
+          stub_dir="$(mktemp -d)"
+          mkdir -p "$stub_dir/sentence_transformers"
+          cat > "$stub_dir/sentence_transformers/__init__.py" <<'PY'
+          class SentenceTransformer:
+              def __init__(self, *args, **kwargs):
+                  raise RuntimeError("disabled in offline visual checks")
+
+          class _Util:
+              @staticmethod
+              def pytorch_cos_sim(*args, **kwargs):
+                  raise RuntimeError("semantic backend disabled in offline visual checks")
+
+          util = _Util()
+          PY
+          PYTHONPATH="$stub_dir${PYTHONPATH:+:$PYTHONPATH}" python -m unittest discover -v \
             -s tests \
             -p 'test_visual_*.py'

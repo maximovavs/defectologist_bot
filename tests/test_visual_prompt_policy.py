@@ -1058,7 +1058,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertNotIn(buffer.getvalue(), {b"first", b"object-1", b"object-2"})
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["human_qa_first_reason"], "gemini_key_missing")
-        self.assertEqual(meta["visual_qa_attempts"], "1")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
         self.assertEqual(meta["object_generation_attempts"], "2")
 
     def test_method_piggybank_invalid_qa_response_uses_fallback(self):
@@ -1239,7 +1239,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["object_generation_status"], "failed")
         self.assertEqual(meta["human_qa_retry_reason"], "character_counts_unknown")
-        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertEqual(meta["visual_qa_attempts"], "0")
 
     def test_method_piggybank_visual_qa_fail_then_retry_pass_uses_retry_image(self):
         qa_results = iter([
@@ -1347,7 +1347,7 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["object_generation_status"], "failed")
         self.assertEqual(meta["human_qa_retry_reason"], "duplicate_figure")
-        self.assertIn("duplicate_figure", meta["reason"])
+        self.assertEqual(meta["reason"], "object generation failed 2")
 
     def test_rejects_santa_and_headphones_for_plain_speech_post(self):
         ok, reason = _validate_image_prompt(

@@ -211,6 +211,62 @@ class TopicPolicyTest(unittest.TestCase):
         self.assertNotIn("everyday_communication", RUBRIC_TOPIC_ROTATION["age_norms"])
         self.assertIn("hearing_and_speech", RUBRIC_TOPIC_ROTATION["age_norms"])
 
+    def test_age_norms_has_tier1_milestone_capacity(self):
+        source_cfg = yaml.safe_load((ROOT / "config" / "sources.yml").read_text(encoding="utf-8"))
+        rubrics_cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
+        sources_by_id = {item.get("id"): item for item in source_cfg.get("sources", [])}
+        age_norms = next(
+            item
+            for item in rubrics_cfg["audiences"]["parents"]["rubrics"]
+            if item.get("id") == "age_norms"
+        )
+        age_source_ids = set(age_norms["sources"])
+        self.assertIn("cdc_developmental_milestones", age_source_ids)
+        self.assertIn("asha_developmental_milestones", age_source_ids)
+
+        expected_cdc = {
+            "https://www.cdc.gov/act-early/milestones/18-months.html",
+            "https://www.cdc.gov/act-early/milestones/30-months.html",
+            "https://www.cdc.gov/act-early/milestones/3-years.html",
+            "https://www.cdc.gov/act-early/milestones/4-years.html",
+            "https://www.cdc.gov/act-early/milestones/5-years.html",
+        }
+        expected_asha = {
+            "https://www.asha.org/public/developmental-milestones/communication-milestones-birth-to-1-year/",
+            "https://www.asha.org/public/developmental-milestones/communication-milestones-13-to-18-months/",
+            "https://www.asha.org/public/developmental-milestones/communication-milestones-19-to-24-months/",
+            "https://www.asha.org/public/developmental-milestones/communication-milestones-2-to-3-years/",
+            "https://www.asha.org/public/developmental-milestones/communication-milestones-3-to-4-years/",
+            "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/",
+        }
+        cdc_urls = set(sources_by_id["cdc_developmental_milestones"]["urls"])
+        asha_urls = set(sources_by_id["asha_developmental_milestones"]["urls"])
+        self.assertTrue(expected_cdc.issubset(cdc_urls))
+        self.assertTrue(expected_asha.issubset(asha_urls))
+
+        scientific_domains = source_cfg["quality"]["scientific_domains"]
+        added_urls = expected_cdc | expected_asha
+        for url in added_urls:
+            domain = publisher.safe_domain(url).removeprefix("www.")
+            with self.subTest(url=url):
+                self.assertIn(domain, {"cdc.gov", "asha.org"})
+                self.assertTrue(publisher.is_scientific_domain(domain, scientific_domains))
+
+        static_pool = [
+            url
+            for source_id in age_source_ids
+            for url in sources_by_id[source_id].get("urls", [])
+            if sources_by_id[source_id].get("type") == "static"
+        ]
+        self.assertGreaterEqual(len(static_pool), 30)
+        self.assertTrue(
+            publisher._requires_tier1_source(
+                "age_norms",
+                "early_communication",
+                "Communication milestones by age: at 24 months children may combine words.",
+            )
+        )
+
     def test_bilingual_corner_w34_prefers_hearing_and_speech(self):
         self.assertEqual(
             select_topic_plan("bilingual_corner", "2026-W34").preferred_topic_id,

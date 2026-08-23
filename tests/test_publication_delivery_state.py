@@ -244,7 +244,7 @@ class DurableDeliveryStateTest(unittest.TestCase):
             "post",
             side_effect=[
                 _telegram_response(404),
-                _telegram_reject("Bad Request: text rejected"),
+                _telegram_reject("text rejected"),
                 delete_ok,
             ],
         ) as post:
@@ -265,8 +265,8 @@ class DurableDeliveryStateTest(unittest.TestCase):
             "post",
             side_effect=[
                 _telegram_response(606),
-                _telegram_reject("Bad Request: text rejected"),
-                _telegram_reject("Bad Request: delete rejected"),
+                _telegram_reject("text rejected"),
+                _telegram_reject("delete rejected"),
             ],
         ):
             with self.assertRaisesRegex(

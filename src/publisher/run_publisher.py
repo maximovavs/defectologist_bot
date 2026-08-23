@@ -1653,16 +1653,31 @@ def render_plain_to_telegram_html(plain_text: str) -> str:
     return "\n".join(out).strip()
 
 
+class TelegramDeliveryOutcomeAmbiguous(RuntimeError):
+    """Telegram may have accepted a mutation, but the client cannot prove the outcome."""
+
+
 def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
-    r = requests.post(url, data=data, files=files, timeout=30)
+    try:
+        r = requests.post(url, data=data, files=files, timeout=30)
+    except requests.RequestException as exc:
+        raise TelegramDeliveryOutcomeAmbiguous(
+            "telegram_delivery_outcome_ambiguous:"
+            f"transport_error_type={exc.__class__.__name__}"
+        ) from exc
 
     try:
         payload = r.json()
     except Exception:
         payload = None
+
+    if r.status_code >= 500:
+        raise TelegramDeliveryOutcomeAmbiguous(
+            f"telegram_delivery_outcome_ambiguous:http_status={r.status_code}"
+        )
 
     if not r.ok:
         description = payload.get("description", "") if isinstance(payload, dict) else ""
@@ -1680,7 +1695,9 @@ def _extract_telegram_message_id(payload: Dict[str, Any]) -> int:
     result = payload.get("result") if isinstance(payload, dict) else None
     message_id = result.get("message_id") if isinstance(result, dict) else None
     if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
-        raise RuntimeError("telegram_api_error:successful response has no valid result.message_id")
+        raise TelegramDeliveryOutcomeAmbiguous(
+            "telegram_delivery_outcome_ambiguous:missing_result_message_id"
+        )
     return message_id
 
 
@@ -1763,6 +1780,8 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
                 data["parse_mode"] = TELEGRAM_PARSE_MODE
             payload = tg_request("sendPhoto", data=data, files={"photo": file_tuple})
         except Exception as e:
+            if isinstance(e, TelegramDeliveryOutcomeAmbiguous):
+                raise
             if _is_probably_parse_mode_error(e):
                 print(f"[TELEGRAM][CAPTION] mode=plain_fallback units={caption_units}", flush=True)
                 try:
@@ -1772,6 +1791,8 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
                         files={"photo": file_tuple},
                     )
                 except Exception as plain_error:
+                    if isinstance(plain_error, TelegramDeliveryOutcomeAmbiguous):
+                        raise
                     print(
                         f"[TELEGRAM][SPLIT] reason=caption_send_failed units={caption_units} "
                         f"error_type={plain_error.__class__.__name__}",
@@ -1799,13 +1820,16 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
     try:
         return send_message(chat_id, html_full_post)
     except Exception as send_error:
+        if isinstance(send_error, TelegramDeliveryOutcomeAmbiguous):
+            raise
         try:
             tg_request(
                 "deleteMessage",
                 data={"chat_id": chat_id, "message_id": photo_message_id},
             )
         except Exception as rollback_error:
-            raise RuntimeError(
+            raise TelegramDeliveryOutcomeAmbiguous(
+                "telegram_delivery_outcome_ambiguous:"
                 "telegram_split_delivery_rollback_failed:"
                 f"send_error_type={send_error.__class__.__name__}:"
                 f"rollback_error_type={rollback_error.__class__.__name__}"
@@ -3016,6 +3040,14 @@ async def amain() -> None:
                             display_plain,
                             html_full,
                         )
+                    except TelegramDeliveryOutcomeAmbiguous as e:
+                        print(
+                            "[STOP] telegram_delivery_outcome_ambiguous "
+                            f"error_class={e.__class__.__name__} "
+                            f"rubric={rubric_id} source={candidate_source_id} url={canon}",
+                            flush=True,
+                        )
+                        raise
                     except Exception as e:
                         kind = note("telegram_send_failed", f"{canon} ({e})")
                         print(

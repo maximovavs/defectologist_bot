@@ -181,6 +181,12 @@ sources:
     urls:
       - "https://www.asha.org/public/developmental-milestones/"
       - "https://www.asha.org/public/developmental-milestones/communication-milestones/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-birth-to-1-year/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-13-to-18-months/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-19-to-24-months/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-2-to-3-years/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-3-to-4-years/"
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/"
 
   # ---------- Colorín Colorado ----------
 
@@ -238,6 +244,11 @@ sources:
     urls:
       - "https://www.cdc.gov/act-early/milestones/2-years.html"
       - "https://www.cdc.gov/act-early/digital-online-checklist/2-years.html"
+      - "https://www.cdc.gov/act-early/milestones/18-months.html"
+      - "https://www.cdc.gov/act-early/milestones/30-months.html"
+      - "https://www.cdc.gov/act-early/milestones/3-years.html"
+      - "https://www.cdc.gov/act-early/milestones/4-years.html"
+      - "https://www.cdc.gov/act-early/milestones/5-years.html"
 
   - id: healthychildren_bilingual_myths
     name: "HealthyChildren — Bilingual myths & facts"

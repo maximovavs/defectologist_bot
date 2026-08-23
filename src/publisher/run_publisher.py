@@ -1790,8 +1790,31 @@ def send_post_with_visual(chat_id: str, photo_buffer: BytesIO, plain_post: str, 
     else:
         print(f"[TELEGRAM][SPLIT] reason=caption_too_long units={caption_units}", flush=True)
 
-    tg_request("sendPhoto", data={"chat_id": chat_id, "caption": ""}, files={"photo": file_tuple})
-    return send_message(chat_id, html_full_post)
+    photo_payload = tg_request(
+        "sendPhoto",
+        data={"chat_id": chat_id, "caption": ""},
+        files={"photo": file_tuple},
+    )
+    photo_message_id = _extract_telegram_message_id(photo_payload)
+    try:
+        return send_message(chat_id, html_full_post)
+    except Exception as send_error:
+        try:
+            tg_request(
+                "deleteMessage",
+                data={"chat_id": chat_id, "message_id": photo_message_id},
+            )
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "telegram_split_delivery_rollback_failed:"
+                f"send_error_type={send_error.__class__.__name__}:"
+                f"rollback_error_type={rollback_error.__class__.__name__}"
+            ) from send_error
+        print(
+            f"[TELEGRAM][ROLLBACK] split_delivery_photo_deleted message_id={photo_message_id}",
+            flush=True,
+        )
+        raise
 
 
 def send_post_poll(

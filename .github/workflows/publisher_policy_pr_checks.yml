@@ -22,6 +22,8 @@ on:
       - "tests/test_parent_diagnostic_role_boundary.py"
       - "tests/test_exercise_coherence_policy.py"
       - "tests/test_publisher_reason_attribution.py"
+      - "tests/test_telegram_visual_delivery.py"
+      - "tests/test_post_polls.py"
       - ".github/workflows/publisher_policy_pr_checks.yml"
 
 permissions:
@@ -66,7 +68,9 @@ jobs:
             tests/test_parent_modality_fidelity.py \
             tests/test_parent_diagnostic_role_boundary.py \
             tests/test_exercise_coherence_policy.py \
-            tests/test_publisher_reason_attribution.py
+            tests/test_publisher_reason_attribution.py \
+            tests/test_telegram_visual_delivery.py \
+            tests/test_post_polls.py
 
       - name: Run publisher policy regressions offline
         env:
@@ -111,6 +115,8 @@ jobs:
               "tests.test_parent_diagnostic_role_boundary",
               "tests.test_exercise_coherence_policy",
               "tests.test_publisher_reason_attribution",
+              "tests.test_telegram_visual_delivery",
+              "tests.test_post_polls",
           ])
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() else 1)

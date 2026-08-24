@@ -1,10 +1,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -15,6 +18,45 @@ SEMANTIC_MODEL_NAME = os.getenv("SEMANTIC_MODEL_NAME", "all-MiniLM-L6-v2").strip
 
 _MODEL: Optional[SentenceTransformer] = None
 _SEMANTIC_DISABLED = False
+
+_DELIVERY_HOOKS_INSTALLED = False
+_DELIVERY_ORIGINAL_TG_REQUEST = None
+_DELIVERY_ORIGINAL_SEND_POST_WITH_VISUAL = None
+_ACTIVE_DELIVERY_STORE: Optional["PublicationStore"] = None
+_ACTIVE_DELIVERY_ATTEMPT_KEY = ""
+
+_PUBLISHER_HISTORY_NAMES = frozenset({
+    "publication_history.sqlite3",
+    "publication_history_test.sqlite3",
+})
+
+
+class PublicationDeliveryStateBlocked(RuntimeError):
+    """Durable delivery state is missing or contains an unresolved primary send."""
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_publisher_history_path(path: Path) -> bool:
+    return path.name in _PUBLISHER_HISTORY_NAMES and path.parent.name == ".state"
+
+
+def _is_production_history_path(path: Path) -> bool:
+    return path.name == "publication_history.sqlite3" and path.parent.name == ".state"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _payload_message_id(payload: object) -> Optional[int]:
+    result = payload.get("result") if isinstance(payload, dict) else None
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+        return None
+    return message_id
 
 
 def get_semantic_model() -> Optional[SentenceTransformer]:
@@ -110,8 +152,30 @@ class SimilarPublication:
 class PublicationStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
+        self._confirmed_delivery_attempt_key = ""
+        self._delivery_hooks_enabled = (
+            _is_publisher_history_path(self.db_path) and not _env_truthy("DRY_RUN")
+        )
+
+        if _is_production_history_path(self.db_path) and not _env_truthy("DRY_RUN"):
+            if os.getenv("PRODUCTION_STATE_RESTORED", "").strip() != "1":
+                raise PublicationDeliveryStateBlocked(
+                    "production_state_not_restored: refusing production publication"
+                )
+            if not self.db_path.is_file():
+                raise PublicationDeliveryStateBlocked(
+                    "production_history_missing: refusing production publication"
+                )
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+
+        if self._delivery_hooks_enabled:
+            if self.has_unresolved_delivery_attempts():
+                raise PublicationDeliveryStateBlocked(
+                    "unresolved_delivery_quarantine: manual recovery required before publication"
+                )
+            self._install_publisher_delivery_hooks()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -146,6 +210,19 @@ class PublicationStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS delivery_attempts (
+                    attempt_key TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    body_hash TEXT NOT NULL DEFAULT '',
+                    primary_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
             conn.commit()
 
         existing = self._existing_columns()
@@ -172,7 +249,252 @@ class PublicationStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_publications_body_hash ON publications(body_hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_publications_evidence_hash ON publications(evidence_hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_publications_posted_at ON publications(posted_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_delivery_attempts_state ON delivery_attempts(state)")
             conn.commit()
+
+    def has_unresolved_delivery_attempts(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM delivery_attempts LIMIT 1").fetchone()
+        return row is not None
+
+    def delivery_attempts(self) -> List[Dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT attempt_key, state, body_hash, primary_message_ids_json,
+                       started_at, updated_at, last_error
+                FROM delivery_attempts
+                ORDER BY started_at, attempt_key
+                """
+            ).fetchall()
+        out: List[Dict[str, object]] = []
+        for row in rows:
+            try:
+                message_ids = json.loads(row["primary_message_ids_json"] or "[]")
+            except Exception:
+                message_ids = []
+            out.append(
+                {
+                    "attempt_key": row["attempt_key"],
+                    "state": row["state"],
+                    "body_hash": row["body_hash"],
+                    "primary_message_ids": message_ids if isinstance(message_ids, list) else [],
+                    "started_at": row["started_at"],
+                    "updated_at": row["updated_at"],
+                    "last_error": row["last_error"],
+                }
+            )
+        return out
+
+    def begin_delivery_attempt(self, attempt_key: str, body_hash: str) -> None:
+        if not attempt_key:
+            raise PublicationDeliveryStateBlocked("delivery_attempt_key_missing")
+        now = _utc_now_iso()
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO delivery_attempts (
+                        attempt_key, state, body_hash, primary_message_ids_json,
+                        started_at, updated_at, last_error
+                    ) VALUES (?, 'pending', ?, '[]', ?, ?, '')
+                    """,
+                    (attempt_key, body_hash, now, now),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise PublicationDeliveryStateBlocked(
+                "delivery_attempt_already_quarantined"
+            ) from exc
+
+    def _update_delivery_state(self, attempt_key: str, state: str, last_error: str = "") -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE delivery_attempts
+                SET state = ?, updated_at = ?, last_error = ?
+                WHERE attempt_key = ?
+                """,
+                (state, _utc_now_iso(), last_error, attempt_key),
+            )
+            if cursor.rowcount != 1:
+                raise PublicationDeliveryStateBlocked("delivery_attempt_missing")
+            conn.commit()
+
+    def mark_delivery_ambiguous(self, attempt_key: str, error_type: str) -> None:
+        self._update_delivery_state(attempt_key, "ambiguous", error_type)
+
+    def mark_delivery_confirmed(self, attempt_key: str) -> None:
+        self._update_delivery_state(attempt_key, "confirmed", "")
+        self._confirmed_delivery_attempt_key = attempt_key
+
+    def clear_delivery_attempt(self, attempt_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM delivery_attempts WHERE attempt_key = ?", (attempt_key,))
+            conn.commit()
+        if self._confirmed_delivery_attempt_key == attempt_key:
+            self._confirmed_delivery_attempt_key = ""
+
+    def add_delivery_message_id(self, attempt_key: str, message_id: int) -> None:
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            return
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT primary_message_ids_json FROM delivery_attempts WHERE attempt_key = ?",
+                (attempt_key,),
+            ).fetchone()
+            if row is None:
+                raise PublicationDeliveryStateBlocked("delivery_attempt_missing")
+            try:
+                message_ids = json.loads(row["primary_message_ids_json"] or "[]")
+            except Exception:
+                message_ids = []
+            if not isinstance(message_ids, list):
+                message_ids = []
+            if message_id not in message_ids:
+                message_ids.append(message_id)
+            conn.execute(
+                """
+                UPDATE delivery_attempts
+                SET primary_message_ids_json = ?, updated_at = ?
+                WHERE attempt_key = ?
+                """,
+                (json.dumps(message_ids, separators=(",", ":")), _utc_now_iso(), attempt_key),
+            )
+            conn.commit()
+
+    def remove_delivery_message_id(self, attempt_key: str, message_id: int) -> None:
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            return
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT primary_message_ids_json FROM delivery_attempts WHERE attempt_key = ?",
+                (attempt_key,),
+            ).fetchone()
+            if row is None:
+                raise PublicationDeliveryStateBlocked("delivery_attempt_missing")
+            try:
+                message_ids = json.loads(row["primary_message_ids_json"] or "[]")
+            except Exception:
+                message_ids = []
+            if not isinstance(message_ids, list):
+                message_ids = []
+            message_ids = [value for value in message_ids if value != message_id]
+            conn.execute(
+                """
+                UPDATE delivery_attempts
+                SET primary_message_ids_json = ?, updated_at = ?
+                WHERE attempt_key = ?
+                """,
+                (json.dumps(message_ids, separators=(",", ":")), _utc_now_iso(), attempt_key),
+            )
+            conn.commit()
+
+    def _install_publisher_delivery_hooks(self) -> None:
+        global _DELIVERY_HOOKS_INSTALLED
+        global _DELIVERY_ORIGINAL_TG_REQUEST
+        global _DELIVERY_ORIGINAL_SEND_POST_WITH_VISUAL
+        global _ACTIVE_DELIVERY_STORE
+
+        publisher = sys.modules.get("src.publisher.run_publisher")
+        if publisher is None:
+            return
+        if not hasattr(publisher, "tg_request") or not hasattr(publisher, "send_post_with_visual"):
+            return
+
+        _ACTIVE_DELIVERY_STORE = self
+
+        if _DELIVERY_HOOKS_INSTALLED:
+            return
+
+        _DELIVERY_ORIGINAL_TG_REQUEST = publisher.tg_request
+        _DELIVERY_ORIGINAL_SEND_POST_WITH_VISUAL = publisher.send_post_with_visual
+
+        def tg_request_with_delivery_receipts(method, data, files=None):
+            payload = _DELIVERY_ORIGINAL_TG_REQUEST(method, data=data, files=files)
+            store = _ACTIVE_DELIVERY_STORE
+            attempt_key = _ACTIVE_DELIVERY_ATTEMPT_KEY
+            if store is None or not attempt_key:
+                return payload
+
+            if method in {"sendPhoto", "sendMessage"}:
+                message_id = _payload_message_id(payload)
+                if message_id is not None:
+                    store.add_delivery_message_id(attempt_key, message_id)
+            elif method == "deleteMessage":
+                message_id = data.get("message_id") if isinstance(data, dict) else None
+                if isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0:
+                    store.remove_delivery_message_id(attempt_key, message_id)
+            return payload
+
+        def send_post_with_durable_state(chat_id, photo_buffer, plain_post, html_full_post):
+            global _ACTIVE_DELIVERY_ATTEMPT_KEY
+
+            store = _ACTIVE_DELIVERY_STORE
+            if store is None:
+                return _DELIVERY_ORIGINAL_SEND_POST_WITH_VISUAL(
+                    chat_id, photo_buffer, plain_post, html_full_post
+                )
+
+            body_hash = hashlib.sha256((plain_post or "").encode("utf-8")).hexdigest()
+            attempt_key = hashlib.sha256(
+                f"{chat_id}\0{body_hash}".encode("utf-8")
+            ).hexdigest()
+            ambiguous_type = getattr(publisher, "TelegramDeliveryOutcomeAmbiguous", RuntimeError)
+
+            try:
+                store.begin_delivery_attempt(attempt_key, body_hash)
+            except Exception as state_error:
+                raise ambiguous_type(
+                    "telegram_delivery_outcome_ambiguous:delivery_state_begin_failed"
+                ) from state_error
+
+            _ACTIVE_DELIVERY_ATTEMPT_KEY = attempt_key
+            try:
+                result = _DELIVERY_ORIGINAL_SEND_POST_WITH_VISUAL(
+                    chat_id, photo_buffer, plain_post, html_full_post
+                )
+            except Exception as send_error:
+                if isinstance(send_error, ambiguous_type):
+                    try:
+                        store.mark_delivery_ambiguous(
+                            attempt_key, send_error.__class__.__name__
+                        )
+                    except Exception:
+                        # begin_delivery_attempt committed before Telegram mutation;
+                        # keeping "pending" still quarantines the next run.
+                        pass
+                    raise
+
+                try:
+                    store.clear_delivery_attempt(attempt_key)
+                except Exception as state_error:
+                    raise ambiguous_type(
+                        "telegram_delivery_outcome_ambiguous:"
+                        "delivery_state_clear_failed_after_deterministic_reject"
+                    ) from state_error
+                raise
+            else:
+                try:
+                    store.mark_delivery_confirmed(attempt_key)
+                except Exception as state_error:
+                    raise ambiguous_type(
+                        "telegram_delivery_outcome_ambiguous:delivery_state_confirm_failed"
+                    ) from state_error
+                return result
+            finally:
+                _ACTIVE_DELIVERY_ATTEMPT_KEY = ""
+
+        publisher.tg_request = tg_request_with_delivery_receipts
+        publisher.send_post_with_visual = send_post_with_durable_state
+        _DELIVERY_HOOKS_INSTALLED = True
+
+    def deactivate_publisher_delivery_hooks(self) -> None:
+        global _ACTIVE_DELIVERY_STORE
+        global _ACTIVE_DELIVERY_ATTEMPT_KEY
+        if _ACTIVE_DELIVERY_STORE is self:
+            _ACTIVE_DELIVERY_STORE = None
+            _ACTIVE_DELIVERY_ATTEMPT_KEY = ""
 
     def has_url(self, canonical_url: str) -> bool:
         with self._connect() as conn:
@@ -432,6 +754,7 @@ class PublicationStore:
 
         body_embedding_model = SEMANTIC_MODEL_NAME if body_vec else ""
         evidence_embedding_model = SEMANTIC_MODEL_NAME if evidence_vec else ""
+        confirmed_attempt_key = self._confirmed_delivery_attempt_key
 
         with self._connect() as conn:
             conn.execute(
@@ -470,4 +793,16 @@ class PublicationStore:
                     source_domain,
                 ),
             )
+            if confirmed_attempt_key:
+                cursor = conn.execute(
+                    "DELETE FROM delivery_attempts WHERE attempt_key = ?",
+                    (confirmed_attempt_key,),
+                )
+                if cursor.rowcount != 1:
+                    raise PublicationDeliveryStateBlocked(
+                        "confirmed_delivery_attempt_missing_during_record"
+                    )
             conn.commit()
+
+        if confirmed_attempt_key:
+            self._confirmed_delivery_attempt_key = ""

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "src/publisher/run_publisher.py"
+      - "src/services/publication_store.py"
       - "src/services/topic_policy.py"
       - "src/services/llm_generator.py"
       - "config/sources.yml"
@@ -24,6 +25,7 @@ on:
       - "tests/test_publisher_reason_attribution.py"
       - "tests/test_telegram_visual_delivery.py"
       - "tests/test_post_polls.py"
+      - "tests/test_publication_delivery_state.py"
       - ".github/workflows/publisher_policy_pr_checks.yml"
 
 permissions:
@@ -57,6 +59,7 @@ jobs:
         run: |
           python -m py_compile \
             src/publisher/run_publisher.py \
+            src/services/publication_store.py \
             src/services/topic_policy.py \
             src/services/llm_generator.py \
             scripts/probe_myth_fact_sources.py \
@@ -70,7 +73,8 @@ jobs:
             tests/test_exercise_coherence_policy.py \
             tests/test_publisher_reason_attribution.py \
             tests/test_telegram_visual_delivery.py \
-            tests/test_post_polls.py
+            tests/test_post_polls.py \
+            tests/test_publication_delivery_state.py
 
       - name: Run publisher policy regressions offline
         env:
@@ -117,6 +121,7 @@ jobs:
               "tests.test_publisher_reason_attribution",
               "tests.test_telegram_visual_delivery",
               "tests.test_post_polls",
+              "tests.test_publication_delivery_state",
           ])
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() else 1)

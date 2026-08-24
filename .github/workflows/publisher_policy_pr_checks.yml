@@ -13,6 +13,7 @@ on:
       - "config/topics.yml"
       - "config/rubrics.yml"
       - "scripts/probe_myth_fact_sources.py"
+      - "scripts/resolve_production_state_predecessor.py"
       - ".github/workflows/myth_fact_source_probe.yml"
       - "tests/test_topic_policy.py"
       - "tests/test_editorial_freshness_policy.py"
@@ -63,6 +64,7 @@ jobs:
             src/services/topic_policy.py \
             src/services/llm_generator.py \
             scripts/probe_myth_fact_sources.py \
+            scripts/resolve_production_state_predecessor.py \
             tests/test_topic_policy.py \
             tests/test_editorial_freshness_policy.py \
             tests/test_myth_fact_fidelity.py \

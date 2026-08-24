@@ -87,6 +87,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_channel || 'prod' }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PYTHONUNBUFFERED: "1"
@@ -167,8 +171,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Restore .state cache
-        id: restore-state
+      - name: Resolve production state predecessor
+        id: state-predecessor
+        if: ${{ env.STATE_SCOPE == 'prod' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/resolve_production_state_predecessor.py >> "$GITHUB_OUTPUT"
+
+      - name: Restore production .state cache
+        id: restore-prod-state
+        if: ${{ env.STATE_SCOPE == 'prod' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: .state
+          key: ${{ steps.state-predecessor.outputs.expected_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Restore test .state cache
+        id: restore-test-state
+        if: ${{ env.STATE_SCOPE != 'prod' }}
         uses: actions/cache/restore@v5
         with:
           path: .state
@@ -177,13 +199,20 @@ jobs:
             logoped-state-${{ env.STATE_CACHE_VERSION }}-${{ env.STATE_SCOPE }}-${{ github.ref_name }}-
             logoped-state-${{ env.STATE_CACHE_VERSION }}-${{ env.STATE_SCOPE }}-
 
-      - name: Verify production state restore
-        if: ${{ env.DRY_RUN != '1' && env.STATE_SCOPE == 'prod' }}
+      - name: Verify production state continuity
+        id: verify-prod-state
+        if: ${{ env.STATE_SCOPE == 'prod' }}
         env:
-          RESTORED_CACHE_KEY: ${{ steps.restore-state.outputs.cache-matched-key }}
+          EXPECTED_CACHE_KEY: ${{ steps.state-predecessor.outputs.expected_cache_key }}
+          RESTORED_CACHE_KEY: ${{ steps.restore-prod-state.outputs.cache-matched-key }}
+          CACHE_HIT: ${{ steps.restore-prod-state.outputs.cache-hit }}
         run: |
-          if [ -z "$RESTORED_CACHE_KEY" ]; then
-            echo "::error::production_state_not_restored"
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::error::production_state_exact_cache_miss"
+            exit 1
+          fi
+          if [ "$RESTORED_CACHE_KEY" != "$EXPECTED_CACHE_KEY" ]; then
+            echo "::error::production_state_cache_key_mismatch"
             exit 1
           fi
           if [ ! -f .state/publication_history.sqlite3 ]; then
@@ -191,6 +220,8 @@ jobs:
             exit 1
           fi
           echo "PRODUCTION_STATE_RESTORED=1" >> "$GITHUB_ENV"
+          echo "PROD_STATE_CONTINUITY_OK=1" >> "$GITHUB_ENV"
+          echo "continuity_ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -222,8 +253,15 @@ jobs:
           echo "Contents of .state:"
           ls -la .state || true
 
-      - name: Save .state cache
-        if: always()
+      - name: Save production .state cache
+        if: ${{ always() && env.STATE_SCOPE == 'prod' && env.PROD_STATE_CONTINUITY_OK == '1' && steps.verify-prod-state.outputs.continuity_ok == 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: .state
+          key: logoped-state-${{ env.STATE_CACHE_VERSION }}-prod-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Save test .state cache
+        if: ${{ always() && env.STATE_SCOPE != 'prod' }}
         uses: actions/cache/save@v5
         with:
           path: .state

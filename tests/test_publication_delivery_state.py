@@ -463,12 +463,49 @@ def _workflow_run(
     }
 
 
+def _post_job_payload(
+    *,
+    run_conclusion: str = "failure",
+    publisher_status: str = "completed",
+    publisher_conclusion: str = "skipped",
+    started_at: object = "2026-08-24T09:10:08Z",
+    steps: object = None,
+):
+    if steps is None:
+        steps = [
+            {
+                "name": "Run Publisher",
+                "status": publisher_status,
+                "conclusion": publisher_conclusion,
+            }
+        ]
+    return {
+        "jobs": [
+            {
+                "name": "post",
+                "status": "completed",
+                "conclusion": run_conclusion,
+                "started_at": started_at,
+                "steps": steps,
+            }
+        ]
+    }
+
+
 class ProductionStatePredecessorTest(unittest.TestCase):
-    def _resolve(self, runs, *, current_attempt=1, jobs_loader=None):
+    def _resolve(
+        self,
+        runs,
+        *,
+        current_attempt=1,
+        jobs_loader=None,
+        current_run_id=100,
+        current_run_number=100,
+    ):
         return continuity.resolve_predecessor(
             runs,
-            current_run_id=100,
-            current_run_number=100,
+            current_run_id=current_run_id,
+            current_run_number=current_run_number,
             current_run_attempt=current_attempt,
             ref_name="main",
             jobs_loader=jobs_loader or (lambda _run_id: {"jobs": []}),
@@ -541,20 +578,183 @@ class ProductionStatePredecessorTest(unittest.TestCase):
         )
         self.assertEqual(predecessor.run_id, 98)
 
-    def test_cancelled_started_run_is_not_skipped(self):
-        jobs = {
-            "jobs": [
+    def test_incident_446_pre_publisher_failure_skips_to_445(self):
+        jobs_446 = _post_job_payload(
+            run_conclusion="failure",
+            steps=[
                 {
-                    "name": "post",
+                    "name": "Set up job",
                     "status": "completed",
-                    "conclusion": "cancelled",
-                    "started_at": "2026-08-24T00:00:00Z",
-                }
+                    "conclusion": "success",
+                },
+                {
+                    "name": "Run actions/checkout@v6",
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "name": "Resolve production state predecessor",
+                    "status": "completed",
+                    "conclusion": "failure",
+                },
+                {
+                    "name": "Restore production .state cache",
+                    "status": "completed",
+                    "conclusion": "skipped",
+                },
+                {
+                    "name": "Run Publisher",
+                    "status": "completed",
+                    "conclusion": "skipped",
+                },
+                {
+                    "name": "Save production .state cache",
+                    "status": "completed",
+                    "conclusion": "skipped",
+                },
+            ],
+        )
+        runs = [
+            _workflow_run(4440, 444, title="Legacy run before channel marker"),
+            _workflow_run(4460, 446, conclusion="failure"),
+            _workflow_run(4450, 445),
+        ]
+        with patch.object(continuity.urllib.request, "urlopen") as urlopen:
+            predecessor = self._resolve(
+                runs,
+                current_run_id=4470,
+                current_run_number=447,
+                jobs_loader=lambda run_id: jobs_446 if run_id == 4460 else {"jobs": []},
+            )
+        self.assertEqual((predecessor.run_id, predecessor.run_number), (4450, 445))
+        urlopen.assert_not_called()
+
+    def test_newest_to_oldest_selection_is_independent_of_input_order(self):
+        jobs_99 = _post_job_payload(run_conclusion="failure")
+        predecessor = self._resolve(
+            [
+                _workflow_run(97, 97),
+                _workflow_run(99, 99, conclusion="failure"),
+                _workflow_run(98, 98),
+            ],
+            jobs_loader=lambda run_id: jobs_99 if run_id == 99 else {"jobs": []},
+        )
+        self.assertEqual(predecessor.run_id, 98)
+
+    def test_legacy_metadata_older_than_selected_predecessor_is_not_validated(self):
+        predecessor = self._resolve(
+            [
+                _workflow_run(97, 97, title="Legacy run before channel marker"),
+                _workflow_run(99, 99),
             ]
+        )
+        self.assertEqual(predecessor.run_id, 99)
+
+    def test_legacy_metadata_between_current_and_predecessor_fails_closed(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "ambiguous_run_metadata:channel",
+        ):
+            self._resolve(
+                [
+                    _workflow_run(98, 98),
+                    _workflow_run(99, 99, title="Legacy run before channel marker"),
+                ]
+            )
+
+    def test_pre_publisher_terminal_runs_are_skipped_only_with_step_proof(self):
+        for conclusion in ("failure", "cancelled", "timed_out", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                jobs = _post_job_payload(run_conclusion=conclusion)
+                predecessor = self._resolve(
+                    [
+                        _workflow_run(99, 99, conclusion=conclusion),
+                        _workflow_run(98, 98),
+                    ],
+                    jobs_loader=lambda run_id, payload=jobs: (
+                        payload if run_id == 99 else {"jobs": []}
+                    ),
+                )
+                self.assertEqual(predecessor.run_id, 98)
+
+    def test_mutation_capable_publisher_outcomes_are_never_skipped(self):
+        for publisher_conclusion in ("success", "failure", "cancelled", "timed_out"):
+            with self.subTest(publisher_conclusion=publisher_conclusion):
+                jobs = _post_job_payload(
+                    run_conclusion="failure",
+                    publisher_conclusion=publisher_conclusion,
+                )
+                predecessor = self._resolve(
+                    [
+                        _workflow_run(99, 99, conclusion="failure"),
+                        _workflow_run(98, 98),
+                    ],
+                    jobs_loader=lambda run_id, payload=jobs: (
+                        payload if run_id == 99 else {"jobs": []}
+                    ),
+                )
+                self.assertEqual(predecessor.run_id, 99)
+
+    def test_missing_or_ambiguous_job_step_metadata_fails_closed(self):
+        payloads = {
+            "missing_post_job": {"jobs": []},
+            "missing_steps": {
+                "jobs": [
+                    {
+                        "name": "post",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "started_at": "2026-08-24T09:10:08Z",
+                    }
+                ]
+            },
+            "missing_publisher_step": _post_job_payload(run_conclusion="failure", steps=[]),
+            "duplicate_publisher_step": _post_job_payload(
+                run_conclusion="failure",
+                steps=[
+                    {
+                        "name": "Run Publisher",
+                        "status": "completed",
+                        "conclusion": "skipped",
+                    },
+                    {
+                        "name": "Run Publisher",
+                        "status": "completed",
+                        "conclusion": "skipped",
+                    },
+                ],
+            ),
+            "incomplete_publisher_step": _post_job_payload(
+                run_conclusion="failure",
+                steps=[
+                    {
+                        "name": "Run Publisher",
+                        "status": "",
+                        "conclusion": "",
+                    }
+                ],
+            ),
         }
+        for case, jobs in payloads.items():
+            with self.subTest(case=case), self.assertRaises(continuity.StateContinuityError):
+                self._resolve(
+                    [
+                        _workflow_run(99, 99, conclusion="failure"),
+                        _workflow_run(98, 98),
+                    ],
+                    jobs_loader=lambda run_id, payload=jobs: (
+                        payload if run_id == 99 else {"jobs": []}
+                    ),
+                )
+
+    def test_cancelled_started_run_with_publisher_cancelled_is_not_skipped(self):
+        jobs = _post_job_payload(
+            run_conclusion="cancelled",
+            publisher_conclusion="cancelled",
+        )
         predecessor = self._resolve(
             [_workflow_run(99, 99, conclusion="cancelled"), _workflow_run(98, 98)],
-            jobs_loader=lambda _run_id: jobs,
+            jobs_loader=lambda run_id: jobs if run_id == 99 else {"jobs": []},
         )
         self.assertEqual(predecessor.run_id, 99)
 
@@ -567,24 +767,6 @@ class ProductionStatePredecessorTest(unittest.TestCase):
                 [_workflow_run(99, 99, conclusion="cancelled"), _workflow_run(98, 98)],
                 jobs_loader=lambda _run_id: {"jobs": []},
             )
-
-    def test_failed_started_run_cannot_be_silently_skipped(self):
-        jobs_loader = Mock(side_effect=AssertionError("jobs should not be queried"))
-        predecessor = self._resolve(
-            [_workflow_run(99, 99, conclusion="failure"), _workflow_run(98, 98)],
-            jobs_loader=jobs_loader,
-        )
-        self.assertEqual(predecessor.run_id, 99)
-        jobs_loader.assert_not_called()
-
-    def test_timed_out_started_run_cannot_be_silently_skipped(self):
-        jobs_loader = Mock(side_effect=AssertionError("jobs should not be queried"))
-        predecessor = self._resolve(
-            [_workflow_run(99, 99, conclusion="timed_out"), _workflow_run(98, 98)],
-            jobs_loader=jobs_loader,
-        )
-        self.assertEqual(predecessor.run_id, 99)
-        jobs_loader.assert_not_called()
 
     def test_duplicate_prod_run_number_is_ambiguous(self):
         with self.assertRaisesRegex(

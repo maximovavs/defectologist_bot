@@ -30,6 +30,7 @@ VALID_OUTPUT = (
     "Продолжайте короткий обмен без требования обязательного ответа и без проверки результата дома."
 )
 INVALID_AGE_OUTPUT = VALID_OUTPUT.replace("2–3 года", "4–5 лет")
+BLANK_AGE_OUTPUT = VALID_OUTPUT.replace("👶 Возраст: 2–3 года", "👶 Возраст:")
 
 MYTH_EVIDENCE = (
     "A common myth is that bilingualism causes language delay. "
@@ -358,6 +359,209 @@ class ParentAgeEvidenceRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, "")
         self.assertFalse(ok)
         self.assertEqual(note, "invalid_groq_retry:myth_topic_mismatch")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+
+class ParentStructuralFieldCompletenessTest(unittest.TestCase):
+    def test_blank_age_value_is_rejected(self):
+        for text in ("👶 Возраст:", "👶 Возраст:   "):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    llm._validate_parent_structural_field_completeness(text, "tip_of_day"),
+                    (False, "parent_age_field_empty"),
+                )
+
+    def test_nonempty_age_value_passes_structural_gate(self):
+        self.assertEqual(
+            llm._validate_parent_structural_field_completeness(
+                "👶 Возраст: 2–3 года",
+                "tip_of_day",
+            ),
+            (True, "ok"),
+        )
+
+    def test_required_parent_formats_reject_missing_and_blank_age(self):
+        required_formats = (
+            "tip_of_day",
+            "exercise_steps",
+            "games_vocab",
+            "bilingual_parents",
+            "question_week",
+            "age_norms",
+        )
+        for rubric_format in required_formats:
+            with self.subTest(rubric_format=rubric_format, state="missing"):
+                self.assertEqual(
+                    llm._validate_parent_structural_field_completeness(
+                        "Заголовок\nПолезный текст.",
+                        rubric_format,
+                    ),
+                    (False, "parent_age_field_missing"),
+                )
+            with self.subTest(rubric_format=rubric_format, state="blank"):
+                self.assertEqual(
+                    llm._validate_parent_structural_field_completeness(
+                        "Заголовок\n👶 Возраст:   \nПолезный текст.",
+                        rubric_format,
+                    ),
+                    (False, "parent_age_field_empty"),
+                )
+
+    def test_monday_blank_and_missing_age_fail_before_legacy_prefix_check(self):
+        evidence = _long_evidence("2-3 years")
+        for body, expected in (
+            ("Один домашний шаг\n👶 Возраст:\n" + ("Спокойная совместная игра. " * 15), "parent_age_field_empty"),
+            ("Один домашний шаг\n" + ("Спокойная совместная игра. " * 15), "parent_age_field_missing"),
+        ):
+            with self.subTest(expected=expected):
+                ok, reason = _validate_output(
+                    body,
+                    rubric_format="tip_of_day",
+                    audience="parents",
+                    evidence_text=evidence,
+                    day_key="MO",
+                )
+                self.assertFalse(ok)
+                self.assertEqual(reason, expected)
+
+    def test_sunday_blank_and_missing_age_fail_closed(self):
+        evidence = _long_evidence("2-3 years")
+        for body, expected in (
+            ("Возрастной ориентир\n👶 Возраст:\nОриентиры: ребёнок участвует в игре.", "parent_age_field_empty"),
+            ("Возрастной ориентир\nОриентиры: ребёнок участвует в игре.", "parent_age_field_missing"),
+        ):
+            with self.subTest(expected=expected):
+                ok, reason = _validate_output(
+                    body,
+                    rubric_format="age_norms",
+                    audience="parents",
+                    evidence_text=evidence,
+                    day_key="SU",
+                )
+                self.assertFalse(ok)
+                self.assertEqual(reason, expected)
+
+    def test_optional_age_formats_allow_absence_but_reject_blank(self):
+        for rubric_format in ("myth_fact", "thematic_parents"):
+            with self.subTest(rubric_format=rubric_format, state="absent"):
+                self.assertEqual(
+                    llm._validate_parent_structural_field_completeness(
+                        "Заголовок\nПолезный текст.",
+                        rubric_format,
+                    ),
+                    (True, "ok"),
+                )
+            with self.subTest(rubric_format=rubric_format, state="blank"):
+                self.assertEqual(
+                    llm._validate_parent_structural_field_completeness(
+                        "Заголовок\n👶 Возраст:   \nПолезный текст.",
+                        rubric_format,
+                    ),
+                    (False, "parent_age_field_empty"),
+                )
+
+    def test_myth_fact_blank_age_is_rejected(self):
+        output = REPAIRED_MYTH_WITH_UNSUPPORTED_AGE.replace("👶 Возраст: 3–6 лет", "👶 Возраст:")
+        ok, reason = _validate_output(
+            output,
+            rubric_format="myth_fact",
+            audience="parents",
+            evidence_text=MYTH_EVIDENCE,
+            topic_id="bilingualism",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "parent_age_field_empty")
+
+    def test_question_week_blank_question_is_rejected(self):
+        self.assertEqual(
+            llm._validate_parent_structural_field_completeness(
+                "Заголовок\n👶 Возраст: 2–3 года\n❓ Вопрос недели:   ",
+                "question_week",
+            ),
+            (False, "question_week_empty_question"),
+        )
+
+    def test_age_norms_blank_orientirs_is_rejected(self):
+        self.assertEqual(
+            llm._validate_parent_structural_field_completeness(
+                "Возрастной ориентир\n👶 Возраст: 2–3 года\nОриентиры:   ",
+                "age_norms",
+            ),
+            (False, "sunday_empty_orientirs"),
+        )
+
+
+class ParentStructuralFieldRepairTest(unittest.IsolatedAsyncioTestCase):
+    async def _generate_exercise(self, *, provider, groq_key="", gemini_key=""):
+        return await llm.generate_post_plain_from_evidence_async(
+            rubric_title="Играем и говорим",
+            rubric_format="exercise_steps",
+            audience="parents",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=_long_evidence("2-3 years"),
+            disclaimer="",
+            hashtags=[],
+            provider=provider,
+            groq_key=groq_key,
+            gemini_key=gemini_key,
+            max_chars=1200,
+            day_key="TU",
+        )
+
+    async def test_blank_age_gets_exactly_one_gemini_repair_then_succeeds(self):
+        responses = [BLANK_AGE_OUTPUT, VALID_OUTPUT]
+
+        async def fake_gemini(prompt, api_key):
+            return responses.pop(0)
+
+        with patch.object(llm, "gemini_generate", side_effect=fake_gemini) as gemini_mock:
+            out, ok, note = await self._generate_exercise(
+                provider="gemini",
+                gemini_key="gemini-key",
+            )
+
+        self.assertTrue(ok, note)
+        self.assertIn("👶 Возраст: 2–3 года", out)
+        self.assertEqual(gemini_mock.call_count, 2)
+        self.assertTrue(note.startswith("ok:gemini_retry:"), note)
+
+    async def test_blank_age_after_gemini_repair_fails_closed(self):
+        async def fake_gemini(prompt, api_key):
+            return BLANK_AGE_OUTPUT
+
+        with patch.object(llm, "gemini_generate", side_effect=fake_gemini) as gemini_mock:
+            out, ok, note = await self._generate_exercise(
+                provider="gemini",
+                gemini_key="gemini-key",
+            )
+
+        self.assertEqual(out, "")
+        self.assertFalse(ok)
+        self.assertIn("parent_age_field_empty", note)
+        self.assertEqual(gemini_mock.call_count, 2)
+
+    async def test_blank_age_failed_groq_repair_does_not_fall_back_to_gemini(self):
+        async def fake_groq(prompt, api_key):
+            return BLANK_AGE_OUTPUT
+
+        gemini_mock = AsyncMock(return_value=VALID_OUTPUT)
+        with patch.object(llm, "groq_chat", side_effect=fake_groq) as groq_mock, patch.object(
+            llm,
+            "gemini_generate",
+            gemini_mock,
+        ):
+            out, ok, note = await self._generate_exercise(
+                provider="auto",
+                groq_key="groq-key",
+                gemini_key="gemini-key",
+            )
+
+        self.assertEqual(out, "")
+        self.assertFalse(ok)
+        self.assertIn("parent_age_field_empty", note)
         self.assertEqual(groq_mock.call_count, 2)
         gemini_mock.assert_not_awaited()
 

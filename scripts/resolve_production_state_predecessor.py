@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Mapping, Sequence
+from typing import Callable, Dict, List, Mapping, Sequence, Tuple
 
 WORKFLOW_FILE = "post.yml"
 KNOWN_CONCLUSIONS = frozenset(
@@ -25,7 +25,8 @@ KNOWN_CONCLUSIONS = frozenset(
         "startup_failure",
     }
 )
-SKIPPABLE_WITH_PROOF = frozenset({"cancelled", "skipped"})
+PRE_PUBLISHER_SKIPPABLE = frozenset({"failure", "cancelled", "timed_out", "skipped"})
+JOB_NOT_STARTED_CONCLUSIONS = frozenset({"cancelled", "skipped"})
 PROD_MARKER_RE = re.compile(r"(?:^|[•\s])channel=prod(?:$|[•\s])")
 TEST_MARKER_RE = re.compile(r"(?:^|[•\s])channel=test(?:$|[•\s])")
 
@@ -67,20 +68,43 @@ def _lineage_from_title(display_title: str) -> str:
     return "prod" if prod else "test"
 
 
-def _validate_prior_run(
+def _ordered_prior_runs(
+    runs: Sequence[Mapping[str, object]],
+    *,
+    current_run_number: int,
+    current_run_id: int,
+) -> List[Tuple[int, int, Mapping[str, object]]]:
+    """Return minimally parsed prior runs in newest-to-oldest order.
+
+    Only run identity/order metadata is read here. All other metadata is deferred
+    until the run is actually reached while walking toward the canonical
+    predecessor. This prevents irrelevant ancient legacy metadata below an
+    already-proven predecessor from blocking the current run.
+    """
+
+    ordered: List[Tuple[int, int, Mapping[str, object]]] = []
+    for raw in runs:
+        if not isinstance(raw, Mapping):
+            raise StateContinuityError("ambiguous_run_metadata:run_object")
+        run_id = _positive_int(raw.get("id"), "id")
+        run_number = _positive_int(raw.get("run_number"), "run_number")
+        if run_id == current_run_id:
+            continue
+        if run_number >= current_run_number:
+            continue
+        ordered.append((run_number, run_id, raw))
+
+    ordered.sort(key=lambda item: item[0], reverse=True)
+    return ordered
+
+
+def _validate_ordered_prod_run(
     run: Mapping[str, object],
     *,
     ref_name: str,
-    current_run_number: int,
-    current_run_id: int,
+    run_id: int,
+    run_number: int,
 ) -> Dict[str, object] | None:
-    run_id = _positive_int(run.get("id"), "id")
-    run_number = _positive_int(run.get("run_number"), "run_number")
-    if run_id == current_run_id:
-        return None
-    if run_number >= current_run_number:
-        return None
-
     head_branch = _required_text(run, "head_branch")
     if head_branch != ref_name:
         return None
@@ -118,7 +142,16 @@ def _validate_prior_run(
     }
 
 
-def _post_job_proven_not_started(jobs_payload: Mapping[str, object], run_id: int) -> bool:
+def _post_job_proves_publisher_not_executed(
+    jobs_payload: Mapping[str, object], run_id: int
+) -> bool:
+    """Prove the mutation-capable Publisher stage never executed.
+
+    The proof is deliberately narrow: either the whole `post` job was
+    cancelled/skipped before it started, or the unique `Run Publisher` step is
+    explicitly completed/skipped. Missing or ambiguous metadata fails closed.
+    """
+
     jobs = jobs_payload.get("jobs")
     if not isinstance(jobs, list):
         raise StateContinuityError(f"ambiguous_job_metadata:run_id={run_id}")
@@ -132,15 +165,44 @@ def _post_job_proven_not_started(jobs_payload: Mapping[str, object], run_id: int
         raise StateContinuityError(f"ambiguous_post_job_identity:run_id={run_id}")
 
     job = matches[0]
-    conclusion = str(job.get("conclusion") or "").strip()
     status = str(job.get("status") or "").strip()
+    conclusion = str(job.get("conclusion") or "").strip()
     started_at = job.get("started_at")
 
-    return (
+    if (
         status == "completed"
-        and conclusion in SKIPPABLE_WITH_PROOF
+        and conclusion in JOB_NOT_STARTED_CONCLUSIONS
         and started_at is None
-    )
+    ):
+        return True
+
+    if status != "completed":
+        raise StateContinuityError(f"ambiguous_post_job_status:run_id={run_id}")
+
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        raise StateContinuityError(f"ambiguous_post_steps:run_id={run_id}")
+
+    publisher_steps = [
+        step
+        for step in steps
+        if isinstance(step, Mapping)
+        and str(step.get("name") or "").strip() == "Run Publisher"
+    ]
+    if len(publisher_steps) != 1:
+        raise StateContinuityError(
+            f"ambiguous_publisher_step_identity:run_id={run_id}"
+        )
+
+    publisher_step = publisher_steps[0]
+    publisher_status = str(publisher_step.get("status") or "").strip()
+    publisher_conclusion = str(publisher_step.get("conclusion") or "").strip()
+    if not publisher_status or not publisher_conclusion:
+        raise StateContinuityError(
+            f"ambiguous_publisher_step_metadata:run_id={run_id}"
+        )
+
+    return publisher_status == "completed" and publisher_conclusion == "skipped"
 
 
 def resolve_predecessor(
@@ -162,34 +224,45 @@ def resolve_predecessor(
     if not ref_name:
         raise StateContinuityError("current_ref_missing")
 
-    candidates: List[Dict[str, object]] = []
-    for raw in runs:
-        if not isinstance(raw, Mapping):
-            raise StateContinuityError("ambiguous_run_metadata:run_object")
-        validated = _validate_prior_run(
+    ordered = _ordered_prior_runs(
+        runs,
+        current_run_number=current_run_number,
+        current_run_id=current_run_id,
+    )
+    if not ordered:
+        raise StateContinuityError("production_predecessor_missing")
+
+    index = 0
+    while index < len(ordered):
+        run_number = ordered[index][0]
+        same_number: List[Tuple[int, int, Mapping[str, object]]] = []
+        while index < len(ordered) and ordered[index][0] == run_number:
+            same_number.append(ordered[index])
+            index += 1
+
+        # Ambiguity at or above the would-be canonical predecessor remains
+        # fail-closed. Ancient ambiguity below a selected predecessor is never
+        # reached because we return immediately once continuity is proven.
+        if len(same_number) != 1:
+            raise StateContinuityError("ambiguous_production_predecessor_order")
+
+        _, run_id, raw = same_number[0]
+        candidate = _validate_ordered_prod_run(
             raw,
             ref_name=ref_name,
-            current_run_number=current_run_number,
-            current_run_id=current_run_id,
+            run_id=run_id,
+            run_number=run_number,
         )
-        if validated is not None:
-            candidates.append(validated)
+        if candidate is None:
+            continue
 
-    candidates.sort(key=lambda item: int(item["run_number"]), reverse=True)
-    if not candidates:
-        raise StateContinuityError("production_predecessor_missing")
-    run_numbers = [int(item["run_number"]) for item in candidates]
-    if len(run_numbers) != len(set(run_numbers)):
-        raise StateContinuityError("ambiguous_production_predecessor_order")
-
-    for candidate in candidates:
-        run_id = int(candidate["id"])
         conclusion = str(candidate["conclusion"])
-        if conclusion in SKIPPABLE_WITH_PROOF:
+        if conclusion in PRE_PUBLISHER_SKIPPABLE:
             jobs_payload = jobs_loader(run_id)
-            if _post_job_proven_not_started(jobs_payload, run_id):
+            if _post_job_proves_publisher_not_executed(jobs_payload, run_id):
                 continue
-        return Predecessor(run_id=run_id, run_number=int(candidate["run_number"]))
+
+        return Predecessor(run_id=run_id, run_number=run_number)
 
     raise StateContinuityError("production_predecessor_missing_after_safe_skips")
 

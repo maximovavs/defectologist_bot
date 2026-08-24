@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+from scripts import resolve_production_state_predecessor as continuity
 from src.publisher import run_publisher as publisher
 from src.services import publication_store as store_module
 from src.services.publication_store import (
@@ -437,23 +438,252 @@ class DurableDeliveryStateTest(unittest.TestCase):
         self.assertFalse(store.has_unresolved_delivery_attempts())
 
 
-class ProductionWorkflowDeliveryStateTest(unittest.TestCase):
-    def test_prod_cache_restore_is_verified_before_publisher(self):
-        workflow = (publisher.ROOT / ".github" / "workflows" / "post.yml").read_text(
-            encoding="utf-8"
+def _workflow_run(
+    run_id: int,
+    run_number: int,
+    *,
+    channel: str = "prod",
+    conclusion: str = "success",
+    status: str = "completed",
+    run_attempt: int = 1,
+    branch: str = "main",
+    event: str = "schedule",
+    title: str = "",
+):
+    return {
+        "id": run_id,
+        "run_number": run_number,
+        "run_attempt": run_attempt,
+        "head_branch": branch,
+        "status": status,
+        "conclusion": conclusion,
+        "display_title": title
+        or f"Logoped Bot • {event} • channel={channel} • provider=auto",
+        "event": event,
+    }
+
+
+class ProductionStatePredecessorTest(unittest.TestCase):
+    def _resolve(self, runs, *, current_attempt=1, jobs_loader=None):
+        return continuity.resolve_predecessor(
+            runs,
+            current_run_id=100,
+            current_run_number=100,
+            current_run_attempt=current_attempt,
+            ref_name="main",
+            jobs_loader=jobs_loader or (lambda _run_id: {"jobs": []}),
         )
 
-        restore_at = workflow.index("- name: Restore .state cache")
-        verify_at = workflow.index("- name: Verify production state restore")
-        publisher_at = workflow.index("- name: Run Publisher")
+    def test_exact_predecessor_is_selected(self):
+        predecessor = self._resolve([_workflow_run(99, 99), _workflow_run(98, 98)])
+        self.assertEqual((predecessor.run_id, predecessor.run_number), (99, 99))
 
+    def test_test_channel_run_is_not_prod_predecessor(self):
+        predecessor = self._resolve(
+            [_workflow_run(99, 99, channel="test"), _workflow_run(98, 98)]
+        )
+        self.assertEqual(predecessor.run_id, 98)
+
+    def test_current_run_is_excluded_before_incomplete_current_metadata_matters(self):
+        predecessor = self._resolve(
+            [{"id": 100, "run_number": 100}, _workflow_run(99, 99)]
+        )
+        self.assertEqual(predecessor.run_id, 99)
+
+    def test_newer_run_is_never_accepted_as_predecessor(self):
+        predecessor = self._resolve(
+            [{"id": 101, "run_number": 101}, _workflow_run(99, 99)]
+        )
+        self.assertEqual(predecessor.run_id, 99)
+
+    def test_missing_predecessor_fails_closed(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "production_predecessor_missing",
+        ):
+            self._resolve([_workflow_run(99, 99, channel="test")])
+
+    def test_ambiguous_lineage_metadata_fails_closed(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "ambiguous_run_metadata:channel",
+        ):
+            self._resolve([_workflow_run(99, 99, title="Logoped Bot without channel")])
+
+    def test_current_production_rerun_attempt_fails_closed(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "production_rerun_not_safe",
+        ):
+            self._resolve([_workflow_run(99, 99)], current_attempt=2)
+
+    def test_predecessor_rerun_attempt_fails_closed(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "production_predecessor_rerun_not_safe",
+        ):
+            self._resolve([_workflow_run(99, 99, run_attempt=2)])
+
+    def test_cancelled_before_start_is_skipped_only_with_job_proof(self):
+        jobs = {
+            "jobs": [
+                {
+                    "name": "post",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "started_at": None,
+                }
+            ]
+        }
+        predecessor = self._resolve(
+            [_workflow_run(99, 99, conclusion="cancelled"), _workflow_run(98, 98)],
+            jobs_loader=lambda run_id: jobs if run_id == 99 else {"jobs": []},
+        )
+        self.assertEqual(predecessor.run_id, 98)
+
+    def test_cancelled_started_run_is_not_skipped(self):
+        jobs = {
+            "jobs": [
+                {
+                    "name": "post",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "started_at": "2026-08-24T00:00:00Z",
+                }
+            ]
+        }
+        predecessor = self._resolve(
+            [_workflow_run(99, 99, conclusion="cancelled"), _workflow_run(98, 98)],
+            jobs_loader=lambda _run_id: jobs,
+        )
+        self.assertEqual(predecessor.run_id, 99)
+
+    def test_cancelled_run_without_exact_post_job_proof_fails_closed(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "ambiguous_post_job_identity",
+        ):
+            self._resolve(
+                [_workflow_run(99, 99, conclusion="cancelled"), _workflow_run(98, 98)],
+                jobs_loader=lambda _run_id: {"jobs": []},
+            )
+
+    def test_failed_started_run_cannot_be_silently_skipped(self):
+        jobs_loader = Mock(side_effect=AssertionError("jobs should not be queried"))
+        predecessor = self._resolve(
+            [_workflow_run(99, 99, conclusion="failure"), _workflow_run(98, 98)],
+            jobs_loader=jobs_loader,
+        )
+        self.assertEqual(predecessor.run_id, 99)
+        jobs_loader.assert_not_called()
+
+    def test_timed_out_started_run_cannot_be_silently_skipped(self):
+        jobs_loader = Mock(side_effect=AssertionError("jobs should not be queried"))
+        predecessor = self._resolve(
+            [_workflow_run(99, 99, conclusion="timed_out"), _workflow_run(98, 98)],
+            jobs_loader=jobs_loader,
+        )
+        self.assertEqual(predecessor.run_id, 99)
+        jobs_loader.assert_not_called()
+
+    def test_duplicate_prod_run_number_is_ambiguous(self):
+        with self.assertRaisesRegex(
+            continuity.StateContinuityError,
+            "ambiguous_production_predecessor_order",
+        ):
+            self._resolve([_workflow_run(99, 99), _workflow_run(97, 99)])
+
+    def test_expected_cache_key_uses_exact_predecessor_run_id(self):
+        self.assertEqual(
+            continuity.build_expected_cache_key(
+                cache_version="v12",
+                ref_name="main",
+                predecessor_run_id=99,
+            ),
+            "logoped-state-v12-prod-main-99",
+        )
+
+    def test_pure_resolver_tests_do_not_make_network_calls(self):
+        with patch.object(continuity.urllib.request, "urlopen") as urlopen:
+            predecessor = self._resolve([_workflow_run(99, 99)])
+        self.assertEqual(predecessor.run_id, 99)
+        urlopen.assert_not_called()
+
+
+class ProductionWorkflowDeliveryStateTest(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (
+            publisher.ROOT / ".github" / "workflows" / "post.yml"
+        ).read_text(encoding="utf-8")
+
+    def test_predecessor_resolution_and_exact_prod_restore_precede_publisher(self):
+        resolver_at = self.workflow.index("- name: Resolve production state predecessor")
+        restore_at = self.workflow.index("- name: Restore production .state cache")
+        verify_at = self.workflow.index("- name: Verify production state continuity")
+        publisher_at = self.workflow.index("- name: Run Publisher")
+        self.assertLess(resolver_at, restore_at)
         self.assertLess(restore_at, verify_at)
         self.assertLess(verify_at, publisher_at)
-        self.assertIn("id: restore-state", workflow)
-        self.assertIn("steps.restore-state.outputs.cache-matched-key", workflow)
-        self.assertIn(".state/publication_history.sqlite3", workflow)
-        self.assertIn('PRODUCTION_STATE_RESTORED=1', workflow)
-        self.assertIn("if: ${{ env.DRY_RUN != '1' && env.STATE_SCOPE == 'prod' }}", workflow)
+        self.assertIn("actions: read", self.workflow)
+
+    def test_production_restore_has_no_prefix_fallback_and_fails_on_exact_miss(self):
+        start = self.workflow.index("- name: Restore production .state cache")
+        end = self.workflow.index("- name: Restore test .state cache", start)
+        block = self.workflow[start:end]
+        self.assertIn("steps.state-predecessor.outputs.expected_cache_key", block)
+        self.assertIn("fail-on-cache-miss: true", block)
+        self.assertNotIn("restore-keys:", block)
+
+    def test_production_verification_checks_hit_key_and_history_before_markers(self):
+        start = self.workflow.index("- name: Verify production state continuity")
+        end = self.workflow.index("- name: Set up Python", start)
+        block = self.workflow[start:end]
+        self.assertIn('if [ "$CACHE_HIT" != "true" ]', block)
+        self.assertIn('if [ "$RESTORED_CACHE_KEY" != "$EXPECTED_CACHE_KEY" ]', block)
+        self.assertIn(".state/publication_history.sqlite3", block)
+        restored_at = block.index("PRODUCTION_STATE_RESTORED=1")
+        continuity_at = block.index("PROD_STATE_CONTINUITY_OK=1")
+        output_at = block.index("continuity_ok=true")
+        self.assertGreater(restored_at, block.index("production_history_missing"))
+        self.assertGreater(continuity_at, restored_at)
+        self.assertGreater(output_at, continuity_at)
+
+    def test_production_save_requires_verified_continuity_and_keeps_always_semantics(self):
+        start = self.workflow.index("- name: Save production .state cache")
+        end = self.workflow.index("- name: Save test .state cache", start)
+        block = self.workflow[start:end]
+        self.assertIn("always()", block)
+        self.assertIn("env.STATE_SCOPE == 'prod'", block)
+        self.assertIn("env.PROD_STATE_CONTINUITY_OK == '1'", block)
+        self.assertIn("steps.verify-prod-state.outputs.continuity_ok == 'true'", block)
+        self.assertIn("github.run_id", block)
+
+    def test_prod_dry_run_does_not_bypass_continuity(self):
+        resolver_start = self.workflow.index("- name: Resolve production state predecessor")
+        verify_end = self.workflow.index("- name: Set up Python", resolver_start)
+        prod_gate = self.workflow[resolver_start:verify_end]
+        self.assertIn("env.STATE_SCOPE == 'prod'", prod_gate)
+        self.assertNotIn("DRY_RUN !=", prod_gate)
+
+    def test_test_state_uses_separate_restore_and_can_keep_prefix_fallback(self):
+        start = self.workflow.index("- name: Restore test .state cache")
+        end = self.workflow.index("- name: Verify production state continuity", start)
+        block = self.workflow[start:end]
+        self.assertIn("env.STATE_SCOPE != 'prod'", block)
+        self.assertIn("restore-keys:", block)
+
+    def test_publisher_policy_ci_compiles_and_tracks_resolver_without_runtime_secrets(self):
+        policy = (
+            publisher.ROOT / ".github" / "workflows" / "publisher_policy_pr_checks.yml"
+        ).read_text(encoding="utf-8")
+        self.assertGreaterEqual(
+            policy.count("scripts/resolve_production_state_predecessor.py"),
+            2,
+        )
+        self.assertIn('TELEGRAM_BOT_TOKEN: ""', policy)
+        self.assertIn('GEMINI_API_KEY: ""', policy)
+        self.assertIn('GROQ_API_KEY: ""', policy)
+        self.assertIn('POLLINATIONS_TOKEN: ""', policy)
 
 
 if __name__ == "__main__":

@@ -188,8 +188,11 @@ class ParentModalityRoutingTest(unittest.TestCase):
         ):
             for rubric in sorted(PARENT_CONTENT_FORMATS):
                 with self.subTest(rubric=rubric):
+                    body = "Тестовый родительский текст " + ("достаточной длины " * 20)
+                    if rubric in llm.PARENT_REQUIRED_AGE_FORMATS:
+                        body = "👶 Возраст: 2 года\n" + body
                     ok, reason = _validate_output(
-                        "Тестовый родительский текст " + ("достаточной длины " * 20),
+                        body,
                         rubric_format=rubric,
                         audience="parents",
                         evidence_text=SOFT_EVIDENCE,

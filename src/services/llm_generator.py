@@ -877,6 +877,65 @@ PARENT_ORAL_SAFETY_FORMATS = {
 }
 
 PARENT_RUSSIAN_PHONEME_FORMATS = set(PARENT_ORAL_SAFETY_FORMATS)
+
+PARENT_REQUIRED_AGE_FORMATS = frozenset({
+    "tip_of_day",
+    "exercise_steps",
+    "games_vocab",
+    "bilingual_parents",
+    "question_week",
+    "age_norms",
+})
+PARENT_OPTIONAL_AGE_FORMATS = frozenset({"myth_fact", "thematic_parents"})
+PARENT_STRUCTURAL_FIELD_REASONS = frozenset({
+    "parent_age_field_missing",
+    "parent_age_field_empty",
+    "question_week_empty_question",
+    "sunday_empty_orientirs",
+})
+
+
+def _inline_structural_field_state(text: str, pattern: str) -> str:
+    match = re.search(pattern, text or "", flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return "missing"
+    return "nonempty" if (match.group("value") or "").strip() else "empty"
+
+
+def _validate_parent_structural_field_completeness(
+    text: str,
+    rubric_format: str,
+) -> Tuple[bool, str]:
+    rf = (rubric_format or "").strip().lower()
+    age_state = _inline_structural_field_state(
+        text,
+        r"^[ \t]*👶\s*Возраст\s*[:：](?P<value>[^\r\n]*)$",
+    )
+    if rf in PARENT_REQUIRED_AGE_FORMATS:
+        if age_state == "missing":
+            return False, "parent_age_field_missing"
+        if age_state == "empty":
+            return False, "parent_age_field_empty"
+    elif rf in PARENT_OPTIONAL_AGE_FORMATS and age_state == "empty":
+        return False, "parent_age_field_empty"
+
+    if rf == "question_week":
+        question_state = _inline_structural_field_state(
+            text,
+            r"^[ \t]*❓\s*Вопрос недели\s*[:：](?P<value>[^\r\n]*)$",
+        )
+        if question_state == "empty":
+            return False, "question_week_empty_question"
+
+    if rf == "age_norms":
+        orientirs_state = _inline_structural_field_state(
+            text,
+            r"^[ \t]*Ориентиры\s*[:：](?P<value>[^\r\n]*)$",
+        )
+        if orientirs_state == "empty":
+            return False, "sunday_empty_orientirs"
+
+    return True, "ok"
 PARENT_AGE_UNIT_PATTERN = (
     r"(?:мес(?:\.|яц(?:а|ев)?)?|месяц(?:а|ев)?|год(?:а)?|лет|months?|mos?\.?|years?|yrs?\.?)"
 )
@@ -2186,6 +2245,11 @@ def _validate_output(
     dk = (day_key or "").strip().upper()
     rf = (rubric_format or "").strip().lower()
     aud = (audience or "").strip().lower()
+
+    if rf in PARENT_CONTENT_FORMATS:
+        ok, reason = _validate_parent_structural_field_completeness(out, rf)
+        if not ok:
+            return False, reason
 
     if rf == "myth_fact":
         ok, reason = _validate_myth_fact_output(out, evidence_text, topic_id=topic_id)
@@ -4060,12 +4124,19 @@ async def generate_post_plain_from_evidence_async(
                 if ok2:
                     return out2, True, "ok:groq_retry"
                 groq_err = f"invalid_groq_retry:{reason2}"
-                if repaired_age_removed or reason2 in {"parent_age_not_grounded", "parent_modality_not_grounded", "parent_diagnostic_role_violation"}:
+                if (
+                    repaired_age_removed
+                    or reason2 in {"parent_age_not_grounded", "parent_modality_not_grounded", "parent_diagnostic_role_violation"}
+                    or reason2 in PARENT_STRUCTURAL_FIELD_REASONS
+                ):
                     return "", False, groq_err
             else:
                 groq_err = f"invalid_groq:{reason}"
 
-            if reason in {"parent_age_not_grounded", "parent_modality_not_grounded", "parent_diagnostic_role_violation"}:
+            if (
+                reason in {"parent_age_not_grounded", "parent_modality_not_grounded", "parent_diagnostic_role_violation"}
+                or reason in PARENT_STRUCTURAL_FIELD_REASONS
+            ):
                 return "", False, groq_err
 
             if prov == "groq":
@@ -4247,7 +4318,11 @@ import contextvars as _contextvars
 
 P2D_EXERCISE_REASON = "exercise_coherence_violation"
 P2D_PARENT_ROLE_REASON = "parent_professional_role_violation"
-P2D_FAIL_CLOSED_REASONS = frozenset({P2D_EXERCISE_REASON, P2D_PARENT_ROLE_REASON})
+P2D_FAIL_CLOSED_REASONS = frozenset({
+    P2D_EXERCISE_REASON,
+    P2D_PARENT_ROLE_REASON,
+    *PARENT_STRUCTURAL_FIELD_REASONS,
+})
 
 EXERCISE_SKILL_FAMILY_PATTERNS = {
     "sound_discrimination": (
@@ -4510,6 +4585,8 @@ def _validate_output(
         topic_id=topic_id,
     )
     if not ok:
+        if reason in PARENT_STRUCTURAL_FIELD_REASONS:
+            _p2d_record_failure(reason)
         if rf == "pro_friendly" and _pro_internal_material_contradiction(text):
             _p2d_record_failure(P2D_EXERCISE_REASON)
             return False, P2D_EXERCISE_REASON
@@ -4579,6 +4656,13 @@ def _parent_content_repair_instruction(reason: str) -> str:
         instruction = P2D_EXERCISE_COHERENCE_REPAIR_INSTRUCTION
     elif reason == P2D_PARENT_ROLE_REASON:
         instruction = P2D_PARENT_PROFESSIONAL_ROLE_REPAIR_INSTRUCTION
+    elif reason in PARENT_STRUCTURAL_FIELD_REASONS:
+        instruction = (
+            "Исправь только пустое или отсутствующее обязательное структурное поле. "
+            "Для 👶 Возраст: используй только возраст, прямо поддержанный EVIDENCE; не угадывай и не расширяй диапазон. "
+            "Для ❓ Вопрос недели: и Ориентиры: верни непустое значение, основанное только на EVIDENCE. "
+            "Не добавляй новых фактов, диагнозов, механизмов, материалов или действий."
+        )
     else:
         return _P2D_PARENT_CONTENT_REPAIR_INSTRUCTION_BASE(reason)
     previous = _P2D_LAST_RAW_OUTPUT.get().strip()

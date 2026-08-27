@@ -24,6 +24,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -716,6 +717,122 @@ def _build_posted_zero_alert_plain(
         parts.extend(samples[:10])
 
     return "\n".join(parts)
+
+
+def _production_slots_already_fulfilled(
+    *,
+    db_path: Path,
+    attempted_rubrics: Sequence[str],
+    now: datetime,
+    state_scope: str,
+    target_channel: str,
+    dry_run: bool,
+) -> bool:
+    if dry_run or state_scope != "prod" or target_channel != "prod":
+        return False
+    if db_path.name != "publication_history.sqlite3" or db_path.parent.name != ".state":
+        return False
+    if now.tzinfo is None or now.utcoffset() is None or not db_path.is_file():
+        return False
+
+    required_rubrics = {
+        (rubric_id or "").strip().lower()
+        for rubric_id in attempted_rubrics
+        if (rubric_id or "").strip()
+    }
+    if not required_rubrics:
+        return False
+
+    placeholders = ", ".join("?" for _ in required_rubrics)
+    sql = (
+        "SELECT rubric_id, posted_at FROM publications "
+        f"WHERE lower(trim(rubric_id)) IN ({placeholders})"
+    )
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            rows = conn.execute(sql, sorted(required_rubrics)).fetchall()
+    except Exception:
+        return False
+
+    fulfilled_rubrics: set[str] = set()
+    for rubric_id, posted_at in rows:
+        rubric = (rubric_id or "").strip().lower()
+        try:
+            posted = datetime.fromisoformat((posted_at or "").strip())
+            if posted.tzinfo is None or posted.utcoffset() is None:
+                continue
+            if posted.astimezone(now.tzinfo).date() == now.date():
+                fulfilled_rubrics.add(rubric)
+        except (TypeError, ValueError, OverflowError):
+            continue
+
+    return required_rubrics.issubset(fulfilled_rubrics)
+
+
+def _send_posted_zero_alert_if_needed(
+    *,
+    db_path: Path,
+    now: datetime,
+    day: str,
+    week_key: str,
+    audience: str,
+    provider: str,
+    soft_skip_reasons: Dict[str, int],
+    hard_skip_reasons: Dict[str, int],
+    samples: List[str],
+    state_scope: str,
+    attempted_rubrics: List[str],
+    topic_preference: str,
+    stage_skip_reasons: Optional[Dict[str, Dict[str, int]]] = None,
+) -> bool:
+    if _production_slots_already_fulfilled(
+        db_path=db_path,
+        attempted_rubrics=attempted_rubrics,
+        now=now,
+        state_scope=state_scope,
+        target_channel=TARGET_CHANNEL,
+        dry_run=DRY_RUN,
+    ):
+        rubrics = ",".join(
+            sorted({rubric.strip().lower() for rubric in attempted_rubrics if rubric.strip()})
+        )
+        print(
+            "[INFO] posted_zero_alert_suppressed "
+            "reason=production_slot_already_fulfilled "
+            f"date={now.date()} rubrics={rubrics}",
+            flush=True,
+        )
+        return False
+
+    if not TELEGRAM_DRAFTS_CHAT_ID:
+        print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.", flush=True)
+        return False
+
+    try:
+        send_plain_message(
+            TELEGRAM_DRAFTS_CHAT_ID,
+            _build_posted_zero_alert_plain(
+                now=now,
+                day=day,
+                week_key=week_key,
+                audience=audience,
+                provider=provider,
+                soft_skip_reasons=soft_skip_reasons,
+                hard_skip_reasons=hard_skip_reasons,
+                samples=samples,
+                state_scope=state_scope,
+                db_name=db_path.name,
+                attempted_rubrics=attempted_rubrics,
+                topic_preference=topic_preference,
+                stage_skip_reasons=stage_skip_reasons,
+            ),
+        )
+    except Exception as e:
+        print(f"[WARN] failed_to_send_posted_zero_alert err={e}", flush=True)
+        return False
+    return True
 
 
 def _strip_html_tags_for_telegram(text: str) -> str:
@@ -3106,30 +3223,21 @@ async def amain() -> None:
             break
 
     if posted == 0 and not DRY_RUN:
-        if TELEGRAM_DRAFTS_CHAT_ID:
-            try:
-                send_plain_message(
-                    TELEGRAM_DRAFTS_CHAT_ID,
-                    _build_posted_zero_alert_plain(
-                        now=now,
-                        day=day,
-                        week_key=week_key,
-                        audience=AUDIENCE,
-                        provider=PROVIDER,
-                        soft_skip_reasons=soft_skip_reasons,
-                        hard_skip_reasons=hard_skip_reasons,
-                        samples=samples,
-                        state_scope=state_scope,
-                        db_name=db_path.name,
-                        attempted_rubrics=attempted_rubrics,
-                        topic_preference=POST_TOPIC_ID,
-                        stage_skip_reasons=skip_stage_reasons,
-                    ),
-                )
-            except Exception as e:
-                print(f"[WARN] failed_to_send_posted_zero_alert err={e}", flush=True)
-        else:
-            print("[WARN] Posted:0 but TELEGRAM_DRAFTS_CHAT_ID not set; no alert sent.", flush=True)
+        _send_posted_zero_alert_if_needed(
+            db_path=db_path,
+            now=now,
+            day=day,
+            week_key=week_key,
+            audience=AUDIENCE,
+            provider=PROVIDER,
+            soft_skip_reasons=soft_skip_reasons,
+            hard_skip_reasons=hard_skip_reasons,
+            samples=samples,
+            state_scope=state_scope,
+            attempted_rubrics=attempted_rubrics,
+            topic_preference=POST_TOPIC_ID,
+            stage_skip_reasons=skip_stage_reasons,
+        )
 
     print(
         f"Publisher done. Posted: {posted}. Week: {week_key}.{' [DRY_RUN]' if DRY_RUN else ''}",

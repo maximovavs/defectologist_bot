@@ -23,6 +23,7 @@ on:
       - "tests/test_parent_modality_fidelity.py"
       - "tests/test_parent_diagnostic_role_boundary.py"
       - "tests/test_exercise_coherence_policy.py"
+      - "tests/test_parent_human_text_quality.py"
       - "tests/test_publisher_reason_attribution.py"
       - "tests/test_telegram_visual_delivery.py"
       - "tests/test_post_polls.py"
@@ -73,6 +74,7 @@ jobs:
             tests/test_parent_modality_fidelity.py \
             tests/test_parent_diagnostic_role_boundary.py \
             tests/test_exercise_coherence_policy.py \
+            tests/test_parent_human_text_quality.py \
             tests/test_publisher_reason_attribution.py \
             tests/test_telegram_visual_delivery.py \
             tests/test_post_polls.py \
@@ -120,6 +122,7 @@ jobs:
               "tests.test_parent_modality_fidelity",
               "tests.test_parent_diagnostic_role_boundary",
               "tests.test_exercise_coherence_policy",
+              "tests.test_parent_human_text_quality",
               "tests.test_publisher_reason_attribution",
               "tests.test_telegram_visual_delivery",
               "tests.test_post_polls",

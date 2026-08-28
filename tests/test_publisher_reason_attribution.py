@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import io
+import sqlite3
+import tempfile
 import unittest
-from datetime import datetime
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from src.publisher import run_publisher as publisher
@@ -289,6 +294,230 @@ class PublisherDiagnosticRenderingTest(unittest.TestCase):
         text = self._render(stages={"llm_validation": {"parent_modality_not_grounded": 1}})
         self.assertNotIn("repair failed", text)
         self.assertNotIn("API_KEY", text)
+
+
+class PublisherPostedZeroFulfilledSlotTest(unittest.TestCase):
+    NOW = datetime(2026, 8, 27, 22, 11, tzinfo=timezone(timedelta(hours=3)))
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tempdir.name) / ".state"
+        self.state_dir.mkdir()
+        self.db_path = self.state_dir / "publication_history.sqlite3"
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def _create_history(self, rows=()) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE publications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_url TEXT NOT NULL UNIQUE,
+                    posted_at TEXT NOT NULL,
+                    audience TEXT NOT NULL,
+                    rubric_id TEXT NOT NULL
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO publications (canonical_url, posted_at, audience, rubric_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def _row(
+        self,
+        rubric_id: str,
+        *,
+        posted_at: str | None = None,
+        audience: str = "parents",
+        suffix: str = "1",
+    ):
+        return (
+            f"https://example.org/{suffix}",
+            posted_at or datetime(2026, 8, 27, 17, 55, tzinfo=self.NOW.tzinfo).isoformat(),
+            audience,
+            rubric_id,
+        )
+
+    def _fulfilled(
+        self,
+        attempted_rubrics=("bilingual_corner",),
+        *,
+        state_scope="prod",
+        target_channel="prod",
+        dry_run=False,
+    ) -> bool:
+        return publisher._production_slots_already_fulfilled(
+            db_path=self.db_path,
+            attempted_rubrics=attempted_rubrics,
+            now=self.NOW,
+            state_scope=state_scope,
+            target_channel=target_channel,
+            dry_run=dry_run,
+        )
+
+    def _alert_kwargs(self):
+        return {
+            "db_path": self.db_path,
+            "now": self.NOW,
+            "day": "TH",
+            "week_key": "2026-W35",
+            "audience": "both",
+            "provider": "auto",
+            "soft_skip_reasons": {"dup_url_recent": 1},
+            "hard_skip_reasons": {},
+            "samples": [],
+            "state_scope": "prod",
+            "attempted_rubrics": ["bilingual_corner"],
+            "topic_preference": "auto",
+            "stage_skip_reasons": {"url_cooldown": {"dup_url_recent": 1}},
+        }
+
+    def test_same_local_date_and_same_rubric_suppresses_alert(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        self.assertTrue(self._fulfilled())
+
+    def test_timestamp_is_compared_in_project_local_timezone(self) -> None:
+        self._create_history(
+            [
+                self._row(
+                    "bilingual_corner",
+                    posted_at="2026-08-26T22:30:00+00:00",
+                )
+            ]
+        )
+        self.assertTrue(self._fulfilled())
+
+    def test_different_local_date_preserves_alert(self) -> None:
+        self._create_history(
+            [
+                self._row(
+                    "bilingual_corner",
+                    posted_at="2026-08-26T17:55:00+03:00",
+                )
+            ]
+        )
+        self.assertFalse(self._fulfilled())
+
+    def test_different_rubric_preserves_alert(self) -> None:
+        self._create_history([self._row("myth_fact")])
+        self.assertFalse(self._fulfilled())
+
+    def test_empty_history_preserves_alert(self) -> None:
+        self._create_history()
+        self.assertFalse(self._fulfilled())
+
+    def test_missing_history_preserves_alert_without_creating_db(self) -> None:
+        self.assertFalse(self._fulfilled())
+        self.assertFalse(self.db_path.exists())
+
+    def test_malformed_history_preserves_alert(self) -> None:
+        self.db_path.write_bytes(b"not a sqlite database")
+        before = self.db_path.read_bytes()
+        self.assertFalse(self._fulfilled())
+        self.assertEqual(self.db_path.read_bytes(), before)
+
+    def test_read_failure_preserves_alert(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        with patch.object(publisher.sqlite3, "connect", side_effect=sqlite3.OperationalError("denied")):
+            self.assertFalse(self._fulfilled())
+
+    def test_naive_or_malformed_posted_at_preserves_alert(self) -> None:
+        for posted_at in ("2026-08-27T17:55:00", "not-a-timestamp"):
+            with self.subTest(posted_at=posted_at):
+                if self.db_path.exists():
+                    self.db_path.unlink()
+                self._create_history([self._row("bilingual_corner", posted_at=posted_at)])
+                self.assertFalse(self._fulfilled())
+
+    def test_dry_run_and_non_production_scopes_do_not_suppress(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        cases = (
+            {"dry_run": True},
+            {"state_scope": "test"},
+            {"target_channel": "test"},
+            {"target_channel": ""},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                self.assertFalse(self._fulfilled(**overrides))
+
+    def test_audience_both_accepts_prior_parents_record_for_same_rubric(self) -> None:
+        self._create_history([self._row("bilingual_corner", audience="parents")])
+        self.assertTrue(self._fulfilled())
+
+    def test_all_attempted_rubrics_must_be_fulfilled(self) -> None:
+        rows = [
+            self._row("bilingual_corner", suffix="bilingual"),
+            self._row("myth_fact", suffix="myth"),
+        ]
+        self._create_history(rows)
+        self.assertTrue(self._fulfilled(("bilingual_corner", "myth_fact")))
+
+    def test_partially_fulfilled_attempted_rubrics_preserve_alert(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        self.assertFalse(self._fulfilled(("bilingual_corner", "myth_fact")))
+
+    def test_empty_attempted_rubrics_preserve_alert(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        self.assertFalse(self._fulfilled(()))
+
+    def test_history_check_is_byte_for_byte_read_only(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        before = self.db_path.read_bytes()
+        self.assertTrue(self._fulfilled())
+        self.assertEqual(self.db_path.read_bytes(), before)
+
+    def test_handler_suppresses_telegram_and_logs_precise_reason(self) -> None:
+        self._create_history([self._row("bilingual_corner")])
+        output = io.StringIO()
+        with patch.multiple(
+            publisher,
+            TARGET_CHANNEL="prod",
+            DRY_RUN=False,
+            TELEGRAM_DRAFTS_CHAT_ID="diagnostic-chat",
+        ), patch.object(publisher, "send_plain_message") as send_mock, redirect_stdout(output):
+            sent = publisher._send_posted_zero_alert_if_needed(**self._alert_kwargs())
+
+        self.assertFalse(sent)
+        send_mock.assert_not_called()
+        log = output.getvalue()
+        self.assertIn("posted_zero_alert_suppressed", log)
+        self.assertIn("reason=production_slot_already_fulfilled", log)
+        self.assertIn("date=2026-08-27", log)
+        self.assertIn("rubrics=bilingual_corner", log)
+
+    def test_handler_preserves_existing_alert_body_without_matching_record(self) -> None:
+        self._create_history([self._row("myth_fact")])
+        with patch.multiple(
+            publisher,
+            TARGET_CHANNEL="prod",
+            DRY_RUN=False,
+            TELEGRAM_DRAFTS_CHAT_ID="diagnostic-chat",
+        ), patch.object(publisher, "gemini_text_provider_status", return_value="unavailable"), patch.object(
+            publisher,
+            "send_plain_message",
+        ) as send_mock:
+            sent = publisher._send_posted_zero_alert_if_needed(**self._alert_kwargs())
+
+        self.assertTrue(sent)
+        send_mock.assert_called_once()
+        chat_id, alert = send_mock.call_args.args
+        self.assertEqual(chat_id, "diagnostic-chat")
+        self.assertIn("⚠️ Publisher diagnostic: пост не опубликован (Posted: 0)", alert)
+        self.assertIn("Rubrics attempted: bilingual_corner", alert)
+        self.assertIn("• url_cooldown | dup_url_recent: 1", alert)
+
+    def test_amain_keeps_truthful_posted_zero_summary_wiring(self) -> None:
+        source = inspect.getsource(publisher.amain)
+        self.assertIn("if posted == 0 and not DRY_RUN:", source)
+        self.assertIn("_send_posted_zero_alert_if_needed(", source)
+        self.assertIn('f"Publisher done. Posted: {posted}. Week: {week_key}.', source)
 
 
 class PublisherP2EWiringTest(unittest.TestCase):

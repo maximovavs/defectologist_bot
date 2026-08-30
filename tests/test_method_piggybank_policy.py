@@ -27,6 +27,8 @@ EXPECTED_METHOD_SOURCES = {
     "fraser_parent_speech_tips",
     "parents_sensory_play_language",
     "parents_baby_language_activities",
+    "asha_public_speech_sound_disorders",
+    "healthychildren_language_development",
 }
 
 

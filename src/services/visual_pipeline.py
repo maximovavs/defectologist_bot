@@ -83,8 +83,10 @@ VISUAL_STYLE_TAIL = (
     "Warm soft editorial illustration, 2D hand-painted watercolor and gouache on subtle paper texture; warm muted pastels, "
     "soft daylight, gentle educational mood, clean composition, natural human proportions. Ordinary casual professional indoor clothing; "
     "no medical/industrial PPE, face shields, surgical masks, respirators, high-vis vests, hard hats, safety helmets or lab coats. "
-    "Simple naturally posed hands away from the camera. Not photorealistic; no 3D, anime, glossy art, text, logos, watermarks, "
-    "wide-angle distortion, stretched anatomy or clutter."
+    "Simple naturally posed hands away from the camera. Not photorealistic; no 3D, anime or glossy art. "
+    "No readable text, gibberish, pseudo-text, malformed glyph-like writing, letters, numbers, captions, subtitles, signs, "
+    "labels, posters, logos, brand marks, watermarks, UI/interface elements or browser/app/screenshot chrome. "
+    "No wide-angle distortion, stretched anatomy or clutter."
 )
 
 # Shorter positive provider-facing style. Pollinations gets this instead of the
@@ -96,7 +98,8 @@ POLLINATIONS_GENERATION_STYLE_TAIL = (
     "warm muted pastel palette, soft natural daylight, gentle friendly educational mood, clean simple composition, "
     "natural human proportions. Ordinary home or educational environment and simple casual indoor clothing. "
     "No medical or industrial context or equipment. Not photography, not photorealistic, not 3D, not anime, not glossy digital art. "
-    "No readable text, logos or watermarks."
+    "No readable text, gibberish, pseudo-text, malformed glyph-like writing, letters, numbers, captions, subtitles, signs, "
+    "labels, posters, logos, brand marks, watermarks, UI/interface elements or browser/app/screenshot chrome."
 )
 
 # Provider style used only by the single human retry when QA rejected the first
@@ -110,7 +113,9 @@ POLLINATIONS_STYLE_RETRY_TAIL = (
     "Ordinary home or educational environment and simple casual indoor clothing. "
     "No medical or industrial context or equipment. This is a painting, not photography: "
     "not photorealistic, no photographic lighting or depth of field, not realistic 3D, not glossy CGI, "
-    "not glossy digital rendering, not anime. No readable text, logos or watermarks."
+    "not glossy digital rendering, not anime. No readable text, gibberish, pseudo-text, malformed glyph-like writing, "
+    "letters, numbers, captions, subtitles, signs, labels, posters, logos, brand marks, watermarks, UI/interface elements "
+    "or browser/app/screenshot chrome."
 )
 
 # Compiled role rules are clipped to this length; retry clarifiers must fit
@@ -975,6 +980,12 @@ VISUAL_QA_HARD_REASONS = frozenset(
         "wrong_character_roles",
         "character_counts_unknown",
         "character_roles_unknown",
+        "human_text_detected",
+        "human_text_unknown",
+        "human_ui_artifact_detected",
+        "human_ui_artifact_unknown",
+        "style_mismatch",
+        "style_match_unknown",
         "deformed_hands",
         "extra_limbs",
         "missing_limbs",
@@ -1039,6 +1050,40 @@ def _enforce_production_human_action(result: Dict[str, object]) -> Dict[str, obj
         normalized.update({"status": "fail", "pass": False, "reason": "action_mismatch"})
     elif action_match is None and bool(normalized.get("pass", False)):
         normalized.update({"status": "fail", "pass": False, "reason": "action_match_unknown"})
+    return normalized
+
+
+def _enforce_production_human_surface_quality(result: Dict[str, object]) -> Dict[str, object]:
+    """Fail closed on production human roles, action, text, UI, and style."""
+    normalized = _enforce_production_human_character_roles(result)
+    normalized = _enforce_production_human_action(normalized)
+    if str(normalized.get("status", "")).strip().lower() == "skipped":
+        return normalized
+
+    text_detected = _coerce_bool(normalized.get("text_detected"))
+    ui_artifact_detected = _coerce_bool(normalized.get("ui_artifact_detected"))
+    style_match = _coerce_bool(normalized.get("illustration_style_match"))
+    normalized["text_detected"] = text_detected if text_detected is not None else "unknown"
+    normalized["ui_artifact_detected"] = (
+        ui_artifact_detected if ui_artifact_detected is not None else "unknown"
+    )
+    normalized["illustration_style_match"] = style_match if style_match is not None else "unknown"
+    reason = _normalize_visual_qa_reason(normalized.get("reason"))
+
+    if reason in VISUAL_QA_HARD_REASONS:
+        return normalized
+    if text_detected is True:
+        normalized.update({"status": "fail", "pass": False, "reason": "human_text_detected"})
+    elif text_detected is None and bool(normalized.get("pass", False)):
+        normalized.update({"status": "fail", "pass": False, "reason": "human_text_unknown"})
+    elif ui_artifact_detected is True:
+        normalized.update({"status": "fail", "pass": False, "reason": "human_ui_artifact_detected"})
+    elif ui_artifact_detected is None and bool(normalized.get("pass", False)):
+        normalized.update({"status": "fail", "pass": False, "reason": "human_ui_artifact_unknown"})
+    elif style_match is False:
+        normalized.update({"status": "fail", "pass": False, "reason": "style_mismatch"})
+    elif style_match is None and bool(normalized.get("pass", False)):
+        normalized.update({"status": "fail", "pass": False, "reason": "style_match_unknown"})
     return normalized
 
 
@@ -1301,6 +1346,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
             "child_count": "unknown",
             "ppe_detected": "unknown",
             "text_detected": "unknown",
+            "ui_artifact_detected": "unknown",
+            "illustration_style_match": "unknown",
         }
     try:
         parsed = json.loads(match.group(0))
@@ -1314,6 +1361,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
             "child_count": "unknown",
             "ppe_detected": "unknown",
             "text_detected": "unknown",
+            "ui_artifact_detected": "unknown",
+            "illustration_style_match": "unknown",
         }
     if not isinstance(parsed, dict) or "pass" not in parsed:
         return {
@@ -1325,6 +1374,8 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
             "child_count": "unknown",
             "ppe_detected": "unknown",
             "text_detected": "unknown",
+            "ui_artifact_detected": "unknown",
+            "illustration_style_match": "unknown",
         }
     passed = parsed.get("pass")
     if isinstance(passed, str):
@@ -1342,6 +1393,7 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         child_count = "unknown"
     ppe_detected = _coerce_bool(parsed.get("ppe_detected"))
     text_detected = _coerce_bool(parsed.get("text_detected"))
+    ui_artifact_detected = _coerce_bool(parsed.get("ui_artifact_detected"))
     style_match = _coerce_bool(parsed.get("illustration_style_match"))
     role_match_present = "character_roles_match" in parsed
     role_match = _coerce_bool(parsed.get("character_roles_match")) if role_match_present else None
@@ -1358,6 +1410,9 @@ def _parse_visual_qa_response(text: str) -> Dict[str, object]:
         "child_count": child_count,
         "ppe_detected": ppe_detected if ppe_detected is not None else "unknown",
         "text_detected": text_detected if text_detected is not None else "unknown",
+        "ui_artifact_detected": (
+            ui_artifact_detected if ui_artifact_detected is not None else "unknown"
+        ),
         "illustration_style_match": style_match if style_match is not None else "unknown",
     }
     if role_match_present:
@@ -1461,6 +1516,7 @@ def evaluate_visual_quality(
     expected_prompt: str = "",
     qa_mode: str = "human",
     _allow_model_fallback: bool = True,
+    _enforce_human_surface_contract: bool = False,
 ) -> Dict[str, object]:
     """Run Gemini QA for an AI cover; missing QA credentials are non-blocking."""
     key_candidates = _runtime_visual_qa_key_candidates(gemini_api_key)
@@ -1523,7 +1579,16 @@ def evaluate_visual_quality(
             "You are a strict visual QA checker for a Telegram educational cover. "
             "Return JSON only with keys pass (boolean), reason (short string), people_count (integer or unknown), "
             "adult_count (integer or unknown), child_count (integer or unknown), ppe_detected (boolean), text_detected (boolean), "
-            "character_roles_match (boolean), and action_match (boolean). "
+            "ui_artifact_detected (boolean), illustration_style_match (boolean), character_roles_match (boolean), "
+            "and action_match (boolean). "
+            "Set text_detected=true for any readable text, gibberish or pseudo-text, malformed letters or glyphs, "
+            "pseudo-Cyrillic or pseudo-Latin, unintended letters or numbers, labels, signs, posters, captions, "
+            "subtitles, logos, brand marks, or watermarks. "
+            "Set ui_artifact_detected=true for any app or browser frame, button, menu, interface control, "
+            "screenshot-like chrome, UI badge, or other visible interface element. "
+            "Set illustration_style_match=true only for the required 2D hand-painted watercolor and gouache "
+            "editorial illustration with subtle watercolor paper texture, warm muted pastel colors, soft natural "
+            "light, a gentle educational mood, and painterly illustrated shapes. "
             "Count adults, children, and all visible people separately. Count every visible human face, head, torso, "
             "reflection, background person, and partially visible person. "
             "A floating head, disconnected torso, silhouette, duplicate, ghosted, merged, or partially formed human figure counts as a person. "
@@ -1616,6 +1681,7 @@ def evaluate_visual_quality(
                     expected_prompt=expected_prompt,
                     qa_mode=qa_mode,
                     _allow_model_fallback=False,
+                    _enforce_human_surface_contract=_enforce_human_surface_contract,
                 )
             if attempt < max_attempts:
                 next_source = key_candidates[attempt][0]
@@ -1702,6 +1768,7 @@ def evaluate_visual_quality(
                     expected_prompt=expected_prompt,
                     qa_mode=qa_mode,
                     _allow_model_fallback=False,
+                    _enforce_human_surface_contract=_enforce_human_surface_contract,
                 )
             retryable_key_failure = status_code in {401, 403, 429} or 500 <= status_code <= 599
             last_trigger = status_label
@@ -1741,8 +1808,12 @@ def evaluate_visual_quality(
         if object_only and expected_prompt and "object_topic_match" not in parsed:
             parsed["object_topic_match"] = "unknown"
         if not object_only:
-            parsed = _enforce_production_human_character_roles(parsed)
-            parsed = _enforce_production_human_action(parsed)
+            parsed = _enforce_visual_qa_hard_failures(parsed, rubric_id)
+            if _enforce_human_surface_contract:
+                parsed = _enforce_production_human_surface_quality(parsed)
+            else:
+                parsed = _enforce_production_human_character_roles(parsed)
+                parsed = _enforce_production_human_action(parsed)
         normalized = _enforce_visual_qa_hard_failures(parsed, rubric_id)
         normalized.update(_visual_qa_key_metadata(source_name, attempt, attempt > 1, last_trigger))
         print(
@@ -1774,13 +1845,15 @@ def _safe_visual_qa(
     visual_qa_api_key: str = "",
 ) -> Dict[str, object]:
     try:
-        result = qa_fn(
-            image_buffer,
-            rubric_id=rubric_id,
-            audience=audience,
-            expected_prompt=expected_prompt,
-            gemini_api_key=visual_qa_api_key,
-        )
+        qa_kwargs = {
+            "rubric_id": rubric_id,
+            "audience": audience,
+            "expected_prompt": expected_prompt,
+            "gemini_api_key": visual_qa_api_key,
+        }
+        if qa_fn is evaluate_visual_quality:
+            qa_kwargs["_enforce_human_surface_contract"] = True
+        result = qa_fn(image_buffer, **qa_kwargs)
     except Exception as exc:
         result = {
             "status": "skipped",
@@ -1828,6 +1901,8 @@ def _safe_visual_qa(
         normalized["action_match"] = result.get("action_match", "unknown")
     if "text_detected" in result:
         normalized["text_detected"] = result.get("text_detected", "unknown")
+    if "ui_artifact_detected" in result:
+        normalized["ui_artifact_detected"] = result.get("ui_artifact_detected", "unknown")
     if "illustration_style_match" in result:
         normalized["illustration_style_match"] = result.get("illustration_style_match", "unknown")
     if "object_topic_match" in result:

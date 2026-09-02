@@ -32,7 +32,7 @@ def _qa_response(status_code, payload=None, text=""):
     response = Mock(status_code=status_code)
     response.text = text
     response.json.return_value = payload or {
-        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false, "character_roles_match": true, "action_match": true}'}]}}]
+        "candidates": [{"content": {"parts": [{"text": '{"pass": true, "reason": "ok", "people_count": 2, "adult_count": 1, "child_count": 1, "ppe_detected": false, "text_detected": false, "ui_artifact_detected": false, "illustration_style_match": true, "character_roles_match": true, "action_match": true}'}]}}]
     }
     return response
 

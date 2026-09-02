@@ -336,7 +336,9 @@ MYTH_FACT_REFUTATION_PATTERNS = (
 MYTH_FACT_FAMILY_PATTERNS = {
     "bilingualism": (
         r"\bбилингв\w*\b", r"\bдвуязыч\w*\b", r"\bдва язык\w*\b", r"\bдвух язык\w*\b",
-        r"\bbilingual\w*\b", r"\bmultilingual\w*\b", r"\bdual language\w*\b", r"\bhome language\w*\b",
+        r"\bнесколько\s+язык\w*\b",
+        r"\bbilingual\w*\b", r"\bmultilingual\w*\b", r"\bmultiple languages?\b",
+        r"\bdual language\w*\b", r"\bhome language\w*\b",
     ),
     "hearing": (
         r"\bслух\w*\b", r"\bслыш\w*\b", r"\bhearing\b", r"\bhearing loss\b",
@@ -823,7 +825,10 @@ def _prepare_generation_prompt(
         if anchors:
             prepared = prepared.replace("\nEVIDENCE:\n", f"\n{anchors}\nEVIDENCE:\n", 1)
 
-    if evidence_prevalidated:
+    # The method-card note describes what the pro pre-validation actually
+    # checked, so it stays on the pro path. Other prevalidated formats only get
+    # the generic no-data rules removed.
+    if evidence_prevalidated and is_pro_format:
         note = (
             "Evidence already passed automatic pre-validation: it contains a concrete action and an exercise or material.\n"
             "Build one safe practical method card from these verified facts.\n"
@@ -2914,7 +2919,9 @@ def _build_generation_prompt_raw(
             "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
             "🧩 Что попробовать сегодня:\n"
             "Дай один практический прием или микро-упражнение без канцелярита.\n\n"
-            "💡 Что это дает: одним предложением назови конкретный навык или эффект.\n\n"
+            "💡 Что это дает: одним предложением назови только то, что взрослый сможет увидеть или услышать: "
+            "конкретное действие или реакцию ребенка. Не обещай развитие, улучшение речи или результат "
+            "и не объясняй механизмы, которых нет в EVIDENCE.\n\n"
             f"Источник: {source_domain}\n"
             f"🔗 {source_url}\n"
         )

@@ -2743,6 +2743,7 @@ async def amain() -> None:
                         else "thematic_parents"
                     )
 
+                myth_evidence_prevalidated = False
                 if llm_rubric_format == "myth_fact":
                     myth_evidence_ok, myth_evidence_reason = validate_myth_fact_evidence_for_generation(
                         evidence,
@@ -2762,6 +2763,11 @@ async def amain() -> None:
                             print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                             break
                         continue
+                    # Fail-closed evidence validation already passed for this
+                    # candidate, so the prompt no longer needs the generic
+                    # method-card "return НЕТ_ДАННЫХ" instructions. The myth
+                    # evidence validator and every output validator stay active.
+                    myth_evidence_prevalidated = True
 
                 pro_evidence_prevalidated = False
                 if rf == "pro_friendly":
@@ -2782,6 +2788,8 @@ async def amain() -> None:
                         continue
                     pro_evidence_prevalidated = rubric_id == "method_piggybank"
 
+                evidence_prevalidated = pro_evidence_prevalidated or myth_evidence_prevalidated
+
                 try:
                     plain_raw, ok, llm_note = await asyncio.wait_for(
                         generate_post_plain_from_evidence_async(
@@ -2799,7 +2807,7 @@ async def amain() -> None:
                             gemini_key=GEMINI_API_KEY,
                             max_chars=POST_MAX_CHARS,
                             day_key=effective_day,
-                            evidence_prevalidated=pro_evidence_prevalidated,
+                            evidence_prevalidated=evidence_prevalidated,
                             topic_id=effective_topic_id,
                             topic_title=effective_topic_title,
                         ),

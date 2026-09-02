@@ -639,5 +639,278 @@ class MythFactBoundedRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gemini_mock.call_count, 2)
 
 
+MULTIPLE_LANGUAGES_ONLY_EVIDENCE = (
+    "Speech and language problems are not caused by learning multiple languages. "
+    "Families can keep speaking the language they know best during meals, books, and play, "
+    "and a child can still join ordinary family conversations."
+)
+
+NESKOLKO_YAZYKOV_EVIDENCE = (
+    "Это распространённый миф: несколько языков не вызывают трудностей с речью у ребёнка. "
+    "Дома можно спокойно продолжать обычные разговоры, чтение и игру на привычном языке."
+)
+
+# myth_fact keeps the age line optional, so these cards stay grounded without one.
+ALIAS_OBSERVABLE_CARD = (
+    "Несколько языков не мешают речи\n\n"
+    "🔴 Миф: Несколько языков вызывают трудности с речью у ребёнка.\n\n"
+    "Несколько языков сами по себе не вызывают трудностей с речью. Дома можно продолжать "
+    "обычные разговоры, чтение и игру на привычном языке, не превращая общение в проверку.\n\n"
+    "🧩 Что попробовать сегодня:\n"
+    "Прочитайте знакомую книгу на домашнем языке и обсудите две картинки короткими фразами.\n\n"
+    "💡 Что это дает: Ребёнок участвует в семейном разговоре и отвечает доступным ему способом."
+)
+
+ALIAS_NONOBSERVABLE_CARD = ALIAS_OBSERVABLE_CARD.replace(
+    "💡 Что это дает: Ребёнок участвует в семейном разговоре и отвечает доступным ему способом.",
+    "💡 Что это дает: Это укрепляет речевое развитие и улучшает языковые навыки ребёнка.",
+)
+
+GENERAL_METHOD_CARD_NO_DATA_RULES = (
+    "Если для практической методической карточки не хватает конкретных данных, верни НЕТ_ДАННЫХ.",
+    "Если данных недостаточно или в тексте нет практической конкретики — верни строго одну строку: НЕТ_ДАННЫХ",
+    "Если в EVIDENCE нет конкретного действия или упражнения/материала — верни НЕТ_ДАННЫХ.",
+)
+
+def _myth_prompt(evidence_text, topic_id, prevalidated):
+    return llm.build_generation_prompt(
+        day_key="WE",
+        rubric_title="Миф / факт",
+        rubric_format="myth_fact",
+        audience="parents",
+        title_suffix="",
+        source_domain="asha.org",
+        source_url="https://example.org/source",
+        evidence_text=evidence_text,
+        disclaimer="",
+        hashtags=[],
+        max_chars=1200,
+        evidence_prevalidated=prevalidated,
+        topic_id=topic_id,
+        topic_title="Двуязычие и домашний язык",
+    )
+
+
+class MythFactPrevalidatedPromptTest(unittest.TestCase):
+    """After the fail-closed evidence gate, only the generic method-card no-data rules go away."""
+
+    def test_publisher_marks_myth_evidence_prevalidated_after_the_gate(self):
+        source = Path("src/publisher/run_publisher.py").read_text(encoding="utf-8")
+        gate = source.index("validate_myth_fact_evidence_for_generation(")
+        flag = source.index("myth_evidence_prevalidated = True", gate)
+        combined = source.index("evidence_prevalidated = pro_evidence_prevalidated or myth_evidence_prevalidated", flag)
+        provider = source.index("generate_post_plain_from_evidence_async(", combined)
+        handoff = source.index("evidence_prevalidated=evidence_prevalidated", provider)
+        self.assertLess(gate, flag)
+        self.assertLess(combined, provider)
+        self.assertLess(provider, handoff)
+
+    def test_prevalidated_prompt_drops_generic_method_card_no_data_rules(self):
+        plain = _myth_prompt(MULTIPLE_LANGUAGES_ONLY_EVIDENCE, "bilingualism", False)
+        prevalidated = _myth_prompt(MULTIPLE_LANGUAGES_ONLY_EVIDENCE, "bilingualism", True)
+
+        present_in_plain = [rule for rule in GENERAL_METHOD_CARD_NO_DATA_RULES if rule in plain]
+        self.assertTrue(present_in_plain, "baseline prompt must carry the generic no-data rules")
+        for rule in GENERAL_METHOD_CARD_NO_DATA_RULES:
+            with self.subTest(rule=rule):
+                self.assertNotIn(rule, prevalidated)
+
+    def test_prevalidated_prompt_keeps_myth_specific_no_data_and_inversion_limits(self):
+        prevalidated = _myth_prompt(MULTIPLE_LANGUAGES_ONLY_EVIDENCE, "bilingualism", True)
+
+        self.assertIn("нет явного опровергаемого утверждения — верни НЕТ_ДАННЫХ", prevalidated)
+        self.assertIn("Не придумывай популярный миф из собственных знаний", prevalidated)
+        self.assertIn("Сохрани X и Y без изменений", prevalidated)
+        self.assertIn("exact inversion вывести нельзя — верни НЕТ_ДАННЫХ", prevalidated)
+        self.assertIn("Опирайся только на EVIDENCE ниже", prevalidated)
+
+    def test_prevalidated_myth_prompt_is_not_turned_into_a_method_card(self):
+        prevalidated = _myth_prompt(MULTIPLE_LANGUAGES_ONLY_EVIDENCE, "bilingualism", True)
+
+        self.assertNotIn("Build one safe practical method card", prevalidated)
+        self.assertNotIn("it contains a concrete action and an exercise or material", prevalidated)
+
+    def test_pro_friendly_prevalidated_note_is_unchanged(self):
+        pro = llm.build_generation_prompt(
+            day_key="FR",
+            rubric_title="Копилка приёмов",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="asha.org",
+            source_url="https://example.org/source",
+            evidence_text=(
+                "Use picture cards during a short naming activity. The clinician names the picture, "
+                "the child repeats the word, and the clinician marks the response."
+            ),
+            disclaimer="",
+            hashtags=[],
+            max_chars=1200,
+            evidence_prevalidated=True,
+            topic_id="",
+            topic_title="",
+        )
+        self.assertIn("Build one safe practical method card", pro)
+
+    def test_evidence_gate_stays_fail_closed_for_prevalidation(self):
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(
+                "Children who learn multiple languages take part in family conversations.",
+                "bilingualism",
+            ),
+            (False, "myth_evidence_missing_refutation_anchor"),
+        )
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(
+                MULTIPLE_LANGUAGES_ONLY_EVIDENCE,
+                "hearing_and_speech",
+            ),
+            (False, "myth_topic_mismatch"),
+        )
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(
+                MULTIPLE_LANGUAGES_ONLY_EVIDENCE,
+                "bilingualism",
+            ),
+            (True, "ok"),
+        )
+
+    def test_output_validators_stay_fail_closed_for_prevalidated_evidence(self):
+        missing_claim = "Два языка в семье\n👶 Возраст: 3–6 лет\n" + ("Полезный текст без строки мифа. " * 15)
+        self.assertEqual(
+            llm._validate_myth_fact_output(
+                missing_claim,
+                MULTIPLE_LANGUAGES_ONLY_EVIDENCE,
+                topic_id="bilingualism",
+            ),
+            (False, "myth_missing_claim"),
+        )
+        ungrounded = VALID_BILINGUAL_CARD.replace(
+            "🔴 Миф: Два языка вызывают задержку речи.",
+            "🔴 Миф: Два языка вызывают потерю слуха у ребёнка.",
+        )
+        ok, reason = llm._validate_myth_fact_output(
+            ungrounded,
+            MULTIPLE_LANGUAGES_ONLY_EVIDENCE,
+            topic_id="bilingualism",
+        )
+        self.assertFalse(ok)
+        self.assertNotEqual(reason, "ok")
+
+
+class MythFactBilingualismAliasTest(unittest.TestCase):
+    """Narrow source-derived aliases for evidence that never says "bilingual"."""
+
+    def test_learning_multiple_languages_is_bilingualism(self):
+        self.assertNotIn("bilingual", MULTIPLE_LANGUAGES_ONLY_EVIDENCE.lower())
+        self.assertIn("bilingualism", llm._myth_fact_families(MULTIPLE_LANGUAGES_ONLY_EVIDENCE))
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(
+                MULTIPLE_LANGUAGES_ONLY_EVIDENCE,
+                "bilingualism",
+            ),
+            (True, "ok"),
+        )
+
+    def test_russian_neskolko_yazykov_is_bilingualism(self):
+        blob = NESKOLKO_YAZYKOV_EVIDENCE.lower()
+        self.assertNotIn("билингв", blob)
+        self.assertNotIn("двуязыч", blob)
+        self.assertIn("bilingualism", llm._myth_fact_families(NESKOLKO_YAZYKOV_EVIDENCE))
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(
+                NESKOLKO_YAZYKOV_EVIDENCE,
+                "bilingualism",
+            ),
+            (True, "ok"),
+        )
+
+    def test_aliases_do_not_leak_into_other_families(self):
+        for evidence in (MULTIPLE_LANGUAGES_ONLY_EVIDENCE, NESKOLKO_YAZYKOV_EVIDENCE):
+            with self.subTest(evidence=evidence[:40]):
+                families = llm._myth_fact_families(evidence)
+                self.assertIn("bilingualism", families)
+                for foreign in ("hearing", "developmental_risk", "age_milestone", "speech_sounds"):
+                    self.assertNotIn(foreign, families)
+
+    def test_exact_inversion_of_the_alias_evidence_stays_grounded(self):
+        self.assertEqual(
+            llm._validate_myth_fact_output(
+                ALIAS_OBSERVABLE_CARD,
+                NESKOLKO_YAZYKOV_EVIDENCE,
+                topic_id="bilingualism",
+            ),
+            (True, "ok"),
+        )
+
+
+class MythFactObservableBenefitTest(unittest.TestCase):
+    """The 💡 block must ask for an observable child action, not a promised effect."""
+
+    def test_prompt_requires_an_observable_child_action(self):
+        prompt = _myth_prompt(MULTIPLE_LANGUAGES_ONLY_EVIDENCE, "bilingualism", True)
+
+        self.assertNotIn("одним предложением назови конкретный навык или эффект", prompt)
+        self.assertIn("конкретное действие или реакцию ребенка", prompt)
+        self.assertIn("Не обещай развитие", prompt)
+        self.assertIn("не объясняй механизмы, которых нет в EVIDENCE", prompt)
+
+    def test_nonobservable_benefit_is_still_rejected(self):
+        ok, reason = llm._validate_output(
+            ALIAS_NONOBSERVABLE_CARD,
+            day_key="WE",
+            rubric_format="myth_fact",
+            audience="parents",
+            evidence_text=NESKOLKO_YAZYKOV_EVIDENCE,
+            topic_id="bilingualism",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "parent_nonobservable_benefit")
+
+    def test_observable_benefit_passes(self):
+        self.assertEqual(
+            llm._validate_output(
+                ALIAS_OBSERVABLE_CARD,
+                day_key="WE",
+                rubric_format="myth_fact",
+                audience="parents",
+                evidence_text=NESKOLKO_YAZYKOV_EVIDENCE,
+                topic_id="bilingualism",
+            ),
+            (True, "ok"),
+        )
+
+
+class MythFactUnchangedRuntimeSurfaceTest(unittest.TestCase):
+    """The follow-up must not touch pool, routing, cooldown or dedup."""
+
+    def test_canonical_five_source_pool_is_unchanged(self):
+        pool = publisher.MYTH_FACT_CANONICAL_SOURCE_IDS
+        self.assertEqual(len(pool), 5)
+
+    def test_cooldown_and_dedup_policy_constants_are_unchanged(self):
+        from src.publisher import dedup_policy
+
+        self.assertEqual(dedup_policy.SOURCE_COOLDOWN_DAYS, 28)
+        self.assertEqual(dedup_policy.EDITORIAL_CORE_COOLDOWN_DAYS, 28)
+        self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_POST_MYTH_FACT, 0.94)
+        self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_SOURCE, 0.93)
+        self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_POST, 0.86)
+
+    def test_topic_family_routing_map_is_unchanged(self):
+        self.assertEqual(
+            llm.MYTH_FACT_TOPIC_FAMILY,
+            {
+                "bilingualism": "bilingualism",
+                "hearing_and_speech": "hearing",
+                "speech_sounds": "speech_sounds",
+                "early_communication": "early_communication",
+                "everyday_communication": "everyday_communication",
+                "preliteracy": "preliteracy",
+                "vocabulary_phrase": "vocabulary_phrase",
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

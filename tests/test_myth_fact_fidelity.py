@@ -22,6 +22,11 @@ BILINGUAL_EVIDENCE = (
     "There is no evidence that two languages by themselves create a speech or language disorder."
 )
 
+BILINGUAL_ARE_NOT_CAUSED_EVIDENCE = (
+    "Speech and language problems are not caused by learning multiple languages. "
+    "Bilingual and multilingual children can keep using the home language in family conversations."
+)
+
 HEARING_EVIDENCE = (
     "A common misconception is that a child who repeats familiar words must have normal hearing. "
     "Repeating familiar words does not mean hearing is normal. Hearing screening is the appropriate way "
@@ -139,6 +144,16 @@ class MythFactEvidenceGateTest(unittest.TestCase):
             (True, "ok"),
         )
 
+    def test_are_not_caused_by_is_an_explicit_bilingual_refutation(self):
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(
+                BILINGUAL_ARE_NOT_CAUSED_EVIDENCE,
+                "bilingualism",
+            ),
+            (True, "ok"),
+        )
+        self.assertIn("bilingualism", llm._myth_fact_families(BILINGUAL_ARE_NOT_CAUSED_EVIDENCE))
+
     def test_p2i_exact_explicit_refutation_forms_are_accepted(self):
         cases = (
             (
@@ -219,6 +234,20 @@ class MythFactClaimValidationTest(unittest.TestCase):
     def test_grounded_bilingual_myth_passes(self):
         self.assertEqual(
             llm._validate_myth_fact_output(VALID_BILINGUAL_CARD, BILINGUAL_EVIDENCE, "bilingualism"),
+            (True, "ok"),
+        )
+
+    def test_exact_logical_opposite_of_direct_refutation_passes(self):
+        card = (
+            "Cross-linguistic influence is not a diagnosis\n"
+            "👶 Возраст: без возрастного ограничения\n"
+            "🔴 Миф: These cross-linguistic influences indicate a speech sound disorder.\n"
+            "Speech sound assessment considers every language the child uses.\n"
+            "🧩 Что попробовать сегодня: Запишите пример речи ребёнка в каждом языке.\n"
+            "💡 Что это дает: Специалист получает контекст речевых звуков."
+        )
+        self.assertEqual(
+            llm._validate_myth_fact_output(card, P2I_SPEECH_SOURCE_EVIDENCE, "speech_sounds"),
             (True, "ok"),
         )
 
@@ -327,6 +356,10 @@ class MythFactSourceCoverageTest(unittest.TestCase):
         cls.sources_by_id = {
             item["id"]: item for item in (cls.sources_cfg.get("sources", []) or [])
         }
+        cls.topic_source_ids = {
+            topic_id: set((topic_cfg or {}).get("source_ids", []) or [])
+            for topic_id, topic_cfg in cls.topics_cfg["topics"].items()
+        }
         cls.myth_fact = next(
             item
             for item in cls.rubrics_cfg["audiences"]["parents"]["rubrics"]
@@ -350,9 +383,115 @@ class MythFactSourceCoverageTest(unittest.TestCase):
 
     def test_myth_fact_runtime_pool_is_exactly_five_canonical_sources(self):
         self.assertEqual(self.myth_fact["sources"], P2I_MYTH_FACT_SOURCE_POOL)
+        self.assertEqual(
+            publisher.MYTH_FACT_CANONICAL_SOURCE_IDS,
+            frozenset(P2I_MYTH_FACT_SOURCE_POOL),
+        )
         self.assertNotIn("mayoclinic_cas_speech_muscle_myth", self.myth_fact["sources"])
         self.assertNotIn("asha_single_sound_error", self.myth_fact["sources"])
         self.assertNotIn("readingrockets_reading_myths", self.myth_fact["sources"])
+
+    def test_asha_speech_source_routes_to_speech_sounds(self):
+        with patch.object(publisher, "detect_evidence_topics") as detect_mock:
+            result = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "asha_speech_sound_multilingual_influence",
+                "bilingualism",
+                P2I_SPEECH_SOURCE_EVIDENCE,
+                self.topic_source_ids,
+            )
+        self.assertEqual(result, ("speech_sounds", ""))
+        detect_mock.assert_not_called()
+
+    def test_asha_hearing_source_routes_to_hearing_and_speech(self):
+        with patch.object(publisher, "detect_evidence_topics") as detect_mock:
+            result = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "asha_newborn_hearing_screening",
+                "speech_sounds",
+                P2I_HEARING_SOURCE_EVIDENCE,
+                self.topic_source_ids,
+            )
+        self.assertEqual(result, ("hearing_and_speech", ""))
+        detect_mock.assert_not_called()
+
+    def test_one_year_source_routes_to_early_communication_despite_hearing_words(self):
+        evidence = P2I_EARLY_SOURCE_EVIDENCE + " Hearing screening can also be discussed separately."
+        with patch.object(publisher, "detect_evidence_topics") as detect_mock:
+            result = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "healthychildren_one_year_talking",
+                "hearing_and_speech",
+                evidence,
+                self.topic_source_ids,
+            )
+        self.assertEqual(result, ("early_communication", ""))
+        detect_mock.assert_not_called()
+
+    def test_crawling_source_routes_to_preliteracy_and_early_literacy_is_in_family(self):
+        with patch.object(publisher, "detect_evidence_topics") as detect_mock:
+            result = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "healthychildren_crawling_reading_myth",
+                "speech_sounds",
+                P2I_PRELITERACY_SOURCE_EVIDENCE,
+                self.topic_source_ids,
+            )
+        self.assertEqual(result, ("preliteracy", ""))
+        self.assertIn("preliteracy", llm._myth_fact_families("Early literacy develops over time."))
+        detect_mock.assert_not_called()
+
+    def test_canonical_source_with_zero_mapping_fails_closed(self):
+        with patch.object(publisher, "detect_evidence_topics") as detect_mock:
+            result = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "healthychildren_bilingual_myths",
+                "bilingualism",
+                BILINGUAL_EVIDENCE,
+                {},
+            )
+        self.assertEqual(result, ("", "myth_topic_mismatch"))
+        detect_mock.assert_not_called()
+
+    def test_canonical_source_with_multiple_mappings_fails_closed(self):
+        duplicate_mapping = {
+            "bilingualism": {"healthychildren_bilingual_myths"},
+            "speech_sounds": {"healthychildren_bilingual_myths"},
+        }
+        with patch.object(publisher, "detect_evidence_topics") as detect_mock:
+            result = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "healthychildren_bilingual_myths",
+                "bilingualism",
+                BILINGUAL_EVIDENCE,
+                duplicate_mapping,
+            )
+        self.assertEqual(result, ("", "myth_topic_mismatch"))
+        detect_mock.assert_not_called()
+
+    def test_noncanonical_source_keeps_generic_preferred_and_fallback_routing(self):
+        with patch.object(
+            publisher,
+            "detect_evidence_topics",
+            return_value={"speech_sounds", "hearing_and_speech"},
+        ) as detect_mock:
+            preferred = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "noncanonical_source",
+                "hearing_and_speech",
+                "generic evidence",
+                self.topic_source_ids,
+            )
+            fallback = publisher._resolve_effective_topic_id(
+                "myth_fact",
+                "noncanonical_source",
+                "preliteracy",
+                "generic evidence",
+                self.topic_source_ids,
+            )
+        self.assertEqual(preferred, ("hearing_and_speech", ""))
+        self.assertEqual(fallback, ("speech_sounds", ""))
+        self.assertEqual(detect_mock.call_count, 2)
 
     def test_runtime_incompatible_sources_are_removed_from_source_config_and_topics(self):
         self.assertNotIn("mayoclinic_cas_speech_muscle_myth", self.sources_by_id)
@@ -410,6 +549,29 @@ class MythFactIntegrationContractTest(unittest.TestCase):
         self.assertIn("Не придумывай популярный миф из собственных знаний", source)
         self.assertIn("НЕТ_ДАННЫХ", source)
 
+    def test_myth_prompt_limits_direct_refutation_inversion(self):
+        prompt = llm._build_generation_prompt_raw(
+            day_key="WE",
+            rubric_title="Миф / факт",
+            rubric_format="myth_fact",
+            audience="parents",
+            title_suffix="",
+            source_domain="asha.org",
+            source_url="https://example.org/source",
+            evidence_text=P2I_SPEECH_SOURCE_EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            max_chars=1200,
+            topic_id="speech_sounds",
+            topic_title="Звукопроизношение",
+        )
+        self.assertIn("X does not cause Y", prompt)
+        self.assertIn("Сохрани X и Y без изменений", prompt)
+        self.assertIn("новый диагноз, новый факт, число, возраст", prompt)
+        self.assertIn("phoneme details или новый механизм", prompt)
+        self.assertIn("association/correlation в causation", prompt)
+        self.assertIn("exact inversion вывести нельзя — верни НЕТ_ДАННЫХ", prompt)
+
     def test_publisher_gate_is_before_llm_generation(self):
         source = Path("src/publisher/run_publisher.py").read_text(encoding="utf-8")
         gate = source.index("validate_myth_fact_evidence_for_generation(")
@@ -458,6 +620,9 @@ class MythFactBoundedRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(note, f"ok:gemini_retry:{llm.GEMINI_MODELS[0]}")
         self.assertIn("myth_fact", prompts[1])
         self.assertIn("не придумывай новый миф", prompts[1].lower())
+        self.assertIn("X does not indicate Y", prompts[1])
+        self.assertIn("Сохрани X и Y без изменений", prompts[1])
+        self.assertIn("association/correlation в causation", prompts[1])
 
     async def test_invalid_repair_stops_after_one_retry(self):
         invalid = "Два языка в семье\n👶 Возраст: 3–6 лет\n" + ("Полезный текст без строки мифа. " * 15)

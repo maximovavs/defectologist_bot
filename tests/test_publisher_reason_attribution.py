@@ -10,7 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from src.publisher import dedup_policy
 from src.publisher import run_publisher as publisher
+from src.services import llm_generator
 
 
 OWNERSHIP_REASONS = (
@@ -518,6 +520,219 @@ class PublisherPostedZeroFulfilledSlotTest(unittest.TestCase):
         self.assertIn("if posted == 0 and not DRY_RUN:", source)
         self.assertIn("_send_posted_zero_alert_if_needed(", source)
         self.assertIn('f"Publisher done. Posted: {posted}. Week: {week_key}.', source)
+
+
+class PublisherDuplicateDaySlotGuardTest(unittest.TestCase):
+    """The same production rubric may not be published twice in one local day."""
+
+    NOW = datetime(2026, 9, 3, 0, 40, tzinfo=timezone(timedelta(hours=3)))
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tempdir.name) / ".state"
+        self.state_dir.mkdir()
+        self.db_path = self.state_dir / "publication_history.sqlite3"
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def _create_history(self, rows=(), db_path: Path | None = None) -> None:
+        with sqlite3.connect(db_path or self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE publications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_url TEXT NOT NULL UNIQUE,
+                    posted_at TEXT NOT NULL,
+                    audience TEXT NOT NULL,
+                    rubric_id TEXT NOT NULL
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO publications (canonical_url, posted_at, audience, rubric_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def _row(self, rubric_id: str, *, posted_at: str, suffix: str = "1"):
+        return (f"https://example.org/{suffix}", posted_at, "parents", rubric_id)
+
+    def _blocked(
+        self,
+        rubric_id: str,
+        *,
+        db_path: Path | None = None,
+        state_scope: str = "prod",
+        target_channel: str = "prod",
+        dry_run: bool = False,
+    ) -> bool:
+        # Exactly the rubric-scoped call the pre-publication guard performs.
+        return publisher._production_slots_already_fulfilled(
+            db_path=db_path or self.db_path,
+            attempted_rubrics=[rubric_id],
+            now=self.NOW,
+            state_scope=state_scope,
+            target_channel=target_channel,
+            dry_run=dry_run,
+        )
+
+    def _incident_day_history(self) -> None:
+        # The real 2026-09-03 Asia/Nicosia sequence: bilingual_corner published,
+        # myth_fact recovered a day earlier in local terms.
+        self._create_history(
+            [
+                self._row(
+                    "bilingual_corner",
+                    posted_at="2026-09-03T00:11:00+03:00",
+                    suffix="bilingual",
+                ),
+                self._row(
+                    "myth_fact",
+                    posted_at="2026-09-02T18:29:00+03:00",
+                    suffix="myth",
+                ),
+            ]
+        )
+
+    def test_real_prod_same_local_date_and_same_rubric_is_blocked(self) -> None:
+        self._incident_day_history()
+        self.assertTrue(self._blocked("bilingual_corner"))
+
+    def test_unfulfilled_rubric_on_the_same_local_date_stays_allowed(self) -> None:
+        self._incident_day_history()
+        self.assertFalse(self._blocked("myth_fact"))
+
+    def test_guard_is_rubric_scoped_and_runs_before_the_candidate_path(self) -> None:
+        source = inspect.getsource(publisher.amain)
+        guard = source.index("if _production_slots_already_fulfilled(")
+        self.assertIn("attempted_rubrics=[rubric_id],", source[guard:])
+        self.assertIn("[SKIP][slot] production_slot_already_fulfilled", source)
+
+        # A blocked slot never reaches topic routing, source fetch, Telegram
+        # delivery or the publication write.
+        for downstream in (
+            "select_topic_plan(rubric_id, week_key, POST_TOPIC_ID)",
+            "for item in fetch_source(src)",
+            "post_message_id = send_post_with_visual(",
+            "store.record_publication(",
+        ):
+            with self.subTest(downstream=downstream):
+                self.assertLess(guard, source.index(downstream))
+
+    def test_blocked_slot_records_attempted_rubric_and_skips_only_that_rubric(self) -> None:
+        source = inspect.getsource(publisher.amain)
+        guard = source.index("if _production_slots_already_fulfilled(")
+        block = source[guard : source.index("topic_plan = select_topic_plan", guard)]
+        self.assertIn("attempted_rubrics.append(rubric_id)", block)
+        # `continue` skips this rubric only; it is not a run-wide early return.
+        self.assertIn("continue", block)
+        self.assertNotIn("return", block)
+        self.assertNotIn("break", block)
+
+    def test_dry_run_is_not_blocked(self) -> None:
+        self._incident_day_history()
+        self.assertFalse(self._blocked("bilingual_corner", dry_run=True))
+
+    def test_test_channel_and_test_state_scope_are_not_blocked(self) -> None:
+        self._incident_day_history()
+        self.assertFalse(self._blocked("bilingual_corner", target_channel="test"))
+        self.assertFalse(self._blocked("bilingual_corner", state_scope="test"))
+
+    def test_non_production_db_path_never_reports_fulfilled(self) -> None:
+        test_db = self.state_dir / "publication_history_test.sqlite3"
+        self._create_history(
+            [
+                self._row(
+                    "bilingual_corner",
+                    posted_at="2026-09-03T00:11:00+03:00",
+                    suffix="bilingual",
+                )
+            ],
+            db_path=test_db,
+        )
+        self.assertFalse(self._blocked("bilingual_corner", db_path=test_db))
+        self.assertFalse(self._blocked("bilingual_corner", db_path=self.db_path))
+
+    def test_malformed_or_naive_posted_at_never_reports_fulfilled(self) -> None:
+        self._create_history(
+            [
+                self._row("bilingual_corner", posted_at="2026-09-03T00:11:00", suffix="naive"),
+                self._row("question_week", posted_at="not-a-timestamp", suffix="broken"),
+            ]
+        )
+        self.assertFalse(self._blocked("bilingual_corner"))
+        self.assertFalse(self._blocked("question_week"))
+
+    def test_utc_timestamp_is_compared_after_local_conversion(self) -> None:
+        # 2026-09-02T21:11Z is 2026-09-03 in Asia/Nicosia and must block.
+        self._create_history(
+            [self._row("bilingual_corner", posted_at="2026-09-02T21:11:00+00:00")]
+        )
+        self.assertTrue(self._blocked("bilingual_corner"))
+
+    def test_blocked_slot_does_not_raise_a_posted_zero_incident_alert(self) -> None:
+        self._incident_day_history()
+        output = io.StringIO()
+        with patch.multiple(
+            publisher,
+            TARGET_CHANNEL="prod",
+            DRY_RUN=False,
+            TELEGRAM_DRAFTS_CHAT_ID="diagnostic-chat",
+        ), patch.object(publisher, "send_plain_message") as send_mock, redirect_stdout(output):
+            sent = publisher._send_posted_zero_alert_if_needed(
+                db_path=self.db_path,
+                now=self.NOW,
+                day="TH",
+                week_key="2026-W36",
+                audience="both",
+                provider="auto",
+                soft_skip_reasons={},
+                hard_skip_reasons={},
+                samples=[],
+                state_scope="prod",
+                attempted_rubrics=["bilingual_corner"],
+                topic_preference="auto",
+            )
+
+        self.assertFalse(sent)
+        send_mock.assert_not_called()
+        self.assertIn("reason=production_slot_already_fulfilled", output.getvalue())
+
+    def test_guard_changes_no_cooldown_dedup_pool_or_routing_constant(self) -> None:
+        self.assertEqual(publisher.SOURCE_COOLDOWN_DAYS, 28)
+        self.assertEqual(dedup_policy.EDITORIAL_CORE_COOLDOWN_DAYS, 28)
+        self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_SOURCE, 0.93)
+        self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_POST, 0.86)
+        self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_POST_MYTH_FACT, 0.94)
+        self.assertEqual(dedup_policy.RECENT_SOURCE_DOMAIN_WINDOW, 3)
+        self.assertEqual(
+            publisher.MYTH_FACT_CANONICAL_SOURCE_IDS,
+            frozenset(
+                {
+                    "healthychildren_bilingual_myths",
+                    "asha_speech_sound_multilingual_influence",
+                    "asha_newborn_hearing_screening",
+                    "healthychildren_one_year_talking",
+                    "healthychildren_crawling_reading_myth",
+                }
+            ),
+        )
+        self.assertEqual(len(publisher.MYTH_FACT_CANONICAL_SOURCE_IDS), 5)
+        self.assertEqual(
+            llm_generator.MYTH_FACT_TOPIC_FAMILY,
+            {
+                "bilingualism": "bilingualism",
+                "hearing_and_speech": "hearing",
+                "speech_sounds": "speech_sounds",
+                "early_communication": "early_communication",
+                "everyday_communication": "everyday_communication",
+                "preliteracy": "preliteracy",
+                "vocabulary_phrase": "vocabulary_phrase",
+            },
+        )
 
 
 class PublisherP2EWiringTest(unittest.TestCase):

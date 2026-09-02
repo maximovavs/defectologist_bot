@@ -2344,6 +2344,32 @@ async def amain() -> None:
                 if not is_due(rubric, now):
                     continue
 
+            # Fail-safe duplicate-day-slot guard. The same production rubric may
+            # not be published twice within one local calendar day, whether the
+            # second attempt comes from the daily cron or from an explicit
+            # dispatch. The check is rubric-scoped, reuses the existing
+            # production-slot helper as the single date/DB implementation, and
+            # runs before source scan, provider calls, visual generation,
+            # Telegram delivery and any publication write.
+            if _production_slots_already_fulfilled(
+                db_path=db_path,
+                attempted_rubrics=[rubric_id],
+                now=now,
+                state_scope=state_scope,
+                target_channel=TARGET_CHANNEL,
+                dry_run=DRY_RUN,
+            ):
+                # Recorded as attempted so the existing Posted:0 alert stays
+                # suppressed: a deliberately blocked duplicate is not an incident.
+                if rubric_id not in attempted_rubrics:
+                    attempted_rubrics.append(rubric_id)
+                print(
+                    "[SKIP][slot] production_slot_already_fulfilled "
+                    f"rubric={rubric_id} date={now.date()}",
+                    flush=True,
+                )
+                continue
+
             try:
                 topic_plan = select_topic_plan(rubric_id, week_key, POST_TOPIC_ID)
             except ValueError as e:

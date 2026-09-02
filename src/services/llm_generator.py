@@ -319,6 +319,7 @@ MYTH_FACT_REFUTATION_PATTERNS = (
     r"\bdoes not mean\b",
     r"\bdoesn't mean\b",
     r"\bis not caused by\b",
+    r"\bare not caused by\b",
     r"\baren't caused by\b",
     r"\bdo not indicate\b",
     r"\bмиф\b",
@@ -369,7 +370,7 @@ MYTH_FACT_FAMILY_PATTERNS = {
     ),
     "preliteracy": (
         r"\bподготов\w* к чтени\w*\b", r"\bпредчтени\w*\b", r"\bчтени\w*\b",
-        r"\bpreliteracy\b", r"\bemergent literacy\b", r"\breading readiness\b", r"\bprint awareness\b",
+        r"\bpreliteracy\b", r"\bemergent literacy\b", r"\bearly literacy\b", r"\breading readiness\b", r"\bprint awareness\b",
         r"\bshared reading\b", r"\bbooks?\b", r"\bкниг\w*\b",
     ),
     "vocabulary_phrase": (
@@ -399,6 +400,15 @@ MYTH_FACT_SENSITIVE_FAMILIES = frozenset({
 MYTH_FACT_LINE_RE = re.compile(
     r"^🔴\s*Миф\s*[:：]\s*(.+\S)\s*$",
     re.IGNORECASE | re.MULTILINE,
+)
+
+MYTH_FACT_BOUNDED_INVERSION_INSTRUCTION = (
+    "Только если EVIDENCE прямо говорит «X does not cause Y», «X does not mean Y» или "
+    "«X does not indicate Y», строка «🔴 Миф:» может быть только точной логической "
+    "противоположностью: «X causes Y», «X means Y» или «X indicates Y». "
+    "Сохрани X и Y без изменений. Не добавляй новый диагноз, новый факт, число, возраст, "
+    "phoneme details или новый механизм; не усиливай modality и не превращай "
+    "association/correlation в causation. Если exact inversion вывести нельзя — верни НЕТ_ДАННЫХ."
 )
 
 
@@ -2899,6 +2909,7 @@ def _build_generation_prompt_raw(
             "Первая строка — короткий заголовок по сути мифа и практического вывода, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
             "🔴 Миф: используй только утверждение, которое EVIDENCE явно называет ошибочным или прямо опровергает.\n"
+            f"{MYTH_FACT_BOUNDED_INVERSION_INSTRUCTION}\n"
             "Не придумывай популярный миф из собственных знаний. Если в EVIDENCE нет явного опровергаемого утверждения — верни НЕТ_ДАННЫХ.\n\n"
             "Затем в 2–4 живых предложениях объясни, что на самом деле важно, опираясь на конкретику статьи.\n\n"
             "🧩 Что попробовать сегодня:\n"
@@ -4062,6 +4073,7 @@ async def generate_post_plain_from_evidence_async(
                 "новую чувствительную тему, возраст, число или фонему. "
                 "Миф должен соответствовать тематическому фокусу и быть прямо опровергаем EVIDENCE."
             )
+            repair += "\n" + MYTH_FACT_BOUNDED_INVERSION_INSTRUCTION
 
         if dk == "FR" or rf == "question_week":
             repair += (

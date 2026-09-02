@@ -208,6 +208,14 @@ RUBRIC_TAGS_BY_DAY = {
     "SU": "#возрастная_норма",
 }
 
+MYTH_FACT_CANONICAL_SOURCE_IDS = frozenset({
+    "healthychildren_bilingual_myths",
+    "asha_speech_sound_multilingual_influence",
+    "asha_newborn_hearing_screening",
+    "healthychildren_one_year_talking",
+    "healthychildren_crawling_reading_myth",
+})
+
 POLICY_OWNERSHIP_REASONS = frozenset({
     "myth_claim_not_grounded",
     "parent_age_not_grounded",
@@ -1733,6 +1741,39 @@ def load_topic_source_ids() -> Dict[str, set[str]]:
     }
 
 
+def _resolve_effective_topic_id(
+    rubric_id: str,
+    source_id: str,
+    preferred_topic_id: str,
+    evidence: str,
+    topic_source_ids: Dict[str, set[str]],
+    detected_topic_ids: Optional[set[str]] = None,
+) -> tuple[str, str]:
+    rubric = (rubric_id or "").strip().lower()
+    source = (source_id or "").strip()
+    preferred = (preferred_topic_id or "").strip().lower()
+    allowed_topic_ids = RUBRIC_TOPIC_ROTATION.get(rubric, ())
+
+    if rubric == "myth_fact" and source in MYTH_FACT_CANONICAL_SOURCE_IDS:
+        mapped_topic_ids = tuple(
+            topic_id
+            for topic_id in allowed_topic_ids
+            if source in topic_source_ids.get(topic_id, set())
+        )
+        if len(mapped_topic_ids) != 1:
+            return "", "myth_topic_mismatch"
+        return mapped_topic_ids[0], ""
+
+    if detected_topic_ids is None:
+        detected_topic_ids = detect_evidence_topics(evidence)
+    if preferred and preferred in detected_topic_ids:
+        return preferred, ""
+    return next(
+        (topic_id for topic_id in allowed_topic_ids if topic_id in detected_topic_ids),
+        "",
+    ), ""
+
+
 def render_plain_to_telegram_html(plain_text: str) -> str:
     lines = (plain_text or "").splitlines()
     if not lines:
@@ -2507,38 +2548,49 @@ async def amain() -> None:
                         break
                     continue
 
-                detected_topic_ids = detect_evidence_topics(evidence)
-                effective_topic_id = ""
-                effective_topic_title = ""
                 preferred_topic_id = topic_plan.preferred_topic_id
-                allowed_topic_ids = RUBRIC_TOPIC_ROTATION.get(rubric_id.lower(), ())
-                if preferred_topic_id and preferred_topic_id in detected_topic_ids:
-                    effective_topic_id = preferred_topic_id
-                    effective_topic_title = TOPICS[effective_topic_id]
+                detected_topic_ids: Optional[set[str]] = None
+                if not (
+                    rubric_id.lower() == "myth_fact"
+                    and candidate_source_id in MYTH_FACT_CANONICAL_SOURCE_IDS
+                ):
+                    detected_topic_ids = detect_evidence_topics(evidence)
+                effective_topic_id, topic_routing_reason = _resolve_effective_topic_id(
+                    rubric_id,
+                    candidate_source_id,
+                    preferred_topic_id,
+                    evidence,
+                    topic_source_ids,
+                    detected_topic_ids,
+                )
+                effective_topic_title = TOPICS[effective_topic_id] if effective_topic_id else ""
+                if topic_routing_reason:
+                    kind = note(topic_routing_reason, canon, stage="pre_llm")
                     print(
-                        f"[TOPIC][MATCH] rubric={rubric_id} source={candidate_source_id} "
-                        f"preferred={preferred_topic_id} effective={effective_topic_id}",
+                        f"[SKIP][{kind}] {topic_routing_reason} "
+                        f"stage=pre_llm source={candidate_source_id} url={canon}",
+                        flush=True,
+                    )
+                    if kind == "hard":
+                        rubric_skips += 1
+                    if rubric_skips >= MAX_SKIPS_PER_RUBRIC:
+                        note("max_skips_per_rubric", rubric_id)
+                        print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
+                        break
+                    continue
+                if effective_topic_id:
+                    route_label = "MATCH" if effective_topic_id == preferred_topic_id else "FALLBACK"
+                    print(
+                        f"[TOPIC][{route_label}] rubric={rubric_id} source={candidate_source_id} "
+                        f"preferred={preferred_topic_id or '(none)'} effective={effective_topic_id}",
                         flush=True,
                     )
                 else:
-                    fallback_topic = next(
-                        (topic_id for topic_id in allowed_topic_ids if topic_id in detected_topic_ids),
-                        "",
+                    print(
+                        f"[TOPIC][UNDETECTED] rubric={rubric_id} source={candidate_source_id} "
+                        f"preferred={preferred_topic_id or '(none)'}",
+                        flush=True,
                     )
-                    if fallback_topic:
-                        effective_topic_id = fallback_topic
-                        effective_topic_title = TOPICS[fallback_topic]
-                        print(
-                            f"[TOPIC][FALLBACK] rubric={rubric_id} source={candidate_source_id} "
-                            f"preferred={preferred_topic_id or '(none)'} effective={fallback_topic}",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"[TOPIC][UNDETECTED] rubric={rubric_id} source={candidate_source_id} "
-                            f"preferred={preferred_topic_id or '(none)'}",
-                            flush=True,
-                        )
 
                 if rubric_id == "age_norms" and not _is_age_norms_source_fit(evidence):
                     kind = note("rubric_topic_mismatch_source", canon)

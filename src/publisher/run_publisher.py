@@ -33,10 +33,12 @@ from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urljoin, urlparse
 from src.publisher.dedup_policy import (
     EDITORIAL_CORE_COOLDOWN_DAYS,
+    MYTH_FACT_CLAIM_COOLDOWN_DAYS,
     RECENT_SOURCE_DOMAIN_WINDOW,
     SEMANTIC_THRESHOLD_SOURCE,
     SOURCE_COOLDOWN_DAYS,
     extract_editorial_core,
+    historical_body_has_myth_fact_claim,
     is_scientific_domain,
     semantic_editorial_core_threshold,
     semantic_post_threshold_for_rubric,
@@ -54,6 +56,7 @@ from bs4 import BeautifulSoup
 from dateutil import tz
 
 from src.services.llm_generator import (
+    _extract_myth_fact_claim,
     _validate_question_week_output,
     gemini_text_provider_status,
     generate_image_prompt_async,
@@ -263,6 +266,7 @@ SOFT_SKIP_REASONS = {
     "dup_evidence_hash_recent",
     "dup_semantic_source",
     "dup_editorial_core_recent",
+    "dup_myth_claim_recent",
     "dup_body_same_run",
     "dup_body_hash_db",
     "dup_semantic_post",
@@ -2291,6 +2295,9 @@ async def amain() -> None:
     # Freshness cooldowns: a source may return, but only after the window passes.
     source_cooldown_since_iso = (now - timedelta(days=SOURCE_COOLDOWN_DAYS)).isoformat()
     editorial_core_since_iso = (now - timedelta(days=EDITORIAL_CORE_COOLDOWN_DAYS)).isoformat()
+    myth_fact_claim_since_iso = (
+        now - timedelta(days=MYTH_FACT_CLAIM_COOLDOWN_DAYS)
+    ).isoformat()
     recent_domains = store.recent_source_domains(RECENT_SOURCE_DOMAIN_WINDOW)
     scientific_domains = load_scientific_domains()
 
@@ -2957,6 +2964,25 @@ async def amain() -> None:
                         print(f"[STOP] max_skips_per_rubric reached for {rubric_id}", flush=True)
                         break
                     continue
+
+                if rubric_id == "myth_fact":
+                    myth_claim = _extract_myth_fact_claim(plain)
+                    myth_claim_hit = store.find_recent_myth_fact_claim_duplicate(
+                        myth_claim,
+                        since_iso=myth_fact_claim_since_iso,
+                        claim_matcher=historical_body_has_myth_fact_claim,
+                    )
+                    if myth_claim_hit:
+                        kind = note("dup_myth_claim_recent", canon)
+                        print(
+                            f"[SKIP][{kind}] dup_myth_claim_recent "
+                            f"source={candidate_source_id} url={canon} "
+                            f"matched={myth_claim_hit.canonical_url} "
+                            f"matched_posted_at={myth_claim_hit.posted_at} "
+                            f"cooldown_days={MYTH_FACT_CLAIM_COOLDOWN_DAYS}",
+                            flush=True,
+                        )
+                        continue
 
                 body_hash = sha1(norm_space(plain))
                 if body_hash in seen_body_hashes_this_run:

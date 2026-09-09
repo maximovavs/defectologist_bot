@@ -12,6 +12,7 @@ topics:
       - asha_developmental_milestones
       - parents_baby_language_activities
       - healthychildren_one_year_talking
+      - nationwide_aac_myths
 
   vocabulary_phrase:
     source_ids:
@@ -30,6 +31,7 @@ topics:
       - logoportal_latest
       - logorina_latest
       - asha_speech_sound_multilingual_influence
+      - nlg_nhs_tongue_tie_speech_myth
 
   phonemic_awareness:
     source_ids:
@@ -63,6 +65,7 @@ topics:
       - naeyc_family_communication
       - parents_language_activities
       - healthychildren_crawling_reading_myth
+      - healthychildren_learning_disorders_dyslexia
 
   hearing_and_speech:
     source_ids:
@@ -72,6 +75,8 @@ topics:
       - actionforchildren_communication_milestones
       - gosh_speech_language_12_24_months
       - asha_newborn_hearing_screening
+      - nationwide_school_hearing_screening
+      - nationwide_newborn_hearing_screening
 
   bilingualism:
     source_ids:
@@ -85,6 +90,7 @@ topics:
       - docdeti_bilingualism
       - raisingchildren_bilingual
       - zerotothree_dual_language
+      - nationwide_bilingual_speech_delay
 
   everyday_communication:
     source_ids:

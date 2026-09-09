@@ -20,10 +20,16 @@ WORKFLOW_PATH = ROOT / ".github" / "workflows" / "myth_fact_source_probe.yml"
 
 EXPECTED_SOURCE_IDS = [
     "healthychildren_bilingual_myths",
+    "nationwide_bilingual_speech_delay",
     "asha_speech_sound_multilingual_influence",
+    "nlg_nhs_tongue_tie_speech_myth",
     "asha_newborn_hearing_screening",
+    "nationwide_school_hearing_screening",
+    "nationwide_newborn_hearing_screening",
     "healthychildren_one_year_talking",
+    "nationwide_aac_myths",
     "healthychildren_crawling_reading_myth",
+    "healthychildren_learning_disorders_dyslexia",
 ]
 
 

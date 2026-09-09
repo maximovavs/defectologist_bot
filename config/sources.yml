@@ -31,6 +31,7 @@ quality:
     - "russkiymir.ru"
     - "parents.actionforchildren.org.uk"
     - "gosh.nhs.uk"
+    - "nlg.nhs.uk"
     - "parents.com"
     - "verywellfamily.com"
 
@@ -109,6 +110,7 @@ quality:
     - "healthychildren.org"
     - "mayoclinic.org"
     - "gosh.nhs.uk"
+    - "nlg.nhs.uk"
     - "nationwidechildrens.org"
     - "blog.cincinnatichildrens.org"
 
@@ -429,3 +431,41 @@ sources:
     type: static
     urls:
       - "https://www.healthychildren.org/English/tips-tools/ask-the-pediatrician/Pages/if-a-baby-skips-crawling-trouble-reading.aspx"
+
+  # ---------- myth/fact source inventory expansion probe ----------
+
+  - id: nationwide_bilingual_speech_delay
+    name: "Nationwide Children's — Bilingualism and speech delay"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/12/teaching-kids-a-second-language-can-it-cause-a-speech-delay"
+
+  - id: nlg_nhs_tongue_tie_speech_myth
+    name: "Northern Lincolnshire and Goole NHS — Tongue tie and speech"
+    type: static
+    urls:
+      - "https://www.nlg.nhs.uk/services/speech-language-children/resources-for-parents/"
+
+  - id: nationwide_school_hearing_screening
+    name: "Nationwide Children's — School hearing screening"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/10/hearing-screening-at-school-what-to-expect-if-your-child-gets-tested"
+
+  - id: nationwide_newborn_hearing_screening
+    name: "Nationwide Children's — Universal newborn hearing screening"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/health-wellness-and-safety-resources/helping-hands/universal-newborn-hearing-screening-unhs"
+
+  - id: nationwide_aac_myths
+    name: "Nationwide Children's — AAC myths"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2025/10/augmentative-alternative-communication"
+
+  - id: healthychildren_learning_disorders_dyslexia
+    name: "HealthyChildren — Dyslexia and learning disorders"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/health-issues/conditions/learning-disabilities/Pages/Types-of-Learning-Problems.aspx"

@@ -111,11 +111,37 @@ P2I_CANONICAL_COVERAGE = {
 
 P2I_MYTH_FACT_SOURCE_POOL = [
     "healthychildren_bilingual_myths",
+    "nationwide_bilingual_speech_delay",
     "asha_speech_sound_multilingual_influence",
+    "nlg_nhs_tongue_tie_speech_myth",
     "asha_newborn_hearing_screening",
+    "nationwide_school_hearing_screening",
+    "nationwide_newborn_hearing_screening",
     "healthychildren_one_year_talking",
+    "nationwide_aac_myths",
     "healthychildren_crawling_reading_myth",
+    "healthychildren_learning_disorders_dyslexia",
 ]
+
+P2I_ORIGINAL_MYTH_FACT_SOURCE_IDS = frozenset(
+    source_id for source_id, _url, _evidence in P2I_CANONICAL_COVERAGE.values()
+)
+
+P2I_MYTH_FACT_TOPIC_IDS = (
+    "bilingualism",
+    "speech_sounds",
+    "hearing_and_speech",
+    "early_communication",
+    "preliteracy",
+)
+
+P2I_MYTH_FACT_FAMILY_COUNTS = {
+    "bilingualism": 2,
+    "speech_sounds": 2,
+    "hearing_and_speech": 3,
+    "early_communication": 2,
+    "preliteracy": 2,
+}
 
 VALID_BILINGUAL_CARD = (
     "Два языка не вызывают задержку сами по себе\n\n"
@@ -381,15 +407,36 @@ class MythFactSourceCoverageTest(unittest.TestCase):
                     (True, "ok"),
                 )
 
-    def test_myth_fact_runtime_pool_is_exactly_five_canonical_sources(self):
-        self.assertEqual(self.myth_fact["sources"], P2I_MYTH_FACT_SOURCE_POOL)
+    def test_myth_fact_runtime_pool_matches_qualified_inventory(self):
+        configured_sources = self.myth_fact["sources"]
+        configured_source_ids = frozenset(configured_sources)
+
+        self.assertEqual(configured_sources, P2I_MYTH_FACT_SOURCE_POOL)
+        self.assertEqual(len(configured_sources), 11)
+        self.assertEqual(len(configured_source_ids), 11)
         self.assertEqual(
             publisher.MYTH_FACT_CANONICAL_SOURCE_IDS,
-            frozenset(P2I_MYTH_FACT_SOURCE_POOL),
+            configured_source_ids,
         )
-        self.assertNotIn("mayoclinic_cas_speech_muscle_myth", self.myth_fact["sources"])
-        self.assertNotIn("asha_single_sound_error", self.myth_fact["sources"])
-        self.assertNotIn("readingrockets_reading_myths", self.myth_fact["sources"])
+        self.assertTrue(P2I_ORIGINAL_MYTH_FACT_SOURCE_IDS <= configured_source_ids)
+
+        family_counts = {topic_id: 0 for topic_id in P2I_MYTH_FACT_TOPIC_IDS}
+        for source_id in configured_sources:
+            with self.subTest(source_id=source_id):
+                self.assertIn(source_id, self.sources_by_id)
+                topic_ids = [
+                    topic_id
+                    for topic_id in P2I_MYTH_FACT_TOPIC_IDS
+                    if source_id in self.topic_source_ids.get(topic_id, set())
+                ]
+                self.assertEqual(len(topic_ids), 1)
+                family_counts[topic_ids[0]] += 1
+
+        self.assertEqual(family_counts, P2I_MYTH_FACT_FAMILY_COUNTS)
+        self.assertTrue(all(count >= 2 for count in family_counts.values()))
+        self.assertNotIn("mayoclinic_cas_speech_muscle_myth", configured_sources)
+        self.assertNotIn("asha_single_sound_error", configured_sources)
+        self.assertNotIn("readingrockets_reading_myths", configured_sources)
 
     def test_asha_speech_source_routes_to_speech_sounds(self):
         with patch.object(publisher, "detect_evidence_topics") as detect_mock:
@@ -881,12 +928,19 @@ class MythFactObservableBenefitTest(unittest.TestCase):
         )
 
 
-class MythFactUnchangedRuntimeSurfaceTest(unittest.TestCase):
-    """The follow-up must not touch pool, routing, cooldown or dedup."""
+class MythFactRuntimeSurfaceContractTest(unittest.TestCase):
+    """Inventory synchronization must not weaken routing, cooldown or dedup."""
 
-    def test_canonical_five_source_pool_is_unchanged(self):
+    def test_canonical_source_pool_stays_synchronized_with_config(self):
+        rubrics_cfg = yaml.safe_load((ROOT / "config" / "rubrics.yml").read_text(encoding="utf-8"))
+        myth_fact = next(
+            item
+            for item in rubrics_cfg["audiences"]["parents"]["rubrics"]
+            if item.get("id") == "myth_fact"
+        )
         pool = publisher.MYTH_FACT_CANONICAL_SOURCE_IDS
-        self.assertEqual(len(pool), 5)
+        self.assertEqual(pool, frozenset(myth_fact["sources"]))
+        self.assertEqual(len(pool), 11)
 
     def test_cooldown_and_dedup_policy_constants_are_unchanged(self):
         from src.publisher import dedup_policy

@@ -97,10 +97,9 @@ audiences:
         byweekday: ["WE"]
         sources:
           - "healthychildren_bilingual_myths"
-          - "asha_early_intervention_multilingual_delay"
           - "nationwide_bilingual_speech_delay"
           - "asha_speech_sound_multilingual_influence"
-          - "asha_omd_speech_sound_causation"
+          - "bham_nhs_speech_sound_disorder"
           - "asha_newborn_hearing_screening"
           - "nationwide_school_hearing_screening"
           - "nationwide_newborn_hearing_screening"

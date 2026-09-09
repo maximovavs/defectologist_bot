@@ -31,6 +31,7 @@ quality:
     - "russkiymir.ru"
     - "parents.actionforchildren.org.uk"
     - "gosh.nhs.uk"
+    - "bhamcommunity.nhs.uk"
     - "parents.com"
     - "verywellfamily.com"
 
@@ -109,6 +110,7 @@ quality:
     - "healthychildren.org"
     - "mayoclinic.org"
     - "gosh.nhs.uk"
+    - "bhamcommunity.nhs.uk"
     - "nationwidechildrens.org"
     - "blog.cincinnatichildrens.org"
 
@@ -432,23 +434,17 @@ sources:
 
   # ---------- myth/fact source inventory expansion probe ----------
 
-  - id: asha_early_intervention_multilingual_delay
-    name: "ASHA — Early intervention multilingual delay"
-    type: static
-    urls:
-      - "https://www.asha.org/practice-portal/professional-issues/early-intervention/"
-
   - id: nationwide_bilingual_speech_delay
     name: "Nationwide Children's — Bilingualism and speech delay"
     type: static
     urls:
       - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/12/teaching-kids-a-second-language-can-it-cause-a-speech-delay"
 
-  - id: asha_omd_speech_sound_causation
-    name: "ASHA — OMD speech sound causation"
+  - id: bham_nhs_speech_sound_disorder
+    name: "Birmingham Community Healthcare NHS — Speech Sound Disorder"
     type: static
     urls:
-      - "https://www.asha.org/practice-portal/clinical-topics/orofacial-myofunctional-disorders/"
+      - "https://www.bhamcommunity.nhs.uk/childrens-slt-specific-needs-speech-sound-disorder"
 
   - id: nationwide_school_hearing_screening
     name: "Nationwide Children's — School hearing screening"

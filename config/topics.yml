@@ -31,7 +31,7 @@ topics:
       - logoportal_latest
       - logorina_latest
       - asha_speech_sound_multilingual_influence
-      - asha_omd_speech_sound_causation
+      - bham_nhs_speech_sound_disorder
 
   phonemic_awareness:
     source_ids:
@@ -90,7 +90,6 @@ topics:
       - docdeti_bilingualism
       - raisingchildren_bilingual
       - zerotothree_dual_language
-      - asha_early_intervention_multilingual_delay
       - nationwide_bilingual_speech_delay
 
   everyday_communication:

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 from src.publisher import dedup_policy
 from src.publisher import run_publisher as publisher
 from src.services import llm_generator
@@ -701,26 +703,26 @@ class PublisherDuplicateDaySlotGuardTest(unittest.TestCase):
         send_mock.assert_not_called()
         self.assertIn("reason=production_slot_already_fulfilled", output.getvalue())
 
-    def test_guard_changes_no_cooldown_dedup_pool_or_routing_constant(self) -> None:
+    def test_guard_changes_no_cooldown_dedup_or_inventory_routing_contract(self) -> None:
         self.assertEqual(publisher.SOURCE_COOLDOWN_DAYS, 28)
         self.assertEqual(dedup_policy.EDITORIAL_CORE_COOLDOWN_DAYS, 28)
         self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_SOURCE, 0.93)
         self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_POST, 0.86)
         self.assertEqual(dedup_policy.SEMANTIC_THRESHOLD_POST_MYTH_FACT, 0.94)
         self.assertEqual(dedup_policy.RECENT_SOURCE_DOMAIN_WINDOW, 3)
+        rubrics_cfg = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "config" / "rubrics.yml").read_text(encoding="utf-8")
+        )
+        myth_fact = next(
+            item
+            for item in rubrics_cfg["audiences"]["parents"]["rubrics"]
+            if item.get("id") == "myth_fact"
+        )
         self.assertEqual(
             publisher.MYTH_FACT_CANONICAL_SOURCE_IDS,
-            frozenset(
-                {
-                    "healthychildren_bilingual_myths",
-                    "asha_speech_sound_multilingual_influence",
-                    "asha_newborn_hearing_screening",
-                    "healthychildren_one_year_talking",
-                    "healthychildren_crawling_reading_myth",
-                }
-            ),
+            frozenset(myth_fact["sources"]),
         )
-        self.assertEqual(len(publisher.MYTH_FACT_CANONICAL_SOURCE_IDS), 5)
+        self.assertEqual(len(publisher.MYTH_FACT_CANONICAL_SOURCE_IDS), 11)
         self.assertEqual(
             llm_generator.MYTH_FACT_TOPIC_FAMILY,
             {

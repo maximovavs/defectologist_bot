@@ -41,6 +41,26 @@ class Predecessor:
     run_number: int
 
 
+@dataclass(frozen=True)
+class ProvenPreMutationIncident:
+    run_id: int
+    run_number: int
+    event: str
+    head_branch: str
+    head_sha: str
+    conclusion: str
+
+
+PROVEN_PRE_MUTATION_INCIDENT = ProvenPreMutationIncident(
+    run_id=34389481621,
+    run_number=470,
+    event="workflow_dispatch",
+    head_branch="main",
+    head_sha="a1bf73dd1e647d1a2436a7f6896f55edc1a8412f",
+    conclusion="failure",
+)
+
+
 def _positive_int(value: object, field: str) -> int:
     if isinstance(value, bool):
         raise StateContinuityError(f"ambiguous_run_metadata:{field}")
@@ -142,6 +162,36 @@ def _validate_ordered_prod_run(
     }
 
 
+def _matches_proven_pre_mutation_incident(
+    run: Mapping[str, object], *, run_id: int, run_number: int
+) -> bool:
+    incident = PROVEN_PRE_MUTATION_INCIDENT
+    if run_id != incident.run_id and run_number != incident.run_number:
+        return False
+
+    actual = (
+        run_id,
+        run_number,
+        run.get("event"),
+        run.get("head_branch"),
+        run.get("head_sha"),
+        run.get("conclusion"),
+    )
+    expected = (
+        incident.run_id,
+        incident.run_number,
+        incident.event,
+        incident.head_branch,
+        incident.head_sha,
+        incident.conclusion,
+    )
+    if actual != expected:
+        raise StateContinuityError(
+            f"proven_pre_mutation_incident_metadata_mismatch:run_id={run_id}"
+        )
+    return True
+
+
 def _post_job_proves_publisher_not_executed(
     jobs_payload: Mapping[str, object], run_id: int
 ) -> bool:
@@ -205,6 +255,49 @@ def _post_job_proves_publisher_not_executed(
     return publisher_status == "completed" and publisher_conclusion == "skipped"
 
 
+def _post_job_proves_incident_publisher_failure(
+    jobs_payload: Mapping[str, object], run_id: int
+) -> bool:
+    jobs = jobs_payload.get("jobs")
+    if not isinstance(jobs, list):
+        raise StateContinuityError(f"ambiguous_job_metadata:run_id={run_id}")
+
+    matches = [
+        job
+        for job in jobs
+        if isinstance(job, Mapping) and str(job.get("name") or "").strip() == "post"
+    ]
+    if len(matches) != 1:
+        raise StateContinuityError(f"ambiguous_post_job_identity:run_id={run_id}")
+
+    job = matches[0]
+    if (
+        str(job.get("status") or "").strip() != "completed"
+        or str(job.get("conclusion") or "").strip() != "failure"
+    ):
+        return False
+
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        raise StateContinuityError(f"ambiguous_post_steps:run_id={run_id}")
+    publisher_steps = [
+        step
+        for step in steps
+        if isinstance(step, Mapping)
+        and str(step.get("name") or "").strip() == "Run Publisher"
+    ]
+    if len(publisher_steps) != 1:
+        raise StateContinuityError(
+            f"ambiguous_publisher_step_identity:run_id={run_id}"
+        )
+
+    publisher_step = publisher_steps[0]
+    return (
+        str(publisher_step.get("status") or "").strip() == "completed"
+        and str(publisher_step.get("conclusion") or "").strip() == "failure"
+    )
+
+
 def resolve_predecessor(
     runs: Sequence[Mapping[str, object]],
     *,
@@ -247,6 +340,11 @@ def resolve_predecessor(
             raise StateContinuityError("ambiguous_production_predecessor_order")
 
         _, run_id, raw = same_number[0]
+        matches_proven_incident = _matches_proven_pre_mutation_incident(
+            raw,
+            run_id=run_id,
+            run_number=run_number,
+        )
         candidate = _validate_ordered_prod_run(
             raw,
             ref_name=ref_name,
@@ -260,6 +358,10 @@ def resolve_predecessor(
         if conclusion in PRE_PUBLISHER_SKIPPABLE:
             jobs_payload = jobs_loader(run_id)
             if _post_job_proves_publisher_not_executed(jobs_payload, run_id):
+                continue
+            if matches_proven_incident and _post_job_proves_incident_publisher_failure(
+                jobs_payload, run_id
+            ):
                 continue
 
         return Predecessor(run_id=run_id, run_number=run_number)

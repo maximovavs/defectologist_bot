@@ -447,6 +447,7 @@ def _workflow_run(
     status: str = "completed",
     run_attempt: int = 1,
     branch: str = "main",
+    head_sha: str = "test-head-sha",
     event: str = "schedule",
     title: str = "",
 ):
@@ -455,6 +456,7 @@ def _workflow_run(
         "run_number": run_number,
         "run_attempt": run_attempt,
         "head_branch": branch,
+        "head_sha": head_sha,
         "status": status,
         "conclusion": conclusion,
         "display_title": title
@@ -628,6 +630,111 @@ class ProductionStatePredecessorTest(unittest.TestCase):
             )
         self.assertEqual((predecessor.run_id, predecessor.run_number), (4450, 445))
         urlopen.assert_not_called()
+
+    def test_incident_470_failure_skips_through_471_to_last_valid_state(self):
+        incident_head_sha = "a1bf73dd1e647d1a2436a7f6896f55edc1a8412f"
+        runs = [
+            _workflow_run(
+                34390642457,
+                471,
+                conclusion="failure",
+                event="workflow_dispatch",
+                head_sha=incident_head_sha,
+            ),
+            _workflow_run(
+                34389481621,
+                470,
+                conclusion="failure",
+                event="workflow_dispatch",
+                head_sha=incident_head_sha,
+            ),
+            _workflow_run(
+                34354544933,
+                469,
+                head_sha="045ac50da80ac5a73bba5bfe11142809c1accc43",
+            ),
+        ]
+        jobs = {
+            34390642457: _post_job_payload(
+                run_conclusion="failure",
+                publisher_conclusion="skipped",
+            ),
+            34389481621: _post_job_payload(
+                run_conclusion="failure",
+                publisher_conclusion="failure",
+            ),
+        }
+
+        predecessor = self._resolve(
+            runs,
+            current_run_id=34392000000,
+            current_run_number=472,
+            jobs_loader=lambda run_id: jobs[run_id],
+        )
+
+        self.assertEqual(
+            (predecessor.run_id, predecessor.run_number),
+            (34354544933, 469),
+        )
+        self.assertEqual(
+            continuity.build_expected_cache_key(
+                cache_version="v12",
+                ref_name="main",
+                predecessor_run_id=predecessor.run_id,
+            ),
+            "logoped-state-v12-prod-main-34354544933",
+        )
+
+    def test_incident_exception_requires_every_immutable_metadata_field(self):
+        exact = _workflow_run(
+            34389481621,
+            470,
+            conclusion="failure",
+            event="workflow_dispatch",
+            head_sha="a1bf73dd1e647d1a2436a7f6896f55edc1a8412f",
+        )
+        mismatches = {
+            "run_id": {**exact, "id": 34389481622},
+            "run_number": {**exact, "run_number": 469},
+            "event": {**exact, "event": "schedule"},
+            "head_branch": {**exact, "head_branch": "incident"},
+            "head_sha": {**exact, "head_sha": "0" * 40},
+            "conclusion": {**exact, "conclusion": "cancelled"},
+        }
+
+        for field, run in mismatches.items():
+            with self.subTest(field=field), self.assertRaisesRegex(
+                continuity.StateContinuityError,
+                "proven_pre_mutation_incident_metadata_mismatch",
+            ):
+                self._resolve(
+                    [run, _workflow_run(34354544933, 468)],
+                    current_run_id=34392000000,
+                    current_run_number=472,
+                    jobs_loader=lambda _run_id: _post_job_payload(
+                        run_conclusion="failure",
+                        publisher_conclusion="failure",
+                    ),
+                )
+
+    def test_incident_metadata_does_not_skip_nonfailure_publisher_outcome(self):
+        incident = _workflow_run(
+            34389481621,
+            470,
+            conclusion="failure",
+            event="workflow_dispatch",
+            head_sha="a1bf73dd1e647d1a2436a7f6896f55edc1a8412f",
+        )
+        predecessor = self._resolve(
+            [incident, _workflow_run(34354544933, 469)],
+            current_run_id=34392000000,
+            current_run_number=472,
+            jobs_loader=lambda _run_id: _post_job_payload(
+                run_conclusion="failure",
+                publisher_conclusion="success",
+            ),
+        )
+        self.assertEqual((predecessor.run_id, predecessor.run_number), (34389481621, 470))
 
     def test_newest_to_oldest_selection_is_independent_of_input_order(self):
         jobs_99 = _post_job_payload(run_conclusion="failure")

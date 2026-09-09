@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from sentence_transformers import SentenceTransformer, util
 
@@ -541,6 +541,49 @@ class PublicationStore:
                 (evidence_hash, since_iso),
             ).fetchone()
         return row is not None
+
+    def find_recent_myth_fact_claim_duplicate(
+        self,
+        claim_text: str,
+        *,
+        since_iso: str,
+        claim_matcher: Callable[[str, str], bool],
+        limit: int = 200,
+    ) -> Optional[SimilarPublication]:
+        """
+        Find an exact structured myth claim in recent myth_fact history.
+
+        Claims are derived from the existing body_norm value at query time. No
+        schema column, backfill or publication-state mutation is involved.
+        """
+        if not str(claim_text or "").strip() or not since_iso or limit <= 0:
+            return None
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT canonical_url, body_norm, posted_at, audience, rubric_id
+                FROM publications
+                WHERE rubric_id = 'myth_fact'
+                  AND posted_at >= ?
+                  AND body_norm != ''
+                ORDER BY posted_at DESC, id DESC
+                LIMIT ?
+                """,
+                (since_iso, limit),
+            ).fetchall()
+
+        for row in rows:
+            if claim_matcher(row["body_norm"] or "", claim_text):
+                return SimilarPublication(
+                    canonical_url=row["canonical_url"],
+                    similarity=1.0,
+                    posted_at=row["posted_at"],
+                    audience=row["audience"],
+                    rubric_id=row["rubric_id"],
+                    match_field="myth_claim",
+                )
+        return None
 
     def recent_source_domains(self, limit: int = 3) -> List[str]:
         """

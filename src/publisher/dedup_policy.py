@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 
 def _env_float(name: str, default: str) -> float:
@@ -52,6 +53,7 @@ SEMANTIC_THRESHOLD_POST = _env_float("SEMANTIC_THRESHOLD_POST", "0.86")
 # Freshness cooldowns, in days.
 SOURCE_COOLDOWN_DAYS = _env_int("SOURCE_COOLDOWN_DAYS", "28")
 EDITORIAL_CORE_COOLDOWN_DAYS = _env_int("EDITORIAL_CORE_COOLDOWN_DAYS", "28")
+MYTH_FACT_CLAIM_COOLDOWN_DAYS = 77
 
 # How many recently used source domains feed the soft diversity preference.
 RECENT_SOURCE_DOMAIN_WINDOW = _env_int("RECENT_SOURCE_DOMAIN_WINDOW", "3")
@@ -195,6 +197,87 @@ def should_bypass_source_semantic_dedup(rubric_id: str | None) -> bool:
     their own full-body thresholds and by the editorial-core freshness check.
     """
     return normalize_rubric_id(rubric_id) == "method_piggybank"
+
+
+# ---------------------------------------------------------------------------
+# Myth/fact claim freshness (deterministic exact/prefix matching)
+# ---------------------------------------------------------------------------
+
+_MYTH_FACT_MARKER_RE = re.compile(r"🔴\s*миф\s*:\s*", re.IGNORECASE)
+_MYTH_FACT_DASH_TRANSLATION = str.maketrans({
+    "‐": "-",
+    "‑": "-",
+    "‒": "-",
+    "–": "-",
+    "—": "-",
+    "―": "-",
+    "−": "-",
+})
+_MYTH_FACT_SURROUNDING_QUOTES = "\"'«»“”„‟‹›"
+_MYTH_FACT_TERMINAL_PUNCTUATION = ".!?…,:;"
+_MYTH_FACT_PREFIX_BOUNDARIES = frozenset(
+    _MYTH_FACT_TERMINAL_PUNCTUATION
+    + _MYTH_FACT_SURROUNDING_QUOTES
+    + ")]}"
+)
+
+
+def _normalize_myth_fact_lexical_text(text: str) -> str:
+    value = unicodedata.normalize("NFKC", str(text or ""))
+    value = value.translate(_MYTH_FACT_DASH_TRANSLATION)
+    value = value.lower().replace("ё", "е")
+    value = re.sub(r"\s*-\s*", "-", value)
+    return " ".join(value.split()).strip()
+
+
+def normalize_myth_fact_claim(text: str) -> str:
+    """
+    Normalize harmless typography while preserving the claim's lexical identity.
+
+    This intentionally does not stem, translate, synonymize or use embeddings.
+    """
+    value = _normalize_myth_fact_lexical_text(text)
+    previous = None
+    while value and value != previous:
+        previous = value
+        value = value.strip()
+        value = value.lstrip(_MYTH_FACT_SURROUNDING_QUOTES).strip()
+        value = value.rstrip(_MYTH_FACT_TERMINAL_PUNCTUATION).strip()
+        value = value.rstrip(_MYTH_FACT_SURROUNDING_QUOTES).strip()
+    return value
+
+
+def historical_body_has_myth_fact_claim(body_text: str, candidate_claim: str) -> bool:
+    """
+    Match a claim only at the structured "🔴 Миф:" prefix in a stored body.
+
+    PublicationStore collapses newlines in body_norm. Therefore the historical
+    claim has no reliable closing delimiter: an exact candidate may be followed
+    immediately by punctuation or by the flattened factual explanation. Matching
+    is consequently limited to the normalized prefix after the marker, never an
+    unrestricted substring elsewhere in the post.
+    """
+    claim = normalize_myth_fact_claim(candidate_claim)
+    if not claim:
+        return False
+
+    marker = _MYTH_FACT_MARKER_RE.search(str(body_text or ""))
+    if marker is None:
+        return False
+
+    historical_prefix = _normalize_myth_fact_lexical_text(
+        str(body_text or "")[marker.end():]
+    )
+    historical_prefix = historical_prefix.lstrip(
+        _MYTH_FACT_SURROUNDING_QUOTES
+    ).strip()
+    if not historical_prefix.startswith(claim):
+        return False
+
+    remainder = historical_prefix[len(claim):]
+    if not remainder:
+        return True
+    return remainder[0].isspace() or remainder[0] in _MYTH_FACT_PREFIX_BOUNDARIES
 
 
 # ---------------------------------------------------------------------------

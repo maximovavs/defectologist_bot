@@ -18,6 +18,7 @@ on:
       - "tests/test_topic_policy.py"
       - "tests/test_editorial_freshness_policy.py"
       - "tests/test_myth_fact_fidelity.py"
+      - "tests/test_myth_fact_claim_freshness.py"
       - "tests/test_myth_fact_source_probe.py"
       - "tests/test_parent_age_evidence_fidelity.py"
       - "tests/test_parent_modality_fidelity.py"
@@ -71,6 +72,7 @@ jobs:
             tests/test_topic_policy.py \
             tests/test_editorial_freshness_policy.py \
             tests/test_myth_fact_fidelity.py \
+            tests/test_myth_fact_claim_freshness.py \
             tests/test_myth_fact_source_probe.py \
             tests/test_parent_age_evidence_fidelity.py \
             tests/test_parent_modality_fidelity.py \
@@ -121,6 +123,7 @@ jobs:
               "tests.test_topic_policy",
               "tests.test_editorial_freshness_policy",
               "tests.test_myth_fact_fidelity",
+              "tests.test_myth_fact_claim_freshness",
               "tests.test_myth_fact_source_probe",
               "tests.test_parent_age_evidence_fidelity",
               "tests.test_parent_modality_fidelity",

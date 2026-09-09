@@ -97,10 +97,17 @@ audiences:
         byweekday: ["WE"]
         sources:
           - "healthychildren_bilingual_myths"
+          - "asha_early_intervention_multilingual_delay"
+          - "nationwide_bilingual_speech_delay"
           - "asha_speech_sound_multilingual_influence"
+          - "asha_omd_speech_sound_causation"
           - "asha_newborn_hearing_screening"
+          - "nationwide_school_hearing_screening"
+          - "nationwide_newborn_hearing_screening"
           - "healthychildren_one_year_talking"
+          - "nationwide_aac_myths"
           - "healthychildren_crawling_reading_myth"
+          - "healthychildren_learning_disorders_dyslexia"
         format: "myth_fact"
         media: ["image_card"]
 

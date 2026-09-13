@@ -326,6 +326,25 @@ class _StartToStartPacer:
         return self._previous_start
 
 
+def _paced_transport(pacer: "_StartToStartPacer", underlying: Any) -> Any:
+    """Wrap a transport so pacing happens at the real provider-call boundary.
+
+    `classify_item` builds the URL, headers and payload before it reaches the
+    transport. Pacing the loop around `classify_item` would stamp a start that
+    precedes that preparation, so preparation time would be spent inside the
+    interval and two real provider calls could land back to back. Pacing here
+    means the stamped start is the transport call itself.
+
+    The wrapper delegates exactly once. It never repeats a request.
+    """
+
+    def paced(url, headers, payload, timeout):  # noqa: ANN001
+        pacer.wait_for_slot()
+        return underlying(url, headers, payload, timeout)
+
+    return paced
+
+
 def classify_failure_reason(failure_reason: str) -> str:
     """Map a failure reason onto its class, failing closed on anything unknown.
 
@@ -575,10 +594,11 @@ def run_classification(
         selected = list(corpus)
 
     pacer = _StartToStartPacer(min_request_interval_seconds, clock=clock, sleep=sleep)
-    predictions = []
-    for item in selected:
-        pacer.wait_for_slot()
-        predictions.append(classify_item(provider, prompt_text, item, api_key, post=post))
+    transport = _paced_transport(pacer, post or _http_post)
+    predictions = [
+        classify_item(provider, prompt_text, item, api_key, post=transport)
+        for item in selected
+    ]
     return {
         "schema_version": 1,
         "provider": provider,

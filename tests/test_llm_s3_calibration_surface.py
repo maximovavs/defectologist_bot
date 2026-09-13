@@ -1787,3 +1787,150 @@ def test_pacing_does_not_change_the_request_payloads(tmp_path: Path) -> None:
     assert payload["temperature"] == 0
     _url2, _headers2, gem = cal.build_request("gemini", prompt, "текст", "key")
     assert gem["generationConfig"] == {"responseMimeType": "application/json"}
+
+
+# ---------------------------------------------------------------------------
+# Pacing must be anchored at the actual transport-call boundary
+# ---------------------------------------------------------------------------
+
+
+def _run_paced_with_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interval: float,
+    prep_latencies: List[float],
+    transport_latencies: List[float],
+    only_ids: List[str],
+) -> tuple[_FakeClock, _PacedTransport, List[str]]:
+    """Drive a run where building the request itself consumes clock time.
+
+    `classify_item` calls `build_request` before it reaches the transport, so a
+    slow preparation step moves the clock between the pacing decision and the
+    actual provider call. Pacing anchored anywhere earlier than the transport
+    boundary silently loses that time.
+    """
+
+    shutil.copyfile(PROMPT_PATH, tmp_path / "classification_prompt.txt")
+    shutil.copyfile(CORPUS_PATH, tmp_path / "validation_corpus.json")
+    clock = _FakeClock()
+    events: List[str] = []
+
+    original_build = cal.build_request
+    pending_prep = list(prep_latencies)
+
+    def slow_build_request(provider, prompt_text, corpus_text, api_key):  # noqa: ANN001
+        events.append(f"build@{clock.now}")
+        if pending_prep:
+            clock.now += pending_prep.pop(0)
+        return original_build(provider, prompt_text, corpus_text, api_key)
+
+    monkeypatch.setattr(cal, "build_request", slow_build_request)
+
+    class _EventTransport(_PacedTransport):
+        def __call__(self, url, headers, payload, timeout):  # noqa: ANN001
+            events.append(f"transport@{self.clock.now}")
+            return super().__call__(url, headers, payload, timeout)
+
+    transport = _EventTransport(
+        clock, transport_latencies, body=_groq_body("MODEL_WAIT", "ATTEND_VOCALIZE_REPEAT")
+    )
+
+    original_sleep = clock.sleep
+
+    def recording_sleep(seconds: float) -> None:
+        events.append(f"sleep@{clock.now}+{seconds}")
+        original_sleep(seconds)
+
+    cal.run_classification(
+        "groq",
+        tmp_path / "classification_prompt.txt",
+        tmp_path / "validation_corpus.json",
+        "offline-placeholder-not-a-credential",
+        only_ids=only_ids,
+        min_request_interval_seconds=interval,
+        post=transport,
+        clock=clock.monotonic,
+        sleep=recording_sleep,
+    )
+    return clock, transport, events
+
+
+def test_request_preparation_delay_cannot_shrink_transport_spacing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 30 s preparation before the first transport must not collapse the gap.
+
+    Pacing taken before `classify_item` stamps a start that precedes
+    `build_request`, so a slow preparation is spent *inside* the interval and
+    the two real provider calls end up back to back.
+    """
+
+    _clock, transport, _events = _run_paced_with_preparation(
+        tmp_path,
+        monkeypatch,
+        16.0,
+        prep_latencies=[30.0, 0.0, 0.0],
+        transport_latencies=[0.0],
+        only_ids=["v001", "v002", "v004"],
+    )
+    # Pre-`classify_item` pacing yields [30.0, 30.0, 46.0] -- a zero gap.
+    assert transport.starts == [30.0, 46.0, 62.0]
+    for earlier, later in zip(transport.starts, transport.starts[1:]):
+        assert later - earlier >= 16.0
+
+
+def test_pacing_happens_after_request_preparation_not_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sleep must sit between building the request and calling the provider."""
+
+    _clock, _transport, events = _run_paced_with_preparation(
+        tmp_path,
+        monkeypatch,
+        16.0,
+        prep_latencies=[0.0, 5.0],
+        transport_latencies=[0.0],
+        only_ids=["v001", "v002"],
+    )
+    assert events == [
+        "build@0.0",
+        "transport@0.0",
+        "build@0.0",
+        "sleep@5.0+11.0",
+        "transport@16.0",
+    ]
+
+
+def test_variable_preparation_delay_holds_the_transport_invariant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clock, transport, _events = _run_paced_with_preparation(
+        tmp_path,
+        monkeypatch,
+        16.0,
+        prep_latencies=[2.0, 40.0, 1.0, 0.0, 7.0],
+        transport_latencies=[3.0, 1.0, 20.0, 0.5, 0.5],
+        only_ids=["v001", "v002", "v004", "v005", "v006"],
+    )
+    assert len(transport.starts) == 5
+    for earlier, later in zip(transport.starts, transport.starts[1:]):
+        assert later - earlier >= 16.0
+
+
+def test_paced_transport_delegates_exactly_once_per_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pacing wrapper must not duplicate, retry or repair a request."""
+
+    _clock, transport, events = _run_paced_with_preparation(
+        tmp_path,
+        monkeypatch,
+        16.0,
+        prep_latencies=[1.0, 1.0, 1.0],
+        transport_latencies=[0.0],
+        only_ids=["v001", "v002", "v004"],
+    )
+    assert len(transport.starts) == 3
+    # Exactly one build and one transport per item: no duplicate, retry or repair.
+    assert sum(1 for e in events if e.startswith("build@")) == 3
+    assert sum(1 for e in events if e.startswith("transport@")) == 3

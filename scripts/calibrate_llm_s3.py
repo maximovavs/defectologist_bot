@@ -299,10 +299,9 @@ def build_request(
         payload = {
             "systemInstruction": {"parts": [{"text": prompt_text}]},
             "contents": [{"role": "user", "parts": [{"text": corpus_text}]}],
-            "generationConfig": {
-                "temperature": 0,
-                "responseMimeType": "application/json",
-            },
+            # gemini-3.7-flash no longer accepts the legacy temperature /
+            # top-p / top-k controls, so the config carries the response type only.
+            "generationConfig": {"responseMimeType": "application/json"},
         }
         return GEMINI_ENDPOINT, headers, payload
     raise ValueError(f"unsupported provider: {provider}")
@@ -534,6 +533,7 @@ def evaluate_provider(
 
     excluded_ambiguity_ids = sorted(set(predictions) & ambiguity_ids)
     scored_ids = sorted(set(gold_items) & set(predictions) - ambiguity_ids)
+    scored_set = set(scored_ids)
 
     if require_full_corpus and len(scored_ids) != PRIMARY_ITEM_COUNT:
         raise FrozenInputError(
@@ -585,24 +585,32 @@ def evaluate_provider(
         and model_wait["joint_accuracy"] >= MODEL_WAIT_ACCURACY_THRESHOLD
     )
 
-    # Hard negatives: a false positive is a prediction that collapses a frozen
-    # contrast onto the paired item's gold signature.
-    hard_negative_false_positives: List[Dict[str, str]] = []
+    # Hard negatives: each frozen pair holds two distinct gold S3 signatures.
+    # The pair is a false positive when both predictions are complete and
+    # collapse onto one and the same predicted signature -- whatever that
+    # signature is, including one that matches neither pair gold. Swapped but
+    # still distinct predictions are a true negative for this criterion. The
+    # pair is counted once. Incomplete/invalid collapses are not counted here;
+    # they are covered by the unsafe-collision check below.
+    hard_negative_false_positives: List[Dict[str, Any]] = []
     evaluated_pairs = 0
     for pair in gold["hard_negative_pairs"]:
         id_a, id_b = str(pair["id_a"]), str(pair["id_b"])
-        if id_a not in scored_ids or id_b not in scored_ids:
+        if id_a not in scored_set or id_b not in scored_set:
             continue
         evaluated_pairs += 1
-        sig_a = (str(pair["gold_a"]["interaction_frame"]), str(pair["gold_a"]["child_response"]))
-        sig_b = (str(pair["gold_b"]["interaction_frame"]), str(pair["gold_b"]["child_response"]))
-        if _is_complete(predictions[id_a]) and _signature(predictions[id_a]) == sig_b:
+        record_a, record_b = predictions[id_a], predictions[id_b]
+        if not (_is_complete(record_a) and _is_complete(record_b)):
+            continue
+        predicted_a, predicted_b = _signature(record_a), _signature(record_b)
+        if predicted_a == predicted_b:
             hard_negative_false_positives.append(
-                {"pair_id": str(pair["pair_id"]), "item_id": id_a, "collapsed_onto": id_b}
-            )
-        if _is_complete(predictions[id_b]) and _signature(predictions[id_b]) == sig_a:
-            hard_negative_false_positives.append(
-                {"pair_id": str(pair["pair_id"]), "item_id": id_b, "collapsed_onto": id_a}
+                {
+                    "pair_id": str(pair["pair_id"]),
+                    "id_a": id_a,
+                    "id_b": id_b,
+                    "collapsed_signature": list(predicted_a),
+                }
             )
 
     # Paraphrase groups: a group passes only when every member is jointly correct.
@@ -611,7 +619,7 @@ def evaluate_provider(
     failed_groups: List[str] = []
     for group in gold["paraphrase_groups"]:
         member_ids = [str(m) for m in group["member_ids"]]
-        if any(m not in scored_ids for m in member_ids):
+        if any(m not in scored_set for m in member_ids):
             continue
         groups_evaluated += 1
         if all(m in correct_ids for m in member_ids):

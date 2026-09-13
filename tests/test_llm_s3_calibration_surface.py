@@ -162,6 +162,62 @@ def _perfect_predictions(provider: str) -> Dict[str, Any]:
     }
 
 
+def _set_prediction(payload: Dict[str, Any], item_id: str, signature: tuple[str, str]) -> None:
+    for record in payload["predictions"]:
+        if record["id"] == item_id:
+            record["status"] = "ok"
+            record["interaction_frame"], record["child_response"] = signature
+            return
+    raise AssertionError(f"no prediction for {item_id}")
+
+
+def _fail_prediction(payload: Dict[str, Any], item_id: str) -> None:
+    for index, record in enumerate(payload["predictions"]):
+        if record["id"] == item_id:
+            payload["predictions"][index] = {
+                "id": item_id,
+                "status": "failed",
+                "failure_reason": "malformed_json",
+                "detail": "",
+            }
+            return
+    raise AssertionError(f"no prediction for {item_id}")
+
+
+def _gold_signature(side: Dict[str, str]) -> tuple[str, str]:
+    return (side["interaction_frame"], side["child_response"])
+
+
+def _isolated_hard_negative_pair(gold: Dict[str, Any]) -> Dict[str, Any]:
+    """Pick a frozen pair whose members belong to no other pair and no group.
+
+    Mutating such a pair's predictions cannot disturb any other pair, so the
+    pair-level criterion can be asserted as an exact count.
+    """
+
+    membership: Dict[str, int] = {}
+    for pair in gold["hard_negative_pairs"]:
+        for item_id in (pair["id_a"], pair["id_b"]):
+            membership[item_id] = membership.get(item_id, 0) + 1
+    grouped = {m for group in gold["paraphrase_groups"] for m in group["member_ids"]}
+    for pair in gold["hard_negative_pairs"]:
+        ids = (pair["id_a"], pair["id_b"])
+        if all(membership[i] == 1 for i in ids) and not set(ids) & grouped:
+            assert _gold_signature(pair["gold_a"]) != _gold_signature(pair["gold_b"])
+            return pair
+    raise AssertionError("no isolated hard-negative pair in the frozen gold")
+
+
+def _third_signature(gold: Dict[str, Any], *excluded: tuple[str, str]) -> tuple[str, str]:
+    """A valid S3 signature drawn from gold, distinct from every excluded one."""
+
+    for item in gold["primary_scoring_items"]:
+        candidate = (item["interaction_frame"], item["child_response"])
+        if candidate not in excluded:
+            return candidate
+    raise AssertionError("no third signature available")
+
+
 def _groq_body(frame: str, response: str) -> str:
     payload = json.dumps({"interaction_frame": frame, "child_response": response})
     return json.dumps({"choices": [{"message": {"content": payload}}]})
@@ -532,6 +588,33 @@ def test_gemini_request_carries_exactly_one_corpus_text() -> None:
     assert payload["systemInstruction"]["parts"][0]["text"] == prompt
     assert headers["x-goog-api-key"] == "key"
     assert "model" not in payload
+    assert set(payload) == {"systemInstruction", "contents", "generationConfig"}
+
+
+def test_gemini_generation_config_is_exactly_the_response_mime_type() -> None:
+    """gemini-3.7-flash no longer accepts the legacy sampling controls."""
+
+    prompt = cal.load_prompt(PROMPT_PATH)
+    _url, _headers, payload = cal.build_request("gemini", prompt, "текст", "key")
+    assert payload["generationConfig"] == {"responseMimeType": "application/json"}
+
+
+@pytest.mark.parametrize("legacy", ["temperature", "topP", "topK", "top_p", "top_k"])
+def test_gemini_request_carries_no_legacy_sampling_control(legacy: str) -> None:
+    prompt = cal.load_prompt(PROMPT_PATH)
+    _url, _headers, payload = cal.build_request("gemini", prompt, "текст", "key")
+    assert legacy not in payload["generationConfig"]
+    assert legacy not in payload
+    assert legacy not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_groq_request_keeps_its_own_sampling_control() -> None:
+    """Fix A is Gemini-only: the Groq request contract is unchanged."""
+
+    prompt = cal.load_prompt(PROMPT_PATH)
+    _url, _headers, payload = cal.build_request("groq", prompt, "текст", "key")
+    assert payload["temperature"] == 0
+    assert payload["response_format"] == {"type": "json_object"}
 
 
 def test_one_request_per_corpus_item_and_no_repair_call(tmp_path: Path) -> None:
@@ -706,19 +789,97 @@ def test_thresholds_match_the_preregistered_contract() -> None:
     assert cal.HARD_NEGATIVE_MAX_FALSE_POSITIVES == 0
 
 
-def test_hard_negative_collapse_is_reported_as_a_false_positive() -> None:
+def test_hard_negative_case_a_perfect_predictions_have_no_false_positive() -> None:
     gold = _gold()
-    pair = gold["hard_negative_pairs"][0]
+    result = cal.evaluate_provider(gold, _perfect_predictions("groq"))
+    assert result["hard_negative_pairs_evaluated"] == 49
+    assert result["hard_negative_false_positives"] == []
+    assert result["checks"]["hard_negative_false_positives"] is True
+
+
+def test_hard_negative_case_b_both_predict_gold_a_is_one_false_positive() -> None:
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    sig_a = _gold_signature(pair["gold_a"])
     payload = _perfect_predictions("groq")
-    for record in payload["predictions"]:
-        if record["id"] == pair["id_a"]:
-            record["interaction_frame"] = pair["gold_b"]["interaction_frame"]
-            record["child_response"] = pair["gold_b"]["child_response"]
+    _set_prediction(payload, pair["id_a"], sig_a)
+    _set_prediction(payload, pair["id_b"], sig_a)
     result = cal.evaluate_provider(gold, payload)
     assert len(result["hard_negative_false_positives"]) == 1
-    assert result["hard_negative_false_positives"][0]["pair_id"] == pair["pair_id"]
+    entry = result["hard_negative_false_positives"][0]
+    assert entry["pair_id"] == pair["pair_id"]
+    assert tuple(entry["collapsed_signature"]) == sig_a
     assert result["checks"]["hard_negative_false_positives"] is False
     assert result["passed"] is False
+
+
+def test_hard_negative_case_c_both_predict_gold_b_is_one_false_positive() -> None:
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    sig_b = _gold_signature(pair["gold_b"])
+    payload = _perfect_predictions("groq")
+    _set_prediction(payload, pair["id_a"], sig_b)
+    _set_prediction(payload, pair["id_b"], sig_b)
+    result = cal.evaluate_provider(gold, payload)
+    assert len(result["hard_negative_false_positives"]) == 1
+    entry = result["hard_negative_false_positives"][0]
+    assert entry["pair_id"] == pair["pair_id"]
+    assert tuple(entry["collapsed_signature"]) == sig_b
+    assert result["checks"]["hard_negative_false_positives"] is False
+
+
+def test_hard_negative_case_d_third_signature_collapse_is_one_false_positive() -> None:
+    """The critical case: a collapse onto a signature that is neither pair gold."""
+
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    sig_a = _gold_signature(pair["gold_a"])
+    sig_b = _gold_signature(pair["gold_b"])
+    third = _third_signature(gold, sig_a, sig_b)
+    assert third != sig_a and third != sig_b
+    payload = _perfect_predictions("groq")
+    _set_prediction(payload, pair["id_a"], third)
+    _set_prediction(payload, pair["id_b"], third)
+    result = cal.evaluate_provider(gold, payload)
+    assert len(result["hard_negative_false_positives"]) == 1
+    entry = result["hard_negative_false_positives"][0]
+    assert entry["pair_id"] == pair["pair_id"]
+    assert entry["id_a"] == pair["id_a"]
+    assert entry["id_b"] == pair["id_b"]
+    assert tuple(entry["collapsed_signature"]) == third
+    assert result["checks"]["hard_negative_false_positives"] is False
+
+
+def test_hard_negative_case_e_swapped_predictions_are_not_a_false_positive() -> None:
+    """Swapped predictions stay distinct, so the pair criterion is a true negative."""
+
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    sig_a = _gold_signature(pair["gold_a"])
+    sig_b = _gold_signature(pair["gold_b"])
+    payload = _perfect_predictions("groq")
+    _set_prediction(payload, pair["id_a"], sig_b)
+    _set_prediction(payload, pair["id_b"], sig_a)
+    result = cal.evaluate_provider(gold, payload)
+    assert result["hard_negative_false_positives"] == []
+    assert result["checks"]["hard_negative_false_positives"] is True
+    # The swap still costs joint accuracy; only the pair criterion stays clean.
+    assert result["joint_accuracy"] < 1.0
+
+
+def test_hard_negative_criterion_ignores_incomplete_predictions() -> None:
+    """Incomplete collapses belong to unsafe_collisions, not to the pair count."""
+
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    payload = _perfect_predictions("groq")
+    _fail_prediction(payload, pair["id_a"])
+    _fail_prediction(payload, pair["id_b"])
+    result = cal.evaluate_provider(gold, payload)
+    assert result["hard_negative_false_positives"] == []
+    assert result["hard_negative_pairs_evaluated"] == 49
+    assert len(result["unsafe_collisions"]) == 1
+    assert sorted(result["unsafe_collisions"][0]["item_ids"]) == sorted([pair["id_a"], pair["id_b"]])
 
 
 def test_paraphrase_group_failure_is_reported() -> None:

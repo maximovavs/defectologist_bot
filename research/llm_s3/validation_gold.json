@@ -1,0 +1,1618 @@
+{
+  "schema_version": 1,
+  "primary_scoring_items": [
+    {
+      "id": "v001",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v002",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v004",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v005",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v006",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v007",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v008",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v009",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v010",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v013",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v014",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v015",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v016",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v017",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v018",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v020",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v021",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v023",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v026",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v027",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v028",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "v033",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v034",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v035",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v036",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v037",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v038",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v039",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v040",
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "id": "v041",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v042",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v043",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v044",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v045",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v046",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v047",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v048",
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "id": "v049",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "DESCRIBE"
+    },
+    {
+      "id": "v050",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "DESCRIBE"
+    },
+    {
+      "id": "v051",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "RETELL"
+    },
+    {
+      "id": "v052",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "RETELL"
+    },
+    {
+      "id": "v053",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "DESCRIBE"
+    },
+    {
+      "id": "v054",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "DESCRIBE"
+    },
+    {
+      "id": "v055",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "RETELL"
+    },
+    {
+      "id": "v056",
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "RETELL"
+    },
+    {
+      "id": "v057",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v058",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v059",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v060",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v061",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v062",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v063",
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "id": "v064",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v065",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v066",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v067",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v068",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v069",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v070",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v071",
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "id": "v072",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v073",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v074",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v075",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v076",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v077",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v078",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v079",
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "id": "v080",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v081",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v082",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v083",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v084",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v085",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v086",
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "id": "v087",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v088",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v089",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v090",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v091",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v092",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v093",
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "id": "v094",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v095",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v096",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v097",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v098",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v099",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v100",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v101",
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "id": "v102",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v103",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v104",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v105",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v106",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v107",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v108",
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "id": "v109",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v110",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v111",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v112",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v113",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v114",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v115",
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "id": "v116",
+      "interaction_frame": "OTHER",
+      "child_response": "OTHER"
+    },
+    {
+      "id": "v117",
+      "interaction_frame": "OTHER",
+      "child_response": "OTHER"
+    },
+    {
+      "id": "v118",
+      "interaction_frame": "OTHER",
+      "child_response": "UNSPECIFIED_RESPONSE"
+    },
+    {
+      "id": "v119",
+      "interaction_frame": "OTHER",
+      "child_response": "UNSPECIFIED_RESPONSE"
+    },
+    {
+      "id": "v120",
+      "interaction_frame": "OTHER",
+      "child_response": "UNSPECIFIED_RESPONSE"
+    },
+    {
+      "id": "mw001",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw002",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw003",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw004",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw005",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw006",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw007",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw008",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw009",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw010",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw011",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw012",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw013",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw014",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "id": "mw015",
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    }
+  ],
+  "paraphrase_groups": [
+    {
+      "group_id": "pg01",
+      "member_ids": [
+        "v001",
+        "v002"
+      ],
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "group_id": "pg03",
+      "member_ids": [
+        "v005",
+        "v006"
+      ],
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "group_id": "pg04",
+      "member_ids": [
+        "v007",
+        "v008"
+      ],
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "group_id": "pg05",
+      "member_ids": [
+        "v009",
+        "v010"
+      ],
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "group_id": "pg07",
+      "member_ids": [
+        "v013",
+        "v014"
+      ],
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "group_id": "pg08",
+      "member_ids": [
+        "v015",
+        "v016"
+      ],
+      "interaction_frame": "MODEL_WAIT",
+      "child_response": "ATTEND_VOCALIZE_REPEAT"
+    },
+    {
+      "group_id": "pg09",
+      "member_ids": [
+        "v033",
+        "v034"
+      ],
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "group_id": "pg10",
+      "member_ids": [
+        "v035",
+        "v036"
+      ],
+      "interaction_frame": "SEARCH",
+      "child_response": "FIND"
+    },
+    {
+      "group_id": "pg11",
+      "member_ids": [
+        "v041",
+        "v042"
+      ],
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "group_id": "pg12",
+      "member_ids": [
+        "v043",
+        "v044"
+      ],
+      "interaction_frame": "RETRIEVAL_COMMAND",
+      "child_response": "BRING"
+    },
+    {
+      "group_id": "pg13",
+      "member_ids": [
+        "v049",
+        "v050"
+      ],
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "DESCRIBE"
+    },
+    {
+      "group_id": "pg14",
+      "member_ids": [
+        "v051",
+        "v052"
+      ],
+      "interaction_frame": "OPEN_NARRATIVE",
+      "child_response": "RETELL"
+    },
+    {
+      "group_id": "pg15",
+      "member_ids": [
+        "v057",
+        "v058"
+      ],
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "group_id": "pg16",
+      "member_ids": [
+        "v059",
+        "v060"
+      ],
+      "interaction_frame": "TURN_TAKING",
+      "child_response": "TURN_TAKE"
+    },
+    {
+      "group_id": "pg17",
+      "member_ids": [
+        "v064",
+        "v065"
+      ],
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "group_id": "pg18",
+      "member_ids": [
+        "v066",
+        "v067"
+      ],
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "group_id": "pg19",
+      "member_ids": [
+        "v068",
+        "v069"
+      ],
+      "interaction_frame": "FORCED_CHOICE",
+      "child_response": "CHOOSE_POINT"
+    },
+    {
+      "group_id": "pg20",
+      "member_ids": [
+        "v072",
+        "v073"
+      ],
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "group_id": "pg21",
+      "member_ids": [
+        "v074",
+        "v075"
+      ],
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "group_id": "pg22",
+      "member_ids": [
+        "v076",
+        "v077"
+      ],
+      "interaction_frame": "CLOZE",
+      "child_response": "COMPLETE_UTTERANCE"
+    },
+    {
+      "group_id": "pg23",
+      "member_ids": [
+        "v080",
+        "v081"
+      ],
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "group_id": "pg24",
+      "member_ids": [
+        "v082",
+        "v083"
+      ],
+      "interaction_frame": "RHYTHMIC_SEGMENTATION",
+      "child_response": "CLAP_SEGMENTS"
+    },
+    {
+      "group_id": "pg25",
+      "member_ids": [
+        "v087",
+        "v088"
+      ],
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "group_id": "pg26",
+      "member_ids": [
+        "v089",
+        "v090"
+      ],
+      "interaction_frame": "CLASSIFICATION",
+      "child_response": "SORT"
+    },
+    {
+      "group_id": "pg27",
+      "member_ids": [
+        "v094",
+        "v095"
+      ],
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "group_id": "pg28",
+      "member_ids": [
+        "v096",
+        "v097"
+      ],
+      "interaction_frame": "IMITATION",
+      "child_response": "IMITATE_ORAL_MOVEMENT"
+    },
+    {
+      "group_id": "pg29",
+      "member_ids": [
+        "v102",
+        "v103"
+      ],
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "group_id": "pg30",
+      "member_ids": [
+        "v104",
+        "v105"
+      ],
+      "interaction_frame": "BREATH_CONTROL",
+      "child_response": "BLOW"
+    },
+    {
+      "group_id": "pg31",
+      "member_ids": [
+        "v109",
+        "v110"
+      ],
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    },
+    {
+      "group_id": "pg32",
+      "member_ids": [
+        "v111",
+        "v112"
+      ],
+      "interaction_frame": "LOCATIVE_LANGUAGE",
+      "child_response": "LOCATION_ANSWER"
+    }
+  ],
+  "hard_negative_pairs": [
+    {
+      "pair_id": "hn01",
+      "id_a": "v041",
+      "id_b": "v111",
+      "contrast_family": "назвать где предмет / принести предмет (полка)",
+      "gold_a": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      },
+      "gold_b": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      }
+    },
+    {
+      "pair_id": "hn02",
+      "id_a": "v046",
+      "id_b": "v054",
+      "contrast_family": "назвать содержимое / принести предмет (корзина с овощами)",
+      "gold_a": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      },
+      "gold_b": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      }
+    },
+    {
+      "pair_id": "hn03",
+      "id_a": "v053",
+      "id_b": "v070",
+      "contrast_family": "описывать / выбирать (картинки)",
+      "gold_a": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      },
+      "gold_b": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      }
+    },
+    {
+      "pair_id": "hn04",
+      "id_a": "v053",
+      "id_b": "v089",
+      "contrast_family": "описывать / раскладывать по группам (картинки)",
+      "gold_a": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn05",
+      "id_a": "v089",
+      "id_b": "v070",
+      "contrast_family": "раскладывать по группам / выбирать (картинки)",
+      "gold_a": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      },
+      "gold_b": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      }
+    },
+    {
+      "pair_id": "hn06",
+      "id_a": "v038",
+      "id_b": "v070",
+      "contrast_family": "найти пропавшую / выбрать нужную (ряд картинок)",
+      "gold_a": {
+        "interaction_frame": "SEARCH",
+        "child_response": "FIND"
+      },
+      "gold_b": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      }
+    },
+    {
+      "pair_id": "hn07",
+      "id_a": "v027",
+      "id_b": "v086",
+      "contrast_family": "назвать слово / прохлопать слово по частям (фрукты)",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn08",
+      "id_a": "v007",
+      "id_b": "v085",
+      "contrast_family": "позвать по имени и ждать / простучать имя по слогам",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn09",
+      "id_a": "v008",
+      "id_b": "v080",
+      "contrast_family": "произнести имя и ждать / прохлопать имена по слогам",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn10",
+      "id_a": "v026",
+      "id_b": "v094",
+      "contrast_family": "показать и подождать / повторить движение (цокот языком)",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      }
+    },
+    {
+      "pair_id": "hn11",
+      "id_a": "v026",
+      "id_b": "v095",
+      "contrast_family": "показать и подождать / повторить движение (цокот языком)",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      }
+    },
+    {
+      "pair_id": "hn14",
+      "id_a": "v020",
+      "id_b": "v108",
+      "contrast_family": "model-and-wait / explicit command (горячий чай)",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "BREATH_CONTROL",
+        "child_response": "BLOW"
+      }
+    },
+    {
+      "pair_id": "hn17",
+      "id_a": "v021",
+      "id_b": "v076",
+      "contrast_family": "назвать звук животного и ждать / договорить звук",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "CLOZE",
+        "child_response": "COMPLETE_UTTERANCE"
+      }
+    },
+    {
+      "pair_id": "hn18",
+      "id_a": "v006",
+      "id_b": "v073",
+      "contrast_family": "петь с паузой / закончить строчку на рифме",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "CLOZE",
+        "child_response": "COMPLETE_UTTERANCE"
+      }
+    },
+    {
+      "pair_id": "hn19",
+      "id_a": "v015",
+      "id_b": "v061",
+      "contrast_family": "model-and-wait / чередование ходов (телефон)",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      }
+    },
+    {
+      "pair_id": "hn20",
+      "id_a": "v016",
+      "id_b": "v061",
+      "contrast_family": "model-and-wait / чередование ходов (телефон)",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      }
+    },
+    {
+      "pair_id": "hn23",
+      "id_a": "v057",
+      "id_b": "v113",
+      "contrast_family": "катать предмет по очереди / ответить где предмет (мяч)",
+      "gold_a": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      },
+      "gold_b": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      }
+    },
+    {
+      "pair_id": "hn24",
+      "id_a": "v058",
+      "id_b": "v113",
+      "contrast_family": "катать предмет по очереди / ответить где предмет (мяч)",
+      "gold_a": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      },
+      "gold_b": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      }
+    },
+    {
+      "pair_id": "hn25",
+      "id_a": "v059",
+      "id_b": "v092",
+      "contrast_family": "по очереди с кубиками / разложить кубики по группам",
+      "gold_a": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn26",
+      "id_a": "v063",
+      "id_b": "v082",
+      "contrast_family": "стучать по очереди / отстукивать слоги",
+      "gold_a": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn27",
+      "id_a": "v063",
+      "id_b": "v085",
+      "contrast_family": "стучать по очереди / простучать слоги палочкой",
+      "gold_a": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn28",
+      "id_a": "v028",
+      "id_b": "v080",
+      "contrast_family": "хлопок для привлечения внимания / хлопки по слогам",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn29",
+      "id_a": "v028",
+      "id_b": "v086",
+      "contrast_family": "хлопок для привлечения внимания / хлопки по слогам",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      }
+    },
+    {
+      "pair_id": "hn30",
+      "id_a": "v064",
+      "id_b": "v046",
+      "contrast_family": "выбрать фрукт / принести овощи",
+      "gold_a": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      },
+      "gold_b": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      }
+    },
+    {
+      "pair_id": "hn31",
+      "id_a": "v065",
+      "id_b": "v046",
+      "contrast_family": "указать фрукт / достать и принести",
+      "gold_a": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      },
+      "gold_b": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      }
+    },
+    {
+      "pair_id": "hn32",
+      "id_a": "v040",
+      "id_b": "v091",
+      "contrast_family": "найти пропажу в белье / разложить бельё по стопкам",
+      "gold_a": {
+        "interaction_frame": "SEARCH",
+        "child_response": "FIND"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn33",
+      "id_a": "v045",
+      "id_b": "v092",
+      "contrast_family": "поручение принести / разложить по местам (уборка)",
+      "gold_a": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn34",
+      "id_a": "v048",
+      "id_b": "v064",
+      "contrast_family": "подавать названные продукты / выбрать из двух продуктов",
+      "gold_a": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      },
+      "gold_b": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      }
+    },
+    {
+      "pair_id": "hn35",
+      "id_a": "v099",
+      "id_b": "v104",
+      "contrast_family": "надуть щёки по образцу / дуть в трубочку",
+      "gold_a": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      },
+      "gold_b": {
+        "interaction_frame": "BREATH_CONTROL",
+        "child_response": "BLOW"
+      }
+    },
+    {
+      "pair_id": "hn36",
+      "id_a": "v099",
+      "id_b": "v106",
+      "contrast_family": "надуть щёки по образцу / задуть свечу",
+      "gold_a": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      },
+      "gold_b": {
+        "interaction_frame": "BREATH_CONTROL",
+        "child_response": "BLOW"
+      }
+    },
+    {
+      "pair_id": "hn37",
+      "id_a": "v096",
+      "id_b": "v104",
+      "contrast_family": "губы трубочкой по образцу / дуть в трубочку",
+      "gold_a": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      },
+      "gold_b": {
+        "interaction_frame": "BREATH_CONTROL",
+        "child_response": "BLOW"
+      }
+    },
+    {
+      "pair_id": "hn38",
+      "id_a": "v097",
+      "id_b": "v105",
+      "contrast_family": "положение губ по образцу / выдох в соломинку",
+      "gold_a": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      },
+      "gold_b": {
+        "interaction_frame": "BREATH_CONTROL",
+        "child_response": "BLOW"
+      }
+    },
+    {
+      "pair_id": "hn39",
+      "id_a": "v109",
+      "id_b": "v037",
+      "contrast_family": "сказать где предмет / найти спрятанный предмет",
+      "gold_a": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      },
+      "gold_b": {
+        "interaction_frame": "SEARCH",
+        "child_response": "FIND"
+      }
+    },
+    {
+      "pair_id": "hn40",
+      "id_a": "v110",
+      "id_b": "v037",
+      "contrast_family": "сказать где предмет / найти спрятанный предмет",
+      "gold_a": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      },
+      "gold_b": {
+        "interaction_frame": "SEARCH",
+        "child_response": "FIND"
+      }
+    },
+    {
+      "pair_id": "hn41",
+      "id_a": "v115",
+      "id_b": "v070",
+      "contrast_family": "сказать где на картинке / выбрать картинку",
+      "gold_a": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      },
+      "gold_b": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      }
+    },
+    {
+      "pair_id": "hn42",
+      "id_a": "v115",
+      "id_b": "v053",
+      "contrast_family": "сказать где на картинке / описать картинки",
+      "gold_a": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      },
+      "gold_b": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      }
+    },
+    {
+      "pair_id": "hn43",
+      "id_a": "v049",
+      "id_b": "v055",
+      "contrast_family": "рассказать своё / пересказать услышанное",
+      "gold_a": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      },
+      "gold_b": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "RETELL"
+      }
+    },
+    {
+      "pair_id": "hn44",
+      "id_a": "v050",
+      "id_b": "v052",
+      "contrast_family": "рассказать своё / пересказать услышанное",
+      "gold_a": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      },
+      "gold_b": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "RETELL"
+      }
+    },
+    {
+      "pair_id": "hn45",
+      "id_a": "v054",
+      "id_b": "v089",
+      "contrast_family": "рассказать про овощи / разложить овощи и фрукты",
+      "gold_a": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "DESCRIBE"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn46",
+      "id_a": "v119",
+      "id_b": "v094",
+      "contrast_family": "зеркало как условие / зеркало как повтор движения",
+      "gold_a": {
+        "interaction_frame": "OTHER",
+        "child_response": "UNSPECIFIED_RESPONSE"
+      },
+      "gold_b": {
+        "interaction_frame": "IMITATION",
+        "child_response": "IMITATE_ORAL_MOVEMENT"
+      }
+    },
+    {
+      "pair_id": "hn51",
+      "id_a": "v066",
+      "id_b": "v043",
+      "contrast_family": "выбрать одежду / принести одежду",
+      "gold_a": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      },
+      "gold_b": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      }
+    },
+    {
+      "pair_id": "hn52",
+      "id_a": "v067",
+      "id_b": "v043",
+      "contrast_family": "указать кофту / подать шарф",
+      "gold_a": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      },
+      "gold_b": {
+        "interaction_frame": "RETRIEVAL_COMMAND",
+        "child_response": "BRING"
+      }
+    },
+    {
+      "pair_id": "hn53",
+      "id_a": "v017",
+      "id_b": "v075",
+      "contrast_family": "купание: образец и пауза / купание: договорить слово",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "CLOZE",
+        "child_response": "COMPLETE_UTTERANCE"
+      }
+    },
+    {
+      "pair_id": "hn55",
+      "id_a": "v023",
+      "id_b": "v063",
+      "contrast_family": "звучащая игрушка: образец и пауза / стучать по очереди",
+      "gold_a": {
+        "interaction_frame": "MODEL_WAIT",
+        "child_response": "ATTEND_VOCALIZE_REPEAT"
+      },
+      "gold_b": {
+        "interaction_frame": "TURN_TAKING",
+        "child_response": "TURN_TAKE"
+      }
+    },
+    {
+      "pair_id": "hn56",
+      "id_a": "v068",
+      "id_b": "v079",
+      "contrast_family": "выбрать книжку / договорить фразу сказки",
+      "gold_a": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      },
+      "gold_b": {
+        "interaction_frame": "CLOZE",
+        "child_response": "COMPLETE_UTTERANCE"
+      }
+    },
+    {
+      "pair_id": "hn57",
+      "id_a": "v069",
+      "id_b": "v051",
+      "contrast_family": "выбрать книгу на ночь / пересказать прочитанное",
+      "gold_a": {
+        "interaction_frame": "FORCED_CHOICE",
+        "child_response": "CHOOSE_POINT"
+      },
+      "gold_b": {
+        "interaction_frame": "OPEN_NARRATIVE",
+        "child_response": "RETELL"
+      }
+    },
+    {
+      "pair_id": "hn58",
+      "id_a": "v035",
+      "id_b": "v087",
+      "contrast_family": "найти спрятанное в крупе / разобрать крупу по мискам",
+      "gold_a": {
+        "interaction_frame": "SEARCH",
+        "child_response": "FIND"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn59",
+      "id_a": "v036",
+      "id_b": "v088",
+      "contrast_family": "найти фигурки в крупе / разложить бобы по плошкам",
+      "gold_a": {
+        "interaction_frame": "SEARCH",
+        "child_response": "FIND"
+      },
+      "gold_b": {
+        "interaction_frame": "CLASSIFICATION",
+        "child_response": "SORT"
+      }
+    },
+    {
+      "pair_id": "hn60",
+      "id_a": "v084",
+      "id_b": "v114",
+      "contrast_family": "шаг на каждый слог / объяснить путь словами",
+      "gold_a": {
+        "interaction_frame": "RHYTHMIC_SEGMENTATION",
+        "child_response": "CLAP_SEGMENTS"
+      },
+      "gold_b": {
+        "interaction_frame": "LOCATIVE_LANGUAGE",
+        "child_response": "LOCATION_ANSWER"
+      }
+    }
+  ],
+  "non_scoring_ambiguity_ids": [
+    "v003",
+    "v011",
+    "v012",
+    "v019",
+    "v022",
+    "v024",
+    "v025",
+    "v029",
+    "v030",
+    "v031",
+    "v032"
+  ],
+  "primary_scoring_contract": {
+    "total_items": 124,
+    "base_consensus_items": 109,
+    "independently_confirmed_extension_items": 15,
+    "paraphrase_group_count": 30,
+    "hard_negative_pair_count": 49
+  },
+  "provenance": {
+    "classification_prompt_sha256": "306c223f393ced968d6ddc89c5209f032907845be199a705894caa9185e787b8",
+    "source_artifact_sha256": {
+      "validation_corpus.json": "3848f8c095a386fb0e807c744d7536fd2b9924e1b87ab31d000953189ba31ae7",
+      "validation_gold.json": "befba71027028c54779cd6dd785c0e75c02aed97513089db53bf355b6ec15770",
+      "adjudicator_gold.json": "a32fecdada82085304fa2fb21bd5dd7f19b9df1f74fadf5561673a27db1941f4",
+      "paraphrase_groups.json": "0f934b2459519b441212812c8b583de7082668b5a1300ca3e0ff37c9ed664f89",
+      "hard_negative_pairs.json": "a7d196ed6ae03e6853631eba02f7a44d0b9ff0714e383e03c991dd47889a792f",
+      "model_wait_extension_corpus.json": "a8bff02884b1aff6e784ea51970da1f365e990946f1267135699cfc412187196",
+      "model_wait_extension_gold.json": "dd559460a6de479233da75159a06c05b7c1e197dc79ac456cf2f04b7548e9a00",
+      "blind_s3_batch_15_adjudicator_gold.json": "dd559460a6de479233da75159a06c05b7c1e197dc79ac456cf2f04b7548e9a00"
+    }
+  }
+}

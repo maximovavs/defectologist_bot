@@ -125,6 +125,38 @@ STABILITY_EXPECTED_RUNS = 3
 
 INVALID_FIELD_MARKER = "<invalid>"
 
+# Failure taxonomy. An execution-blocking failure means the provider never
+# returned a meaningful model output, so nothing about model quality can be
+# read from that item. A model-output failure means the provider answered and
+# the model broke the frozen output contract, which is a genuine quality
+# signal and counts as a wrong prediction.
+EXECUTION_BLOCKING_FAILURE_REASONS = frozenset(
+    {"transport_error", "http_error", "malformed_envelope"}
+)
+MODEL_OUTPUT_FAILURE_REASONS = frozenset({"malformed_json", "invalid_label"})
+EXECUTION_BLOCKING_CLASS = "EXECUTION_BLOCKING"
+MODEL_OUTPUT_CLASS = "MODEL_OUTPUT"
+
+VERDICT_PASS = "PASS"
+VERDICT_MODEL_FAIL = "MODEL FAIL"
+VERDICT_EXECUTION_BLOCKED = "EXECUTION BLOCKED"
+
+EXIT_PASS = 0
+EXIT_MODEL_FAIL = 1
+EXIT_EXECUTION_BLOCKED = 2
+
+CHECK_NOT_APPLICABLE = "N/A"
+NOT_SCORABLE = "NOT SCORABLE"
+
+QUALITY_CHECK_NAMES = (
+    "joint_accuracy",
+    "per_frame_accuracy",
+    "model_wait_accuracy",
+    "hard_negative_false_positives",
+    "paraphrase_groups",
+    "no_unsafe_collisions",
+)
+
 
 class FrozenInputError(RuntimeError):
     """Raised when a frozen research input does not match its expected digest."""
@@ -250,6 +282,19 @@ def verify_gold_contract(gold: Mapping[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Secret scrubbing
 # ---------------------------------------------------------------------------
+
+
+def classify_failure_reason(failure_reason: str) -> str:
+    """Map a failure reason onto its class, failing closed on anything unknown.
+
+    Classification is derived from ``failure_reason`` rather than from a stored
+    ``failure_class`` field, so prediction artifacts frozen before this
+    taxonomy existed are classified identically.
+    """
+
+    if failure_reason in MODEL_OUTPUT_FAILURE_REASONS:
+        return MODEL_OUTPUT_CLASS
+    return EXECUTION_BLOCKING_CLASS
 
 
 def scrub_secret(text: str, secret: str) -> str:
@@ -406,6 +451,7 @@ def _failure_record(item_id: str, reason: str, detail: str, partial: Mapping[str
         "id": item_id,
         "status": "failed",
         "failure_reason": reason,
+        "failure_class": classify_failure_reason(reason),
         "detail": _truncate(detail),
     }
     if partial:
@@ -518,6 +564,17 @@ def _is_complete(record: Mapping[str, Any]) -> bool:
     return record.get("status") == "ok"
 
 
+def _is_execution_blocking(record: Mapping[str, Any]) -> bool:
+    """True when this record proves the provider interaction never completed."""
+
+    if _is_complete(record):
+        return False
+    return (
+        classify_failure_reason(str(record.get("failure_reason", "")))
+        == EXECUTION_BLOCKING_CLASS
+    )
+
+
 def evaluate_provider(
     gold: Mapping[str, Any], prediction_payload: Mapping[str, Any], *, require_full_corpus: bool = True
 ) -> Dict[str, Any]:
@@ -540,6 +597,66 @@ def evaluate_provider(
             "primary evaluation requires all "
             f"{PRIMARY_ITEM_COUNT} scoring items, got {len(scored_ids)}"
         )
+
+    failure_reasons = Counter(
+        str(predictions[i].get("failure_reason"))
+        for i in scored_ids
+        if not _is_complete(predictions[i])
+    )
+    blocking_ids = sorted(i for i in scored_ids if _is_execution_blocking(predictions[i]))
+    model_output_ids = sorted(
+        i
+        for i in scored_ids
+        if not _is_complete(predictions[i]) and not _is_execution_blocking(predictions[i])
+    )
+    failure_classes = {
+        EXECUTION_BLOCKING_CLASS: len(blocking_ids),
+        MODEL_OUTPUT_CLASS: len(model_output_ids),
+    }
+    execution_summary = {
+        "provider": str(prediction_payload["provider"]),
+        "model": str(prediction_payload["model"]),
+        "run_label": str(prediction_payload.get("run_label", "")),
+        "scored_items": len(scored_ids),
+        "excluded_ambiguity_ids": excluded_ambiguity_ids,
+        "completed_interactions": len(scored_ids) - len(blocking_ids),
+        "execution_blocking_failures": len(blocking_ids),
+        "execution_blocking_failure_ids": blocking_ids,
+        "model_output_failures": len(model_output_ids),
+        "failure_reasons": dict(failure_reasons),
+        "failure_classes": failure_classes,
+        "hard_negative_pairs_total": len(gold["hard_negative_pairs"]),
+    }
+
+    if blocking_ids:
+        # The provider interaction never completed for at least one frozen item.
+        # Nothing here is evidence about model quality, so no quality metric is
+        # computed and no quality gate is reported as passing or failing.
+        blocked = dict(execution_summary)
+        blocked.update(
+            {
+                "quality_scorable": False,
+                "quality_metrics_status": NOT_SCORABLE,
+                "verdict": VERDICT_EXECUTION_BLOCKED,
+                "correct_items": None,
+                "joint_accuracy": None,
+                "per_frame": None,
+                "failed_frames": None,
+                "model_wait_accuracy": None,
+                "hard_negative_pairs_evaluated": None,
+                "hard_negative_pairs_skipped_incomplete": None,
+                "hard_negative_pairs_skipped_out_of_scope": None,
+                "hard_negative_false_positives": None,
+                "paraphrase_groups_evaluated": None,
+                "paraphrase_groups_correct": None,
+                "paraphrase_group_rate": None,
+                "failed_paraphrase_groups": None,
+                "unsafe_collisions": None,
+                "checks": {name: CHECK_NOT_APPLICABLE for name in QUALITY_CHECK_NAMES},
+                "passed": None,
+            }
+        )
+        return blocked
 
     correct_ids = {
         item_id
@@ -655,34 +772,30 @@ def evaluate_provider(
         if len(gold_sigs) > 1
     ]
 
-    failure_reasons = Counter(
-        str(predictions[i].get("failure_reason"))
-        for i in scored_ids
-        if not _is_complete(predictions[i])
-    )
-
+    # The hard-negative gate passes only when every frozen pair was actually
+    # evaluated. A pair left unevaluated by a model-output failure is not an
+    # execution block, but it must never be reported as a vacuous pass.
+    hard_negative_fully_evaluated = evaluated_pairs == total_pairs
     checks = {
         "joint_accuracy": joint_accuracy >= JOINT_ACCURACY_THRESHOLD,
         "per_frame_accuracy": not frame_failures,
         "model_wait_accuracy": model_wait_passed,
-        "hard_negative_false_positives": len(hard_negative_false_positives)
-        <= HARD_NEGATIVE_MAX_FALSE_POSITIVES,
+        "hard_negative_false_positives": hard_negative_fully_evaluated
+        and len(hard_negative_false_positives) <= HARD_NEGATIVE_MAX_FALSE_POSITIVES,
         "paraphrase_groups": group_rate >= PARAPHRASE_GROUP_THRESHOLD,
         "no_unsafe_collisions": not unsafe_collisions,
     }
 
-    return {
-        "provider": str(prediction_payload["provider"]),
-        "model": str(prediction_payload["model"]),
-        "run_label": str(prediction_payload.get("run_label", "")),
-        "scored_items": len(scored_ids),
-        "excluded_ambiguity_ids": excluded_ambiguity_ids,
+    scorable = dict(execution_summary)
+    scorable.update({
+        "quality_scorable": True,
+        "quality_metrics_status": "SCORED",
+        "hard_negative_fully_evaluated": hard_negative_fully_evaluated,
         "correct_items": len(correct_ids),
         "joint_accuracy": joint_accuracy,
         "per_frame": per_frame,
         "failed_frames": frame_failures,
         "model_wait_accuracy": model_wait["joint_accuracy"],
-        "hard_negative_pairs_total": total_pairs,
         "hard_negative_pairs_evaluated": evaluated_pairs,
         "hard_negative_pairs_skipped_incomplete": skipped_incomplete_pairs,
         "hard_negative_pairs_skipped_out_of_scope": skipped_out_of_scope_pairs,
@@ -692,10 +805,31 @@ def evaluate_provider(
         "paraphrase_group_rate": group_rate,
         "failed_paraphrase_groups": failed_groups,
         "unsafe_collisions": unsafe_collisions,
-        "failure_reasons": dict(failure_reasons),
         "checks": checks,
         "passed": all(checks.values()),
-    }
+        "verdict": VERDICT_PASS if all(checks.values()) else VERDICT_MODEL_FAIL,
+    })
+    return scorable
+
+
+def overall_verdict(reports: Mapping[str, Mapping[str, Any]]) -> str:
+    """EXECUTION BLOCKED wins over every quality verdict."""
+
+    if not reports:
+        return VERDICT_MODEL_FAIL
+    if any(r["verdict"] == VERDICT_EXECUTION_BLOCKED for r in reports.values()):
+        return VERDICT_EXECUTION_BLOCKED
+    if all(r["verdict"] == VERDICT_PASS for r in reports.values()):
+        return VERDICT_PASS
+    return VERDICT_MODEL_FAIL
+
+
+def verdict_exit_code(verdict: str) -> int:
+    if verdict == VERDICT_PASS:
+        return EXIT_PASS
+    if verdict == VERDICT_EXECUTION_BLOCKED:
+        return EXIT_EXECUTION_BLOCKED
+    return EXIT_MODEL_FAIL
 
 
 def load_predictions(path: Path) -> Dict[str, Any]:
@@ -833,7 +967,13 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
             "hard_negative_max_false_positives": HARD_NEGATIVE_MAX_FALSE_POSITIVES,
         },
         "providers": reports,
-        "passed": all(r["passed"] for r in reports.values()) if reports else False,
+        "verdict": overall_verdict(reports),
+        "passed": (
+            all(r["passed"] for r in reports.values())
+            if reports and all(r["quality_scorable"] for r in reports.values())
+            else None if any(not r["quality_scorable"] for r in reports.values())
+            else False
+        ),
     }
     if args.out:
         out = Path(args.out)
@@ -844,7 +984,17 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         )
     for provider, result in sorted(reports.items()):
         print(f"--- {provider} ({result['model']}) ---")
+        print(f"verdict                 {result['verdict']}")
         print(f"scored_items            {result['scored_items']}")
+        print(f"completed_interactions  {result['completed_interactions']}")
+        print(f"execution_blocking      {result['execution_blocking_failures']}")
+        print(f"model_output_failures   {result['model_output_failures']}")
+        print(f"excluded_ambiguity_ids  {len(result['excluded_ambiguity_ids'])}")
+        if not result["quality_scorable"]:
+            print(f"quality_metrics         {result['quality_metrics_status']}")
+            for check in sorted(result["checks"]):
+                print(f"  [{CHECK_NOT_APPLICABLE}] {check}")
+            continue
         print(f"joint_accuracy          {result['joint_accuracy']:.4f}")
         print(f"model_wait_accuracy     {result['model_wait_accuracy']:.4f}")
         print(f"paraphrase_group_rate   {result['paraphrase_group_rate']:.4f}")
@@ -857,11 +1007,10 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         )
         print(f"hard_negative_fp        {len(result['hard_negative_false_positives'])}")
         print(f"unsafe_collisions       {len(result['unsafe_collisions'])}")
-        print(f"excluded_ambiguity_ids  {len(result['excluded_ambiguity_ids'])}")
         for check, passed in sorted(result["checks"].items()):
             print(f"  [{'PASS' if passed else 'FAIL'}] {check}")
-    print(f"overall: {'PASS' if report['passed'] else 'FAIL'}")
-    return 0 if report["passed"] else 1
+    print(f"overall: {report['verdict']}")
+    return verdict_exit_code(report["verdict"])
 
 
 def _cmd_stability(args: argparse.Namespace) -> int:

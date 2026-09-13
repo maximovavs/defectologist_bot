@@ -171,17 +171,29 @@ def _set_prediction(payload: Dict[str, Any], item_id: str, signature: tuple[str,
     raise AssertionError(f"no prediction for {item_id}")
 
 
-def _fail_prediction(payload: Dict[str, Any], item_id: str) -> None:
+def _fail_prediction(
+    payload: Dict[str, Any], item_id: str, reason: str = "malformed_json"
+) -> None:
     for index, record in enumerate(payload["predictions"]):
         if record["id"] == item_id:
             payload["predictions"][index] = {
                 "id": item_id,
                 "status": "failed",
-                "failure_reason": "malformed_json",
+                "failure_reason": reason,
+                "failure_class": cal.classify_failure_reason(reason),
                 "detail": "",
             }
             return
     raise AssertionError(f"no prediction for {item_id}")
+
+
+def _blocked_like_run_34777724488(provider: str = "groq") -> Dict[str, Any]:
+    """Reproduce the observed shape of run 34777724488: 8 ok, 116 HTTP 429."""
+
+    payload = _perfect_predictions(provider)
+    for record in payload["predictions"][8:]:
+        _fail_prediction(payload, record["id"], "http_error")
+    return payload
 
 
 def _gold_signature(side: Dict[str, str]) -> tuple[str, str]:
@@ -906,7 +918,9 @@ def test_hard_negative_one_sided_incomplete_pair_is_skipped(incomplete_side: str
     assert result["hard_negative_pairs_evaluated"] == 48
     assert result["hard_negative_pairs_skipped_incomplete"] == 1
     assert result["hard_negative_pairs_skipped_out_of_scope"] == 0
-    assert result["checks"]["hard_negative_false_positives"] is True
+    # A pair left unevaluated must never report a vacuous pass.
+    assert result["checks"]["hard_negative_false_positives"] is False
+    assert result["verdict"] == "MODEL FAIL"
 
 
 def test_hard_negative_pair_accounting_is_closed() -> None:
@@ -1117,3 +1131,318 @@ def test_full_offline_round_trip_with_mocked_providers(tmp_path: Path) -> None:
     for provider_report in report["providers"].values():
         assert provider_report["scored_items"] == 124
         assert provider_report["joint_accuracy"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Execution-completeness semantics: transport blocks vs model-output failures
+# ---------------------------------------------------------------------------
+
+
+def test_failure_taxonomy_is_exact_and_fails_closed() -> None:
+    assert cal.EXECUTION_BLOCKING_FAILURE_REASONS == {
+        "transport_error",
+        "http_error",
+        "malformed_envelope",
+    }
+    assert cal.MODEL_OUTPUT_FAILURE_REASONS == {"malformed_json", "invalid_label"}
+    for reason in cal.EXECUTION_BLOCKING_FAILURE_REASONS:
+        assert cal.classify_failure_reason(reason) == cal.EXECUTION_BLOCKING_CLASS
+    for reason in cal.MODEL_OUTPUT_FAILURE_REASONS:
+        assert cal.classify_failure_reason(reason) == cal.MODEL_OUTPUT_CLASS
+    # An unrecognised reason is treated as execution blocking, never as quality.
+    assert cal.classify_failure_reason("something_new") == cal.EXECUTION_BLOCKING_CLASS
+    assert cal.classify_failure_reason("") == cal.EXECUTION_BLOCKING_CLASS
+
+
+def test_classifier_records_carry_the_failure_class() -> None:
+    transport = _RecordingTransport(body='{"error":"rate limited"}', status=429)
+    record = cal.classify_item(
+        "groq", "prompt", {"id": "v001", "text": "текст"}, "key", post=transport
+    )
+    assert record["failure_reason"] == "http_error"
+    assert record["failure_class"] == cal.EXECUTION_BLOCKING_CLASS
+
+    bad_json = _RecordingTransport(body=json.dumps({"choices": [{"message": {"content": "не JSON"}}]}))
+    record = cal.classify_item(
+        "groq", "prompt", {"id": "v001", "text": "текст"}, "key", post=bad_json
+    )
+    assert record["failure_reason"] == "malformed_json"
+    assert record["failure_class"] == cal.MODEL_OUTPUT_CLASS
+
+
+def test_classification_is_derived_from_reason_not_from_a_stored_class() -> None:
+    """Artifacts frozen before this taxonomy existed classify identically."""
+
+    gold = _gold()
+    payload = _blocked_like_run_34777724488()
+    for record in payload["predictions"]:
+        record.pop("failure_class", None)
+    result = cal.evaluate_provider(gold, payload)
+    assert result["verdict"] == "EXECUTION BLOCKED"
+    assert result["execution_blocking_failures"] == 116
+
+
+# --- 1 / 2 / 3: the observed run shape -------------------------------------
+
+
+def test_eight_ok_and_116_http_errors_is_execution_blocked() -> None:
+    gold = _gold()
+    result = cal.evaluate_provider(gold, _blocked_like_run_34777724488())
+    assert result["verdict"] == "EXECUTION BLOCKED"
+    assert result["quality_scorable"] is False
+    assert result["quality_metrics_status"] == "NOT SCORABLE"
+    assert result["scored_items"] == 124
+    assert result["execution_blocking_failures"] == 116
+    assert result["completed_interactions"] == 8
+    assert result["model_output_failures"] == 0
+    assert result["failure_reasons"] == {"http_error": 116}
+    assert result["failure_classes"] == {"EXECUTION_BLOCKING": 116, "MODEL_OUTPUT": 0}
+
+
+def test_blocked_provider_reports_no_model_quality_numbers() -> None:
+    gold = _gold()
+    result = cal.evaluate_provider(gold, _blocked_like_run_34777724488())
+    for metric in (
+        "joint_accuracy",
+        "model_wait_accuracy",
+        "per_frame",
+        "failed_frames",
+        "correct_items",
+        "paraphrase_group_rate",
+        "paraphrase_groups_evaluated",
+        "unsafe_collisions",
+    ):
+        assert result[metric] is None, metric
+    assert result["passed"] is None
+    # 8/124 must never surface as an accuracy figure.
+    assert 8 / 124 not in [v for v in result.values() if isinstance(v, float)]
+
+
+def test_blocked_provider_reports_every_quality_check_as_not_applicable() -> None:
+    gold = _gold()
+    result = cal.evaluate_provider(gold, _blocked_like_run_34777724488())
+    assert set(result["checks"]) == set(cal.QUALITY_CHECK_NAMES)
+    for check, value in result["checks"].items():
+        assert value == "N/A", check
+        assert value is not True, check
+        assert value is not False, check
+    # The specific vacuous pass observed in run 34777724488.
+    assert result["checks"]["hard_negative_false_positives"] == "N/A"
+    assert result["hard_negative_false_positives"] is None
+    assert result["hard_negative_pairs_evaluated"] is None
+    assert result["hard_negative_pairs_total"] == 49
+
+
+# --- 4 / 5: the other two execution-blocking reasons -----------------------
+
+
+@pytest.mark.parametrize("reason", ["transport_error", "http_error", "malformed_envelope"])
+def test_a_single_execution_blocking_failure_blocks_the_provider(reason: str) -> None:
+    gold = _gold()
+    payload = _perfect_predictions("groq")
+    _fail_prediction(payload, payload["predictions"][0]["id"], reason)
+    result = cal.evaluate_provider(gold, payload)
+    assert result["verdict"] == "EXECUTION BLOCKED"
+    assert result["quality_scorable"] is False
+    assert result["execution_blocking_failures"] == 1
+    assert result["completed_interactions"] == 123
+    assert result["joint_accuracy"] is None
+    assert result["checks"]["hard_negative_false_positives"] == "N/A"
+
+
+# --- 6 / 7: model-output failures stay a quality signal --------------------
+
+
+@pytest.mark.parametrize("reason", ["malformed_json", "invalid_label"])
+def test_model_output_failure_is_scored_not_blocked(reason: str) -> None:
+    gold = _gold()
+    payload = _perfect_predictions("groq")
+    _fail_prediction(payload, payload["predictions"][0]["id"], reason)
+    result = cal.evaluate_provider(gold, payload)
+    assert result["verdict"] != "EXECUTION BLOCKED"
+    assert result["quality_scorable"] is True
+    assert result["execution_blocking_failures"] == 0
+    assert result["model_output_failures"] == 1
+    assert result["completed_interactions"] == 124
+    # Counted as a wrong prediction, so it moves the quality numbers.
+    assert result["correct_items"] == 123
+    assert result["joint_accuracy"] == pytest.approx(123 / 124)
+    # A single model-output failure clears every frozen gate, so the verdict is
+    # decided by the gates rather than by the failure itself.
+    assert result["verdict"] in {"PASS", "MODEL FAIL"}
+    assert result["checks"]["joint_accuracy"] is True
+
+
+def test_model_output_failures_can_drive_a_model_fail_verdict() -> None:
+    gold = _gold()
+    payload = _perfect_predictions("groq")
+    for record in payload["predictions"][:40]:
+        _fail_prediction(payload, record["id"], "invalid_label")
+    result = cal.evaluate_provider(gold, payload)
+    assert result["verdict"] == "MODEL FAIL"
+    assert result["quality_scorable"] is True
+    assert result["execution_blocking_failures"] == 0
+    assert result["checks"]["joint_accuracy"] is False
+
+
+# --- 8: the clean case ------------------------------------------------------
+
+
+def test_complete_perfect_predictions_verdict_is_pass() -> None:
+    gold = _gold()
+    for provider in ("groq", "gemini"):
+        result = cal.evaluate_provider(gold, _perfect_predictions(provider))
+        assert result["verdict"] == "PASS", provider
+        assert result["quality_scorable"] is True
+        assert result["execution_blocking_failures"] == 0
+        assert result["model_output_failures"] == 0
+        assert result["completed_interactions"] == 124
+        assert result["hard_negative_fully_evaluated"] is True
+        assert result["passed"] is True
+
+
+# --- 9: no vacuous hard-negative pass under a model-output failure ---------
+
+
+def test_hard_negative_gate_fails_when_not_every_pair_was_evaluated() -> None:
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    payload = _perfect_predictions("groq")
+    _fail_prediction(payload, pair["id_a"], "invalid_label")
+    result = cal.evaluate_provider(gold, payload)
+    assert result["quality_scorable"] is True
+    assert result["verdict"] == "MODEL FAIL"
+    assert result["hard_negative_pairs_evaluated"] == 48
+    assert result["hard_negative_pairs_total"] == 49
+    assert result["hard_negative_false_positives"] == []
+    assert result["hard_negative_fully_evaluated"] is False
+    assert result["checks"]["hard_negative_false_positives"] is False
+
+
+def test_hard_negative_gate_needs_both_full_evaluation_and_zero_false_positives() -> None:
+    gold = _gold()
+    result = cal.evaluate_provider(gold, _perfect_predictions("groq"))
+    assert result["hard_negative_pairs_evaluated"] == result["hard_negative_pairs_total"]
+    assert result["hard_negative_false_positives"] == []
+    assert result["checks"]["hard_negative_false_positives"] is True
+
+
+# --- 7 (overall precedence) and 10 (exit codes) ---------------------------
+
+
+def test_overall_verdict_precedence() -> None:
+    blocked = {"verdict": "EXECUTION BLOCKED"}
+    model_fail = {"verdict": "MODEL FAIL"}
+    passed = {"verdict": "PASS"}
+    assert cal.overall_verdict({"a": passed, "b": passed}) == "PASS"
+    assert cal.overall_verdict({"a": passed, "b": model_fail}) == "MODEL FAIL"
+    assert cal.overall_verdict({"a": model_fail, "b": blocked}) == "EXECUTION BLOCKED"
+    assert cal.overall_verdict({"a": passed, "b": blocked}) == "EXECUTION BLOCKED"
+    assert cal.overall_verdict({}) == "MODEL FAIL"
+
+
+def test_verdict_exit_code_mapping() -> None:
+    assert cal.verdict_exit_code("PASS") == 0 == cal.EXIT_PASS
+    assert cal.verdict_exit_code("MODEL FAIL") == 1 == cal.EXIT_MODEL_FAIL
+    assert cal.verdict_exit_code("EXECUTION BLOCKED") == 2 == cal.EXIT_EXECUTION_BLOCKED
+
+
+def _write(tmp_path: Path, name: str, payload: Dict[str, Any]) -> str:
+    path = tmp_path / name
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_evaluator_cli_exit_code_zero_on_pass(tmp_path: Path) -> None:
+    files = [
+        _write(tmp_path, f"{p}.json", _perfect_predictions(p)) for p in ("groq", "gemini")
+    ]
+    out = tmp_path / "report.json"
+    assert cal.main(["evaluate", "--gold", str(GOLD_PATH), "--predictions", *files, "--out", str(out)]) == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["verdict"] == "PASS"
+    assert report["passed"] is True
+
+
+def test_evaluator_cli_exit_code_one_on_model_fail(tmp_path: Path) -> None:
+    payload = _perfect_predictions("groq")
+    for record in payload["predictions"][:40]:
+        _fail_prediction(payload, record["id"], "invalid_label")
+    path = _write(tmp_path, "groq.json", payload)
+    out = tmp_path / "report.json"
+    assert cal.main(["evaluate", "--gold", str(GOLD_PATH), "--predictions", path, "--out", str(out)]) == 1
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["verdict"] == "MODEL FAIL"
+
+
+def test_evaluator_cli_exit_code_two_on_execution_blocked(tmp_path: Path) -> None:
+    files = [
+        _write(tmp_path, "groq.json", _blocked_like_run_34777724488("groq")),
+        _write(tmp_path, "gemini.json", _perfect_predictions("gemini")),
+    ]
+    out = tmp_path / "report.json"
+    assert cal.main(["evaluate", "--gold", str(GOLD_PATH), "--predictions", *files, "--out", str(out)]) == 2
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["verdict"] == "EXECUTION BLOCKED"
+    assert report["passed"] is None
+    assert report["providers"]["groq"]["verdict"] == "EXECUTION BLOCKED"
+    assert report["providers"]["gemini"]["verdict"] == "PASS"
+
+
+def test_blocked_report_serializes_without_accuracy_numbers(tmp_path: Path) -> None:
+    path = _write(tmp_path, "groq.json", _blocked_like_run_34777724488())
+    out = tmp_path / "report.json"
+    cal.main(["evaluate", "--gold", str(GOLD_PATH), "--predictions", path, "--out", str(out)])
+    provider = json.loads(out.read_text(encoding="utf-8"))["providers"]["groq"]
+    assert provider["joint_accuracy"] is None
+    assert provider["quality_metrics_status"] == "NOT SCORABLE"
+    assert all(v == "N/A" for v in provider["checks"].values())
+
+
+# --- classifier behaviour must not change ---------------------------------
+
+
+def test_classify_command_still_exits_zero_on_transport_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The evaluator, not the classifier, is what turns blocks into a verdict."""
+
+    shutil.copyfile(PROMPT_PATH, tmp_path / "classification_prompt.txt")
+    shutil.copyfile(CORPUS_PATH, tmp_path / "validation_corpus.json")
+    out = tmp_path / "predictions" / "groq.json"
+    transport = _RecordingTransport(body='{"error":"rate limited"}', status=429)
+    monkeypatch.setattr(cal, "_http_post", transport)
+    monkeypatch.setenv("GROQ_API_KEY", "offline-placeholder-not-a-credential")
+    code = cal.main(
+        [
+            "classify",
+            "--provider",
+            "groq",
+            "--prompt",
+            str(tmp_path / "classification_prompt.txt"),
+            "--corpus",
+            str(tmp_path / "validation_corpus.json"),
+            "--out",
+            str(out),
+        ]
+    )
+    assert code == 0
+    assert len(transport.calls) == 124
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert len(payload["predictions"]) == 124
+    assert all(r["failure_reason"] == "http_error" for r in payload["predictions"])
+    assert all(
+        r["failure_class"] == cal.EXECUTION_BLOCKING_CLASS for r in payload["predictions"]
+    )
+    # And that same artifact is what the evaluator turns into a verdict.
+    gold = _gold()
+    result = cal.evaluate_provider(gold, payload)
+    assert result["verdict"] == "EXECUTION BLOCKED"
+
+
+def test_this_patch_adds_no_pacing_retry_or_fallback() -> None:
+    code = _code_only(SCRIPT_PATH).lower()
+    identifiers = {name.lower() for name in _identifiers(SCRIPT_PATH)}
+    for forbidden in ("sleep", "retry", "repair", "fallback", "backoff", "ratelimit", "resume", "shard"):
+        assert forbidden not in code, forbidden
+        assert not [n for n in identifiers if forbidden in n], forbidden

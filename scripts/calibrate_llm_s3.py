@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
@@ -284,6 +285,47 @@ def verify_gold_contract(gold: Mapping[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 0.0
+
+
+class _StartToStartPacer:
+    """Deterministic proactive pacing on provider request *starts*.
+
+    The invariant is on consecutive actual starts, not on nominal slots:
+
+        actual_start[i + 1] - actual_start[i] >= interval
+
+    The next allowed start is derived from the *previous actual start* only, so
+    a slow request can never leave a backlog of missed slots for later requests
+    to catch up on in a burst. A schedule anchored to ``base + i * interval``
+    would do exactly that, and is deliberately not used.
+
+    Pacing is unconditional: a failed request (HTTP 429, 5xx, transport error)
+    paces exactly like a successful one, and nothing here retries anything.
+    """
+
+    def __init__(self, interval: float, clock: Any = None, sleep: Any = None) -> None:
+        if interval < 0:
+            raise ValueError("min_request_interval_seconds must not be negative")
+        self.interval = float(interval)
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
+        self._previous_start: float | None = None
+
+    def wait_for_slot(self) -> float:
+        """Block until the next start is allowed, then record that start."""
+
+        if self.interval > 0 and self._previous_start is not None:
+            next_allowed_start = self._previous_start + self.interval
+            now = self._clock()
+            if now < next_allowed_start:
+                self._sleep(next_allowed_start - now)
+        # The actual start is stamped immediately before the provider call, so
+        # the recorded value is what the next request paces against.
+        self._previous_start = self._clock()
+        return self._previous_start
+
+
 def classify_failure_reason(failure_reason: str) -> str:
     """Map a failure reason onto its class, failing closed on anything unknown.
 
@@ -504,7 +546,10 @@ def run_classification(
     *,
     only_ids: Sequence[str] | None = None,
     run_label: str = "",
+    min_request_interval_seconds: float = DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
     post: Any = None,
+    clock: Any = None,
+    sleep: Any = None,
 ) -> Dict[str, Any]:
     """Run the classification pass. This function takes no gold argument by design."""
 
@@ -529,15 +574,18 @@ def run_classification(
     else:
         selected = list(corpus)
 
-    predictions = [
-        classify_item(provider, prompt_text, item, api_key, post=post) for item in selected
-    ]
+    pacer = _StartToStartPacer(min_request_interval_seconds, clock=clock, sleep=sleep)
+    predictions = []
+    for item in selected:
+        pacer.wait_for_slot()
+        predictions.append(classify_item(provider, prompt_text, item, api_key, post=post))
     return {
         "schema_version": 1,
         "provider": provider,
         "model": ALLOWED_MODELS[provider],
         "endpoint": PROVIDER_ENDPOINTS[provider],
         "run_label": run_label,
+        "min_request_interval_seconds": float(min_request_interval_seconds),
         "prompt_sha256": prompt_sha,
         "corpus_sha256": corpus_sha,
         "requested_item_count": len(selected),
@@ -924,6 +972,7 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         api_key,
         only_ids=only_ids,
         run_label=args.run_label,
+        min_request_interval_seconds=args.min_request_interval_seconds,
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -934,6 +983,10 @@ def _cmd_classify(args: argparse.Namespace) -> int:
     ok = sum(1 for r in payload["predictions"] if r["status"] == "ok")
     failed = len(payload["predictions"]) - ok
     print(f"provider={payload['provider']} model={payload['model']}")
+    print(
+        "min_request_interval_seconds="
+        f"{payload['min_request_interval_seconds']}"
+    )
     print(f"classified={ok} failed={failed} total={len(payload['predictions'])}")
     print(f"predictions_sha256={sha256_file(out)}")
     return 0
@@ -1042,6 +1095,16 @@ def build_parser() -> argparse.ArgumentParser:
     classify.add_argument("--out", required=True)
     classify.add_argument("--ids", default="", help="optional comma-separated corpus id subset")
     classify.add_argument("--run-label", dest="run_label", default="")
+    classify.add_argument(
+        "--min-request-interval-seconds",
+        dest="min_request_interval_seconds",
+        type=float,
+        default=DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
+        help=(
+            "minimum seconds between consecutive provider request starts; "
+            "0.0 (default) sends requests back to back"
+        ),
+    )
     classify.set_defaults(func=_cmd_classify)
 
     evaluate = sub.add_parser("evaluate", help="score frozen predictions against frozen gold")

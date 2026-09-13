@@ -1440,9 +1440,350 @@ def test_classify_command_still_exits_zero_on_transport_failures(
     assert result["verdict"] == "EXECUTION BLOCKED"
 
 
-def test_this_patch_adds_no_pacing_retry_or_fallback() -> None:
+def test_no_retry_repair_fallback_resume_or_sharding_semantics() -> None:
+    """Pacing is a sanctioned seam; retry-shaped behaviour still is not."""
+
     code = _code_only(SCRIPT_PATH).lower()
     identifiers = {name.lower() for name in _identifiers(SCRIPT_PATH)}
-    for forbidden in ("sleep", "retry", "repair", "fallback", "backoff", "ratelimit", "resume", "shard"):
+    for forbidden in ("retry", "repair", "fallback", "backoff", "ratelimit", "resume", "shard"):
         assert forbidden not in code, forbidden
         assert not [n for n in identifiers if forbidden in n], forbidden
+
+
+def test_sleep_appears_only_as_the_pacing_seam() -> None:
+    code = _code_only(SCRIPT_PATH)
+    # time.sleep / time.monotonic are the production defaults of the injected
+    # seams, and nothing else in the module reaches for the clock.
+    assert code.count("time . sleep") == 1
+    assert code.count("time . monotonic") == 1
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    # Only one function may actually *invoke* the sleep seam.
+    sleep_callers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(call.func, ast.Attribute) and call.func.attr == "_sleep"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+    }
+    assert sleep_callers == {"wait_for_slot"}, sleep_callers
+
+
+# ---------------------------------------------------------------------------
+# Deterministic proactive pacing (Groq)
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Deterministic monotonic clock. Sleeping advances it; nothing really waits."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: List[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        assert seconds > 0, "the pacer must never sleep a non-positive duration"
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _PacedTransport:
+    """Mock transport that records the clock reading at each provider request."""
+
+    def __init__(self, clock: _FakeClock, latencies: List[float], body: str = "", status: int = 200) -> None:
+        self.clock = clock
+        self.latencies = latencies
+        self.body = body
+        self.status = status
+        self.starts: List[float] = []
+
+    def __call__(self, url, headers, payload, timeout):  # noqa: ANN001
+        self.starts.append(self.clock.now)
+        index = len(self.starts) - 1
+        latency = self.latencies[index] if index < len(self.latencies) else self.latencies[-1]
+        self.clock.now += latency
+        return self.status, self.body
+
+
+def _run_paced(
+    tmp_path: Path,
+    interval: float,
+    latencies: List[float],
+    *,
+    only_ids: List[str] | None = None,
+    status: int = 200,
+) -> tuple[_FakeClock, _PacedTransport, Dict[str, Any]]:
+    shutil.copyfile(PROMPT_PATH, tmp_path / "classification_prompt.txt")
+    shutil.copyfile(CORPUS_PATH, tmp_path / "validation_corpus.json")
+    clock = _FakeClock()
+    body = (
+        _groq_body("MODEL_WAIT", "ATTEND_VOCALIZE_REPEAT")
+        if status == 200
+        else '{"error":"rate limited"}'
+    )
+    transport = _PacedTransport(clock, latencies, body=body, status=status)
+    payload = cal.run_classification(
+        "groq",
+        tmp_path / "classification_prompt.txt",
+        tmp_path / "validation_corpus.json",
+        "offline-placeholder-not-a-credential",
+        only_ids=only_ids,
+        min_request_interval_seconds=interval,
+        post=transport,
+        clock=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    return clock, transport, payload
+
+
+def _gaps(starts: List[float]) -> List[float]:
+    return [round(b - a, 6) for a, b in zip(starts, starts[1:])]
+
+
+# --- 1: the default preserves current behaviour ----------------------------
+
+
+def test_default_interval_is_zero_and_preserves_immediate_sequential_behaviour(
+    tmp_path: Path,
+) -> None:
+    assert cal.DEFAULT_MIN_REQUEST_INTERVAL_SECONDS == 0.0
+    assert (
+        inspect.signature(cal.run_classification)
+        .parameters["min_request_interval_seconds"]
+        .default
+        == 0.0
+    )
+    clock, transport, payload = _run_paced(tmp_path, 0.0, [0.0])
+    assert len(transport.starts) == 124
+    assert clock.sleeps == []
+    assert clock.now == 0.0
+    assert payload["min_request_interval_seconds"] == 0.0
+
+
+def test_cli_default_interval_is_zero() -> None:
+    args = cal.build_parser().parse_args(
+        ["classify", "--provider", "groq", "--prompt", "p", "--corpus", "c", "--out", "o"]
+    )
+    assert args.min_request_interval_seconds == 0.0
+    args = cal.build_parser().parse_args(
+        [
+            "classify", "--provider", "groq", "--prompt", "p", "--corpus", "c",
+            "--out", "o", "--min-request-interval-seconds", "16",
+        ]
+    )
+    assert args.min_request_interval_seconds == 16.0
+    assert isinstance(args.min_request_interval_seconds, float)
+
+
+# --- 2 / 3: the start-to-start invariant -----------------------------------
+
+
+def test_interval_sixteen_enforces_the_start_to_start_invariant(tmp_path: Path) -> None:
+    _clock, transport, _payload = _run_paced(tmp_path, 16.0, [0.0])
+    starts = transport.starts
+    assert len(starts) == 124
+    for earlier, later in zip(starts, starts[1:]):
+        assert later - earlier >= 16.0
+
+
+def test_zero_latency_produces_exactly_123_gaps_of_the_interval(tmp_path: Path) -> None:
+    _clock, transport, _payload = _run_paced(tmp_path, 16.0, [0.0])
+    gaps = _gaps(transport.starts)
+    assert len(gaps) == 123
+    assert set(gaps) == {16.0}
+    assert transport.starts[0] == 0.0
+    assert transport.starts[-1] == 123 * 16.0
+
+
+# --- 4: latency below the interval sleeps only the remainder ---------------
+
+
+def test_latency_below_interval_sleeps_only_the_remainder(tmp_path: Path) -> None:
+    clock, transport, _payload = _run_paced(tmp_path, 16.0, [5.0], only_ids=["v001", "v002", "v004"])
+    assert transport.starts == [0.0, 16.0, 32.0]
+    assert clock.sleeps == [11.0, 11.0]
+
+
+def test_variable_latency_below_interval_still_holds_the_invariant(tmp_path: Path) -> None:
+    clock, transport, _payload = _run_paced(
+        tmp_path, 16.0, [1.0, 9.0, 15.5, 0.25], only_ids=["v001", "v002", "v004", "v005", "v006"]
+    )
+    assert transport.starts == [0.0, 16.0, 32.0, 48.0, 64.0]
+    assert clock.sleeps == [15.0, 7.0, 0.5, 15.75]
+    for gap in _gaps(transport.starts):
+        assert gap >= 16.0
+
+
+# --- 5: latency at or above the interval adds no extra sleep ---------------
+
+
+def test_latency_above_interval_adds_no_extra_sleep(tmp_path: Path) -> None:
+    clock, transport, _payload = _run_paced(
+        tmp_path, 16.0, [20.0], only_ids=["v001", "v002", "v004"]
+    )
+    assert transport.starts == [0.0, 20.0, 40.0]
+    assert clock.sleeps == []
+
+
+def test_latency_exactly_equal_to_interval_adds_no_sleep(tmp_path: Path) -> None:
+    clock, transport, _payload = _run_paced(
+        tmp_path, 16.0, [16.0], only_ids=["v001", "v002", "v004"]
+    )
+    assert transport.starts == [0.0, 16.0, 32.0]
+    assert clock.sleeps == []
+
+
+# --- 6: THE critical one — a slow request must not cause a catch-up burst ---
+
+
+def test_a_slow_request_cannot_cause_a_catch_up_burst(tmp_path: Path) -> None:
+    """A 30 s first request must not be followed by starts at 30 and 32."""
+
+    clock, transport, _payload = _run_paced(
+        tmp_path, 16.0, [30.0, 1.0, 1.0], only_ids=["v001", "v002", "v004"]
+    )
+    assert transport.starts == [0.0, 30.0, 46.0]
+    # The slot-anchored schedule base + i*interval would have produced this:
+    assert transport.starts != [0.0, 30.0, 32.0]
+    for gap in _gaps(transport.starts):
+        assert gap >= 16.0
+    assert clock.sleeps == [15.0]
+
+
+def test_repeated_slow_requests_never_accumulate_a_backlog(tmp_path: Path) -> None:
+    clock, transport, _payload = _run_paced(
+        tmp_path,
+        16.0,
+        [40.0, 40.0, 0.0, 0.0, 0.0],
+        only_ids=["v001", "v002", "v004", "v005", "v006"],
+    )
+    # Two 40 s requests would leave a slot-anchored scheduler 4 slots behind and
+    # fire the remainder back to back.
+    assert transport.starts == [0.0, 40.0, 80.0, 96.0, 112.0]
+    for gap in _gaps(transport.starts):
+        assert gap >= 16.0
+
+
+def test_scheduler_never_references_a_nominal_slot_base() -> None:
+    source = inspect.getsource(cal._StartToStartPacer)
+    assert "_previous_start" in source
+    # The next allowed start is derived from the previous actual start only.
+    assert "self._previous_start + self.interval" in source
+
+
+# --- 7: failures pace like successes and are never retried -----------------
+
+
+def test_http_failures_obey_pacing_and_are_not_retried(tmp_path: Path) -> None:
+    clock, transport, payload = _run_paced(tmp_path, 16.0, [0.5], status=429)
+    assert len(transport.starts) == 124
+    assert len(payload["predictions"]) == 124
+    assert all(r["failure_reason"] == "http_error" for r in payload["predictions"])
+    assert all(
+        r["failure_class"] == cal.EXECUTION_BLOCKING_CLASS for r in payload["predictions"]
+    )
+    for gap in _gaps(transport.starts):
+        assert gap >= 16.0
+    # One request per item: no retry, no repair, no second attempt.
+    assert len(transport.starts) == len(payload["predictions"])
+
+
+# --- 8: provenance ----------------------------------------------------------
+
+
+def test_provenance_records_the_exact_configured_interval(tmp_path: Path) -> None:
+    for interval in (0.0, 16.0, 16.5):
+        _clock, _transport, payload = _run_paced(
+            tmp_path, interval, [0.0], only_ids=["v001"]
+        )
+        assert payload["min_request_interval_seconds"] == interval
+        assert isinstance(payload["min_request_interval_seconds"], float)
+
+
+def test_pacing_is_never_inferred_from_the_provider_name(tmp_path: Path) -> None:
+    """Only the explicit argument sets pacing; nothing keys off "groq"."""
+
+    _clock, transport, payload = _run_paced(tmp_path, 0.0, [0.0], only_ids=["v001", "v002"])
+    assert transport.starts == [0.0, 0.0]
+    assert payload["min_request_interval_seconds"] == 0.0
+    code = _code_only(SCRIPT_PATH)
+    pacer = inspect.getsource(cal._StartToStartPacer)
+    assert "groq" not in pacer.lower()
+    assert "gemini" not in pacer.lower()
+
+
+def test_negative_interval_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        cal._StartToStartPacer(-1.0)
+
+
+# --- 9 / 10: workflow wiring ------------------------------------------------
+
+
+def _job_run_script(job: Dict[str, Any], step_name_fragment: str) -> str:
+    step = next(s for s in job["steps"] if step_name_fragment in str(s.get("name", "")))
+    return str(step["run"])
+
+
+def test_groq_workflow_command_carries_the_exact_interval() -> None:
+    job = _workflow()["jobs"]["classify-groq"]
+    run = _job_run_script(job, "Classify corpus with Groq")
+    assert "--min-request-interval-seconds 16" in run
+    assert "--provider groq" in run
+
+
+def test_gemini_workflow_command_carries_no_pacing_argument() -> None:
+    job = _workflow()["jobs"]["classify-gemini"]
+    run = _job_run_script(job, "Classify corpus with Gemini")
+    assert "--min-request-interval-seconds" not in run
+    assert "min_request_interval" not in run
+    assert "--provider gemini" in run
+    # Nothing anywhere in the Gemini job sets pacing.
+    assert "--min-request-interval-seconds" not in yaml.safe_dump(job, allow_unicode=True)
+
+
+def test_workflow_shape_is_otherwise_unchanged() -> None:
+    doc = _workflow()
+    assert list(_workflow_triggers(doc)) == ["workflow_dispatch"]
+    assert doc["permissions"] == {"contents": "read"}
+    jobs = doc["jobs"]
+    assert list(jobs) == ["classify-groq", "classify-gemini", "evaluate"]
+    for name, job in jobs.items():
+        assert job.get("if") == "github.actor == github.repository_owner", name
+    assert jobs["classify-groq"]["timeout-minutes"] == 45
+    assert jobs["classify-gemini"]["timeout-minutes"] == 45
+    assert _job_secret_names(jobs["classify-groq"]) == {"GROQ_API_KEY"}
+    assert _job_secret_names(jobs["classify-gemini"]) == {"GEMINI_API_KEY"}
+    assert _job_secret_names(jobs["evaluate"]) == set()
+    assert "inputs:" not in WORKFLOW_PATH.read_text(encoding="utf-8")
+
+
+# --- 11: the frozen contract is untouched by this patch --------------------
+
+
+def test_pacing_patch_leaves_the_frozen_contract_intact() -> None:
+    assert cal.ALLOWED_MODELS == {"groq": GROQ_MODEL, "gemini": GEMINI_MODEL}
+    assert cal.PROVIDER_ENDPOINTS == {"groq": GROQ_ENDPOINT, "gemini": GEMINI_ENDPOINT}
+    assert cal.JOINT_ACCURACY_THRESHOLD == 0.95
+    assert cal.PER_FRAME_ACCURACY_THRESHOLD == 0.90
+    assert cal.PER_FRAME_MIN_SUPPORT == 5
+    assert cal.MODEL_WAIT_ACCURACY_THRESHOLD == 0.95
+    assert cal.PARAPHRASE_GROUP_THRESHOLD == 0.95
+    assert cal.HARD_NEGATIVE_MAX_FALSE_POSITIVES == 0
+    assert cal.PRIMARY_ITEM_COUNT == 124
+    for path, digest in FROZEN_SHA256.items():
+        assert _sha256(path) == digest
+
+
+def test_pacing_does_not_change_the_request_payloads(tmp_path: Path) -> None:
+    prompt = cal.load_prompt(PROMPT_PATH)
+    _url, _headers, payload = cal.build_request("groq", prompt, "текст", "key")
+    assert payload["model"] == GROQ_MODEL
+    assert payload["temperature"] == 0
+    _url2, _headers2, gem = cal.build_request("gemini", prompt, "текст", "key")
+    assert gem["generationConfig"] == {"responseMimeType": "application/json"}

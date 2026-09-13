@@ -593,15 +593,22 @@ def evaluate_provider(
     # pair is counted once. Incomplete/invalid collapses are not counted here;
     # they are covered by the unsafe-collision check below.
     hard_negative_false_positives: List[Dict[str, Any]] = []
+    total_pairs = len(gold["hard_negative_pairs"])
     evaluated_pairs = 0
+    skipped_incomplete_pairs = 0
+    skipped_out_of_scope_pairs = 0
     for pair in gold["hard_negative_pairs"]:
         id_a, id_b = str(pair["id_a"]), str(pair["id_b"])
         if id_a not in scored_set or id_b not in scored_set:
+            skipped_out_of_scope_pairs += 1
             continue
-        evaluated_pairs += 1
         record_a, record_b = predictions[id_a], predictions[id_b]
         if not (_is_complete(record_a) and _is_complete(record_b)):
+            # The pair-level criterion is defined only over complete signatures,
+            # so an incomplete pair is skipped rather than counted as evaluated.
+            skipped_incomplete_pairs += 1
             continue
+        evaluated_pairs += 1
         predicted_a, predicted_b = _signature(record_a), _signature(record_b)
         if predicted_a == predicted_b:
             hard_negative_false_positives.append(
@@ -675,7 +682,10 @@ def evaluate_provider(
         "per_frame": per_frame,
         "failed_frames": frame_failures,
         "model_wait_accuracy": model_wait["joint_accuracy"],
+        "hard_negative_pairs_total": total_pairs,
         "hard_negative_pairs_evaluated": evaluated_pairs,
+        "hard_negative_pairs_skipped_incomplete": skipped_incomplete_pairs,
+        "hard_negative_pairs_skipped_out_of_scope": skipped_out_of_scope_pairs,
         "hard_negative_false_positives": hard_negative_false_positives,
         "paraphrase_groups_evaluated": groups_evaluated,
         "paraphrase_groups_correct": groups_correct,
@@ -838,6 +848,13 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         print(f"joint_accuracy          {result['joint_accuracy']:.4f}")
         print(f"model_wait_accuracy     {result['model_wait_accuracy']:.4f}")
         print(f"paraphrase_group_rate   {result['paraphrase_group_rate']:.4f}")
+        print(
+            "hard_negative_pairs     "
+            f"total={result['hard_negative_pairs_total']} "
+            f"evaluated={result['hard_negative_pairs_evaluated']} "
+            f"skipped_incomplete={result['hard_negative_pairs_skipped_incomplete']} "
+            f"skipped_out_of_scope={result['hard_negative_pairs_skipped_out_of_scope']}"
+        )
         print(f"hard_negative_fp        {len(result['hard_negative_false_positives'])}")
         print(f"unsafe_collisions       {len(result['unsafe_collisions'])}")
         print(f"excluded_ambiguity_ids  {len(result['excluded_ambiguity_ids'])}")

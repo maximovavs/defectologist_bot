@@ -792,7 +792,10 @@ def test_thresholds_match_the_preregistered_contract() -> None:
 def test_hard_negative_case_a_perfect_predictions_have_no_false_positive() -> None:
     gold = _gold()
     result = cal.evaluate_provider(gold, _perfect_predictions("groq"))
+    assert result["hard_negative_pairs_total"] == 49
     assert result["hard_negative_pairs_evaluated"] == 49
+    assert result["hard_negative_pairs_skipped_incomplete"] == 0
+    assert result["hard_negative_pairs_skipped_out_of_scope"] == 0
     assert result["hard_negative_false_positives"] == []
     assert result["checks"]["hard_negative_false_positives"] is True
 
@@ -867,8 +870,12 @@ def test_hard_negative_case_e_swapped_predictions_are_not_a_false_positive() -> 
     assert result["joint_accuracy"] < 1.0
 
 
-def test_hard_negative_criterion_ignores_incomplete_predictions() -> None:
-    """Incomplete collapses belong to unsafe_collisions, not to the pair count."""
+def test_hard_negative_two_sided_incomplete_pair_is_skipped_not_evaluated() -> None:
+    """A pair is evaluated only once BOTH predictions are complete/valid.
+
+    The incomplete collapse still surfaces through unsafe_collisions, which is a
+    separate criterion.
+    """
 
     gold = _gold()
     pair = _isolated_hard_negative_pair(gold)
@@ -877,9 +884,62 @@ def test_hard_negative_criterion_ignores_incomplete_predictions() -> None:
     _fail_prediction(payload, pair["id_b"])
     result = cal.evaluate_provider(gold, payload)
     assert result["hard_negative_false_positives"] == []
-    assert result["hard_negative_pairs_evaluated"] == 49
+    assert result["hard_negative_pairs_total"] == 49
+    assert result["hard_negative_pairs_evaluated"] == 48
+    assert result["hard_negative_pairs_skipped_incomplete"] == 1
+    assert result["hard_negative_pairs_skipped_out_of_scope"] == 0
     assert len(result["unsafe_collisions"]) == 1
     assert sorted(result["unsafe_collisions"][0]["item_ids"]) == sorted([pair["id_a"], pair["id_b"]])
+
+
+@pytest.mark.parametrize("incomplete_side", ["id_a", "id_b"])
+def test_hard_negative_one_sided_incomplete_pair_is_skipped(incomplete_side: str) -> None:
+    """One incomplete prediction is enough to take the pair out of the count."""
+
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    payload = _perfect_predictions("groq")
+    _fail_prediction(payload, pair[incomplete_side])
+    result = cal.evaluate_provider(gold, payload)
+    assert result["hard_negative_false_positives"] == []
+    assert result["hard_negative_pairs_total"] == 49
+    assert result["hard_negative_pairs_evaluated"] == 48
+    assert result["hard_negative_pairs_skipped_incomplete"] == 1
+    assert result["hard_negative_pairs_skipped_out_of_scope"] == 0
+    assert result["checks"]["hard_negative_false_positives"] is True
+
+
+def test_hard_negative_pair_accounting_is_closed() -> None:
+    """total == evaluated + skipped_incomplete + skipped_out_of_scope."""
+
+    gold = _gold()
+    pair = _isolated_hard_negative_pair(gold)
+    payload = _perfect_predictions("groq")
+    _fail_prediction(payload, pair["id_a"])
+    for require_full, prepared in ((True, payload), (False, payload)):
+        result = cal.evaluate_provider(gold, prepared, require_full_corpus=require_full)
+        assert result["hard_negative_pairs_total"] == (
+            result["hard_negative_pairs_evaluated"]
+            + result["hard_negative_pairs_skipped_incomplete"]
+            + result["hard_negative_pairs_skipped_out_of_scope"]
+        )
+
+
+def test_hard_negative_out_of_scope_pairs_are_reported_separately() -> None:
+    """A partial corpus skips pairs for scope, not for incompleteness."""
+
+    gold = _gold()
+    payload = _perfect_predictions("groq")
+    payload["predictions"] = payload["predictions"][:20]
+    result = cal.evaluate_provider(gold, payload, require_full_corpus=False)
+    assert result["hard_negative_pairs_total"] == 49
+    assert result["hard_negative_pairs_skipped_incomplete"] == 0
+    assert result["hard_negative_pairs_skipped_out_of_scope"] > 0
+    assert result["hard_negative_pairs_total"] == (
+        result["hard_negative_pairs_evaluated"]
+        + result["hard_negative_pairs_skipped_incomplete"]
+        + result["hard_negative_pairs_skipped_out_of_scope"]
+    )
 
 
 def test_paraphrase_group_failure_is_reported() -> None:

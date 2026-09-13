@@ -67,6 +67,7 @@ jobs:
             --prompt "$RUNNER_TEMP/llm_s3_inputs/classification_prompt.txt" \
             --corpus "$RUNNER_TEMP/llm_s3_inputs/validation_corpus.json" \
             --run-label "${{ github.run_id }}" \
+            --min-request-interval-seconds 16 \
             --out "$RUNNER_TEMP/llm_s3_predictions/groq.json"
 
       - name: Freeze Groq predictions

@@ -37,6 +37,7 @@ import os
 import random
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -2533,12 +2534,106 @@ GEMINI_MODELS = _parse_model_list(
 )
 
 
-async def _throttle() -> None:
+class _TextBudgetExceeded(RuntimeError):
+    """A suppressed operation is a failure, never a valid model result."""
+
+
+@dataclass
+class _TextBudget:
+    safe_deadline: float
+    phase: str = ""
+    phase_deadline: float = 0.0
+    suppressed: bool = False
+
+    def enter(self, provider: str) -> None:
+        if self.phase != provider:
+            if self.phase == "groq" and (self.suppressed or time.monotonic() >= self.phase_deadline):
+                print("[LLM][budget] groq -> gemini reason=deadline", flush=True)
+            self.phase = provider
+            self.suppressed = False
+            self.phase_deadline = min(
+                self.safe_deadline, time.monotonic() + (85.0 if provider == "groq" else 90.0)
+            )
+            print(f"[LLM][budget] phase={provider} remaining={self.remaining():.3f}", flush=True)
+
+    def remaining(self, model: str = "") -> float:
+        deadline = self.phase_deadline
+        if self.phase == "gemini" and model == GEMINI_MODELS[0] and len(GEMINI_MODELS) > 1:
+            deadline -= 30.0
+        return max(0.0, deadline - time.monotonic())
+
+
+_TEXT_BUDGET: ContextVar[Optional[_TextBudget]] = ContextVar("text_candidate_budget", default=None)
+
+
+def _budget_remaining(operation: str, model: str = "", duration: float = 0.0) -> float:
+    budget = _TEXT_BUDGET.get()
+    if budget is None:
+        return float("inf")
+    remaining = budget.remaining(model)
+    if remaining <= duration:
+        budget.suppressed = True
+        print(f"[LLM][budget] {operation}_suppressed reason=deadline phase={budget.phase} remaining={remaining:.3f}", flush=True)
+        raise _TextBudgetExceeded(f"{budget.phase}_{operation}_deadline")
+    return remaining
+
+
+async def _budget_attempt(url: str, headers: Dict[str, str], payload: Dict, model: str):
+    if _TEXT_BUDGET.get() is None:
+        await _throttle()
+        return await _post_json(url, headers, payload, timeout=80)
+    try:
+        await asyncio.wait_for(_throttle(model), timeout=_budget_remaining("throttle", model))
+        timeout = min(80.0, _budget_remaining("transport", model))
+        print(f"[LLM][budget] model={model} effective_timeout={timeout:.3f}", flush=True)
+        # requests' timeout alone is not a total elapsed-time ceiling.
+        response = await asyncio.wait_for(_post_json(url, headers, payload, timeout=timeout), timeout=timeout)
+        _budget_remaining("transport_result", model)
+        return response
+    except (asyncio.TimeoutError, requests.Timeout) as exc:
+        budget = _TEXT_BUDGET.get()
+        budget.suppressed = True
+        raise _TextBudgetExceeded("transport_deadline") from exc
+
+
+async def _budget_backoff(wait: float, model: str) -> None:
+    remaining = _budget_remaining("backoff", model, wait)
+    if _TEXT_BUDGET.get() is None:
+        await asyncio.sleep(wait)
+    else:
+        try:
+            await asyncio.wait_for(asyncio.sleep(wait), timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            raise _TextBudgetExceeded("backoff_deadline") from exc
+    _budget_remaining("retry", model)
+
+
+async def _text_provider_call(provider: str, prompt: str, api_key: str, *, repair: bool = False) -> str:
+    budget = _TEXT_BUDGET.get()
+    call = groq_chat if provider == "groq" else gemini_generate
+    if budget is None:
+        return await call(prompt, api_key)
+    budget.enter(provider)
+    remaining = _budget_remaining("repair" if repair else "generation")
+    try:
+        # Stay in this task: P2D provider ContextVar updates must reach validation.
+        async with asyncio.timeout(remaining):
+            result = await call(prompt, api_key)
+        _budget_remaining("result")
+        return result
+    except asyncio.TimeoutError as exc:
+        budget.suppressed = True
+        raise _TextBudgetExceeded(f"{provider}_phase_deadline") from exc
+
+
+async def _throttle(model: str = "") -> None:
     global _next_allowed_ts
     async with _throttle_lock:
         now = time.time()
         if now < _next_allowed_ts:
-            await asyncio.sleep(_next_allowed_ts - now)
+            wait = _next_allowed_ts - now
+            _budget_remaining("throttle", model, duration=wait)
+            await asyncio.sleep(wait)
         _next_allowed_ts = time.time() + LLM_CALL_DELAY_SEC
 
 
@@ -2603,33 +2698,38 @@ async def groq_chat(prompt: str, api_key: str) -> str:
             "temperature": 0.2,
         }
 
-        for attempt in range(1, LLM_MAX_RETRIES + 1):
-            await _throttle()
-            resp = await _post_json(url, headers, payload, timeout=80)
+        try:
+            for attempt in range(1, LLM_MAX_RETRIES + 1):
+                _budget_remaining("retry" if attempt > 1 else "model_transition", model)
+                resp = await _budget_attempt(url, headers, payload, model)
 
-            if resp.status_code == 200:
-                j = resp.json()
-                print(f"[LLM][groq] selected model={model}", flush=True)
-                return (j["choices"][0]["message"]["content"] or "").strip()
+                if resp.status_code == 200:
+                    j = resp.json()
+                    print(f"[LLM][groq] selected model={model}", flush=True)
+                    return (j["choices"][0]["message"]["content"] or "").strip()
 
-            txt = resp.text or ""
-            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
+                txt = resp.text or ""
+                last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
 
-            if _is_model_not_available(resp.status_code, txt):
-                print(f"[LLM][groq] skip unavailable model={model} status={resp.status_code}", flush=True)
-                break
+                if _is_model_not_available(resp.status_code, txt):
+                    print(f"[LLM][groq] skip unavailable model={model} status={resp.status_code}", flush=True)
+                    break
 
-            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
-                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
-                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-                wait = wait * random.uniform(0.85, 1.15)
-                if attempt < LLM_MAX_RETRIES:
-                    await asyncio.sleep(wait)
-                    continue
-                print(f"[LLM][groq] exhausted retries model={model} status={resp.status_code}", flush=True)
-                break
+                if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                    base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                    wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                    wait = wait * random.uniform(0.85, 1.15)
+                    if attempt < LLM_MAX_RETRIES:
+                        await _budget_backoff(wait, model)
+                        continue
+                    print(f"[LLM][groq] exhausted retries model={model} status={resp.status_code}", flush=True)
+                    break
 
-            resp.raise_for_status()
+                resp.raise_for_status()
+
+        except _TextBudgetExceeded as exc:
+            print(f"[LLM][budget] model={model} retry_suppressed reason=deadline", flush=True)
+            raise _TextBudgetExceeded(f"{exc}; previous={last_err}") from exc
 
     raise RuntimeError(f"groq_failed_after_fallbacks:{last_err}")
 
@@ -2648,41 +2748,49 @@ async def gemini_generate(prompt: str, api_key: str) -> str:
         headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-        for attempt in range(1, LLM_MAX_RETRIES + 1):
-            await _throttle()
-            resp = await _post_json(url, headers, payload, timeout=80)
+        try:
+            for attempt in range(1, LLM_MAX_RETRIES + 1):
+                _budget_remaining("retry" if attempt > 1 else "model_transition", model)
+                resp = await _budget_attempt(url, headers, payload, model)
 
-            if resp.status_code == 200:
-                j = resp.json()
-                return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+                if resp.status_code == 200:
+                    j = resp.json()
+                    return (j["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
 
-            txt = resp.text or ""
-            last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
+                txt = resp.text or ""
+                last_err = f"{model} -> {resp.status_code}: {txt[:240]}"
 
-            if _is_gemini_region_block(txt):
-                _gemini_region_blocked = True
-                raise RuntimeError("gemini_blocked_region")
+                if _is_gemini_region_block(txt):
+                    _gemini_region_blocked = True
+                    raise RuntimeError("gemini_blocked_region")
 
-            if _is_confirmed_gemini_quota_error(resp.status_code, txt):
-                _gemini_quota_exhausted = True
-                print("[LLM][gemini] quota exhausted; disabling Gemini for the rest of this run", flush=True)
-                raise RuntimeError("gemini_quota_exhausted")
+                if _is_confirmed_gemini_quota_error(resp.status_code, txt):
+                    _gemini_quota_exhausted = True
+                    print("[LLM][gemini] quota exhausted; disabling Gemini for the rest of this run", flush=True)
+                    raise RuntimeError("gemini_quota_exhausted")
 
-            if _is_model_not_available(resp.status_code, txt):
-                print(f"[LLM][gemini] skip unavailable model={model} status={resp.status_code}", flush=True)
-                break
+                if _is_model_not_available(resp.status_code, txt):
+                    print(f"[LLM][gemini] skip unavailable model={model} status={resp.status_code}", flush=True)
+                    break
 
-            if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
-                base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
-                wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
-                wait = wait * random.uniform(0.85, 1.15)
-                if attempt < LLM_MAX_RETRIES:
-                    await asyncio.sleep(wait)
-                    continue
-                print(f"[LLM][gemini] exhausted retries model={model} status={resp.status_code}", flush=True)
-                break
+                if _is_quota_error(resp.status_code, txt) or _is_temporary_error(resp.status_code, txt):
+                    base = random.uniform(LLM_BACKOFF_MIN, LLM_BACKOFF_MIN * 2.0)
+                    wait = min(LLM_BACKOFF_MAX, base * (2 ** (attempt - 1)))
+                    wait = wait * random.uniform(0.85, 1.15)
+                    if attempt < LLM_MAX_RETRIES:
+                        await _budget_backoff(wait, model)
+                        continue
+                    print(f"[LLM][gemini] exhausted retries model={model} status={resp.status_code}", flush=True)
+                    break
 
-            resp.raise_for_status()
+                resp.raise_for_status()
+
+        except _TextBudgetExceeded as exc:
+            print(f"[LLM][budget] model={model} retry_suppressed reason=deadline", flush=True)
+            if model == GEMINI_MODELS[0] and len(GEMINI_MODELS) > 1:
+                print("[LLM][budget] gemini primary -> fallback reason=30s_reserve", flush=True)
+                continue
+            raise _TextBudgetExceeded(f"{exc}; previous={last_err}") from exc
 
     raise RuntimeError(f"gemini_failed_after_fallbacks:{last_err}")
 
@@ -4107,7 +4215,7 @@ async def generate_post_plain_from_evidence_async(
         if not groq_key:
             return "", False, "GROQ_API_KEY_missing"
         try:
-            out = postprocess(await groq_chat(prompt, groq_key))
+            out = postprocess(await _text_provider_call("groq", prompt, groq_key))
             ok, reason = validate(out)
             if ok:
                 return out, True, "ok:groq"
@@ -4142,7 +4250,7 @@ async def generate_post_plain_from_evidence_async(
                 repair_prompt = build_generic_repair_prompt(reason)
             if repair_prompt:
                 out2, repaired_age_removed = postprocess_repaired(
-                    await groq_chat(repair_prompt, groq_key)
+                    await _text_provider_call("groq", repair_prompt, groq_key, repair=True)
                 )
                 ok2, reason2 = validate(out2)
                 if ok2:
@@ -4180,7 +4288,7 @@ async def generate_post_plain_from_evidence_async(
         if not gemini_key:
             return "", False, "GEMINI_API_KEY_missing"
         try:
-            out = postprocess(await gemini_generate(prompt, gemini_key))
+            out = postprocess(await _text_provider_call("gemini", prompt, gemini_key))
             ok, reason = validate(out)
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
@@ -4194,7 +4302,7 @@ async def generate_post_plain_from_evidence_async(
                     topic_title=topic_title,
                 )
                 if gemini_repair_prompt:
-                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))
                     ok2, reason2 = validate(out2)
                     if ok2:
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
@@ -4209,7 +4317,7 @@ async def generate_post_plain_from_evidence_async(
                     topic_title=topic_title,
                 )
                 if gemini_repair_prompt:
-                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))
                     ok2, reason2 = validate(out2)
                     if ok2:
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
@@ -4224,7 +4332,7 @@ async def generate_post_plain_from_evidence_async(
                     topic_title=topic_title,
                 )
                 if gemini_repair_prompt:
-                    out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                    out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))
                     ok2, reason2 = validate(out2)
                     if ok2:
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
@@ -4233,7 +4341,7 @@ async def generate_post_plain_from_evidence_async(
             elif is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
                 out2, _ = postprocess_repaired(
-                    await gemini_generate(gemini_repair_prompt, gemini_key)
+                    await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True)
                 )
                 ok2, reason2 = validate(out2)
                 if ok2:
@@ -4244,7 +4352,7 @@ async def generate_post_plain_from_evidence_async(
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
                 if gemini_repair_prompt:
                     out2, _ = postprocess_repaired(
-                        await gemini_generate(gemini_repair_prompt, gemini_key)
+                        await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True)
                     )
                     ok2, reason2 = validate(out2)
                     if ok2:
@@ -4269,7 +4377,7 @@ async def generate_post_plain_from_evidence_async(
                     + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
                     + "Итоговый текст: примерно 350–800 символов."
                 )
-                out2 = postprocess(await gemini_generate(gemini_repair_prompt, gemini_key))
+                out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))
                 ok2, reason2 = validate(out2)
                 if ok2:
                     return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
@@ -4770,6 +4878,10 @@ async def generate_post_plain_from_evidence_async(
     topic_id: str = "",
     topic_title: str = "",
 ) -> Tuple[str, bool, str]:
+    budget = _TextBudget(time.monotonic() + 175.0) if (provider or "auto").strip().lower() == "auto" else None
+    budget_token = _TEXT_BUDGET.set(budget)
+    if budget is not None:
+        print("[LLM][budget] candidate=180 guard=5 groq=85 gemini=90 gemini_fallback_reserve=30", flush=True)
     provider_token = _P2D_REQUESTED_PROVIDER.set((provider or "auto").strip().lower())
     fail_token = _P2D_FAIL_REASON.set("")
     origin_token = _P2D_FAIL_ORIGIN_PROVIDER.set("")
@@ -4805,3 +4917,4 @@ async def generate_post_plain_from_evidence_async(
         _P2D_FAIL_ORIGIN_PROVIDER.reset(origin_token)
         _P2D_FAIL_REASON.reset(fail_token)
         _P2D_REQUESTED_PROVIDER.reset(provider_token)
+        _TEXT_BUDGET.reset(budget_token)

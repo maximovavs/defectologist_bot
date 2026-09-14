@@ -15,6 +15,7 @@ on:
       - "scripts/probe_myth_fact_sources.py"
       - "scripts/resolve_production_state_predecessor.py"
       - ".github/workflows/myth_fact_source_probe.yml"
+      - "tests/test_llm_provider_budget.py"
       - "tests/test_topic_policy.py"
       - "tests/test_editorial_freshness_policy.py"
       - "tests/test_myth_fact_fidelity.py"
@@ -69,6 +70,7 @@ jobs:
             src/services/llm_generator.py \
             scripts/probe_myth_fact_sources.py \
             scripts/resolve_production_state_predecessor.py \
+            tests/test_llm_provider_budget.py \
             tests/test_topic_policy.py \
             tests/test_editorial_freshness_policy.py \
             tests/test_myth_fact_fidelity.py \
@@ -120,6 +122,7 @@ jobs:
           sys.modules["sentence_transformers"] = sentence_transformers
 
           suite = unittest.defaultTestLoader.loadTestsFromNames([
+              "tests.test_llm_provider_budget",
               "tests.test_topic_policy",
               "tests.test_editorial_freshness_policy",
               "tests.test_myth_fact_fidelity",

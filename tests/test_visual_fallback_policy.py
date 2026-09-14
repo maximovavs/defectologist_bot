@@ -1219,8 +1219,6 @@ class VisualFallbackLadderTest(unittest.TestCase):
         self.assertEqual(meta["object_generation_attempts"], "2")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 _PRIMARY_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent"
@@ -1639,3 +1637,203 @@ class VisualQABuildCircuitTest(unittest.TestCase):
             )
         self.assertTrue(seen)
         self.assertNotEqual(meta["mode"], "")
+
+
+def _human_content_reject(reason):
+    """HTTP-200 human QA verdict that rejects on content, not on transport."""
+
+    return _qa_response(200, payload={
+        "candidates": [{"content": {"parts": [{"text":
+            '{"pass": false, "reason": "%s", "people_count": 3, "adult_count": 1, '
+            '"child_count": 2, "ppe_detected": false, "text_detected": false, '
+            '"ui_artifact_detected": false, "illustration_style_match": true, '
+            '"character_roles_match": false, "action_match": false}' % reason
+        }]}}]
+    })
+
+
+def _object_content_reject():
+    """HTTP-200 object QA verdict rejecting a card that contains text."""
+
+    return _qa_response(200, payload={
+        "candidates": [{"content": {"parts": [{"text":
+            '{"pass": false, "reason": "object_contains_text", "people_count": 0, '
+            '"adult_count": 0, "child_count": 0, "ppe_detected": false, '
+            '"text_detected": true, "ui_artifact_detected": false, '
+            '"illustration_style_match": false, "object_topic_match": true}'
+        }]}}]
+    })
+
+
+class VisualQABuildCircuitIntegrationTest(unittest.TestCase):
+    """The circuit must be threaded through the real build path.
+
+    These tests drive `build_post_visual` with the production
+    `evaluate_visual_quality` (no injected `visual_qa_fn`), so a missing
+    `_build_circuit` argument at any call site shows up as a repeated
+    primary-model request.
+    """
+
+    def _urls(self, request):
+        return [call.args[0] for call in request.call_args_list]
+
+    def _models(self, request):
+        return [u.rsplit("/models/", 1)[1].split(":", 1)[0] for u in self._urls(request)]
+
+    def test_primary_model_is_tried_once_per_build_across_every_qa_cycle(self):
+        # human QA: 3.7 times out, 2.5 rejects on content -> human retry
+        # human retry QA: starts on 2.5, rejects on content -> object ladder
+        # object #1 QA: starts on 2.5, rejects (object_contains_text)
+        # object #2 QA: starts on 2.5, rejects -> terminal text card
+        responses = [
+            requests.Timeout(),
+            _human_content_reject("too_many_people"),
+            _human_content_reject("action_mismatch"),
+            _object_content_reject(),
+            _object_content_reject(),
+        ]
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", side_effect=responses
+        ) as request, patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"human"), {}),
+                (BytesIO(b"retry"), {}),
+                (BytesIO(b"object1"), {}),
+                (BytesIO(b"object2"), {}),
+            ],
+        ) as download:
+            buffer, meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_api_key="GENERAL_SECRET",
+            )
+
+        models = self._models(request)
+        # The whole build pays the primary timeout exactly once.
+        self.assertEqual(models.count("gemini-3.7-flash"), 1)
+        self.assertEqual(models[0], "gemini-3.7-flash")
+        self.assertEqual(
+            models,
+            [
+                "gemini-3.7-flash",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash",
+            ],
+        )
+        # Every later QA cycle started directly on the fallback model.
+        self.assertTrue(all(m == "gemini-2.5-flash" for m in models[1:]))
+        # The ladder itself is untouched: human, one retry, two objects.
+        self.assertEqual(download.call_count, 4)
+        # Content rejections still drive the ladder to the terminal text card,
+        # and no unverified image was accepted.
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_generation_status"], "rejected")
+        self.assertNotIn(buffer.getvalue(), (b"human", b"retry", b"object1", b"object2"))
+
+    def test_object_cycles_alone_also_reuse_the_open_circuit(self):
+        """Circuit threading through _build_object_visual_fallback specifically."""
+
+        # human QA passes on 2.5 after a primary timeout would end the build, so
+        # instead reject on content twice to reach the object ladder, then check
+        # that both object cycles skip the primary model.
+        responses = [
+            requests.Timeout(),
+            _human_content_reject("too_many_people"),
+            _human_content_reject("action_mismatch"),
+            _object_content_reject(),
+            _object_content_reject(),
+        ]
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", side_effect=responses
+        ) as request, patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"human"), {}),
+                (BytesIO(b"retry"), {}),
+                (BytesIO(b"object1"), {}),
+                (BytesIO(b"object2"), {}),
+            ],
+        ):
+            build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_api_key="GENERAL_SECRET",
+            )
+
+        # requests 4 and 5 are the two object QA cycles.
+        object_models = self._models(request)[3:]
+        self.assertEqual(object_models, ["gemini-2.5-flash", "gemini-2.5-flash"])
+
+    def test_a_second_build_tries_the_primary_model_again(self):
+        """Build-local state: a separate invocation must retry 3.7."""
+
+        responses = [
+            # build #1
+            requests.Timeout(),
+            _qa_response(200),
+            # build #2
+            requests.Timeout(),
+            _qa_response(200),
+        ]
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", side_effect=responses
+        ) as request, patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"first"), {}), (BytesIO(b"second"), {})],
+        ):
+            first_buffer, _first_meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_api_key="GENERAL_SECRET",
+            )
+            second_buffer, _second_meta = build_post_visual(
+                title="Speech activity",
+                day_key="TU",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_api_key="GENERAL_SECRET",
+            )
+
+        # Each build independently pays one primary attempt: no leaked state.
+        self.assertEqual(
+            self._models(request),
+            [
+                "gemini-3.7-flash",
+                "gemini-2.5-flash",
+                "gemini-3.7-flash",
+                "gemini-2.5-flash",
+            ],
+        )
+        self.assertEqual(first_buffer.getvalue(), b"first")
+        self.assertEqual(second_buffer.getvalue(), b"second")
+
+    def test_healthy_build_never_touches_the_fallback_model(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", side_effect=[_qa_response(200)]
+        ) as request, patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"human"), {})],
+        ):
+            buffer, _meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_api_key="GENERAL_SECRET",
+            )
+        self.assertEqual(self._models(request), ["gemini-3.7-flash"])
+        self.assertEqual(buffer.getvalue(), b"human")
+
+
+
+if __name__ == "__main__":
+    unittest.main()

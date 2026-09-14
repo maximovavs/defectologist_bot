@@ -1484,6 +1484,48 @@ def _visual_qa_model_unavailable(status_code: int, response_text: str) -> bool:
     )
 
 
+def _is_primary_visual_qa_model(model: str) -> bool:
+    """True when `model` is the configured primary visual QA model."""
+
+    return (model or "").strip() == (GEMINI_VISUAL_QA_MODEL or "").strip()
+
+
+class _VisualQABuildCircuit:
+    """Per-build memory of primary visual-QA model unavailability.
+
+    One instance lives inside a single `build_post_visual` invocation and is
+    threaded through that build's QA cycles (human, human retry, required-QA
+    fallback, object #1, object #2). Once the configured primary model proves
+    technically unavailable, later cycles in the SAME build start directly on
+    the existing fallback model instead of paying the primary timeout again.
+
+    The object is deliberately local: no module global, no ContextVar, no
+    publisher-run state, no DB, no cache. It dies when the build returns, so a
+    new build always tries the primary model again.
+
+    It is model-selection state only. It never turns a missing or failing QA
+    verdict into an accepted image -- every AI visual still needs a real
+    verdict from an available QA model.
+    """
+
+    __slots__ = ("primary_unavailable", "primary_unavailable_reason")
+
+    def __init__(self) -> None:
+        self.primary_unavailable: bool = False
+        self.primary_unavailable_reason: str = ""
+
+    def mark_primary_unavailable(self, reason: str) -> None:
+        if self.primary_unavailable:
+            return
+        self.primary_unavailable = True
+        self.primary_unavailable_reason = (reason or "").strip() or "unavailable"
+        print(
+            f"[VISUAL][QA_CIRCUIT_OPEN] model={GEMINI_VISUAL_QA_MODEL} "
+            f"trigger={self.primary_unavailable_reason}",
+            flush=True,
+        )
+
+
 def _visual_qa_key_metadata(
     source_name: str = "",
     attempts: int = 0,
@@ -1517,6 +1559,7 @@ def evaluate_visual_quality(
     qa_mode: str = "human",
     _allow_model_fallback: bool = True,
     _enforce_human_surface_contract: bool = False,
+    _build_circuit: "_VisualQABuildCircuit | None" = None,
 ) -> Dict[str, object]:
     """Run Gemini QA for an AI cover; missing QA credentials are non-blocking."""
     key_candidates = _runtime_visual_qa_key_candidates(gemini_api_key)
@@ -1636,6 +1679,22 @@ def evaluate_visual_quality(
             "Do not invent props that are absent from the expected prompt."
         )
 
+    if (
+        _build_circuit is not None
+        and _build_circuit.primary_unavailable
+        and _is_primary_visual_qa_model(model)
+    ):
+        circuit_candidates = _visual_qa_model_candidates(model)
+        if len(circuit_candidates) > 1:
+            skipped_model = model
+            model = circuit_candidates[1]
+            _allow_model_fallback = False
+            print(
+                f"[VISUAL][QA_CIRCUIT] skip_primary={skipped_model} using={model} "
+                f"reason={_build_circuit.primary_unavailable_reason}",
+                flush=True,
+            )
+
     image_bytes = image_buffer.getvalue()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent"
     payload = {
@@ -1665,6 +1724,8 @@ def evaluate_visual_quality(
             print(f"[VISUAL][QA_KEY] attempt={attempt} source={source_name} status={status_label}", flush=True)
             last_trigger = status_label
             model_candidates = _visual_qa_model_candidates(model)
+            if _build_circuit is not None and _is_primary_visual_qa_model(model):
+                _build_circuit.mark_primary_unavailable(status_label)
             if _allow_model_fallback and len(model_candidates) > 1:
                 fallback_model = model_candidates[1]
                 print(
@@ -1682,6 +1743,7 @@ def evaluate_visual_quality(
                     qa_mode=qa_mode,
                     _allow_model_fallback=False,
                     _enforce_human_surface_contract=_enforce_human_surface_contract,
+                    _build_circuit=_build_circuit,
                 )
             if attempt < max_attempts:
                 next_source = key_candidates[attempt][0]
@@ -1748,10 +1810,17 @@ def evaluate_visual_quality(
                 print(f"[WARN][VISUAL][QA_KEY] source={source_name} status={status_label}", flush=True)
             response_text = str(getattr(response, "text", "") or "")
             model_candidates = _visual_qa_model_candidates(model)
+            # Reuse the existing model-unavailability semantics verbatim: 404,
+            # 503, and 400 only when the current model markers match. 401/403/
+            # 429/5xx and ordinary 400 stay key-level failures and never open
+            # the circuit.
+            model_unavailable = _visual_qa_model_unavailable(status_code, response_text)
+            if _build_circuit is not None and model_unavailable and _is_primary_visual_qa_model(model):
+                _build_circuit.mark_primary_unavailable(status_label)
             if (
                 _allow_model_fallback
                 and len(model_candidates) > 1
-                and _visual_qa_model_unavailable(status_code, response_text)
+                and model_unavailable
             ):
                 fallback_model = model_candidates[1]
                 print(
@@ -1769,6 +1838,7 @@ def evaluate_visual_quality(
                     qa_mode=qa_mode,
                     _allow_model_fallback=False,
                     _enforce_human_surface_contract=_enforce_human_surface_contract,
+                    _build_circuit=_build_circuit,
                 )
             retryable_key_failure = status_code in {401, 403, 429} or 500 <= status_code <= 599
             last_trigger = status_label
@@ -1843,6 +1913,7 @@ def _safe_visual_qa(
     audience: str,
     expected_prompt: str = "",
     visual_qa_api_key: str = "",
+    _build_circuit: "_VisualQABuildCircuit | None" = None,
 ) -> Dict[str, object]:
     try:
         qa_kwargs = {
@@ -1851,8 +1922,11 @@ def _safe_visual_qa(
             "expected_prompt": expected_prompt,
             "gemini_api_key": visual_qa_api_key,
         }
+        # Injected test/caller evaluators keep their existing signature: the
+        # private circuit parameter is only passed to the production evaluator.
         if qa_fn is evaluate_visual_quality:
             qa_kwargs["_enforce_human_surface_contract"] = True
+            qa_kwargs["_build_circuit"] = _build_circuit
         result = qa_fn(image_buffer, **qa_kwargs)
     except Exception as exc:
         result = {
@@ -1999,6 +2073,7 @@ def _safe_object_visual_qa(
     audience: str,
     category: str,
     visual_qa_api_key: str = "",
+    _build_circuit: "_VisualQABuildCircuit | None" = None,
 ) -> Dict[str, object]:
     objects = OBJECT_SCENE_CATEGORIES.get(category, OBJECT_SCENE_CATEGORIES["default"])
     expected_prompt = (
@@ -2018,6 +2093,7 @@ def _safe_object_visual_qa(
                 expected_prompt=expected_prompt,
                 gemini_api_key=visual_qa_api_key,
                 qa_mode="object",
+                _build_circuit=_build_circuit,
             )
         except Exception as exc:
             result = {
@@ -2039,6 +2115,7 @@ def _safe_object_visual_qa(
             audience=audience,
             expected_prompt=expected_prompt,
             visual_qa_api_key=visual_qa_api_key,
+            _build_circuit=_build_circuit,
         )
     return _enforce_object_visual_qa(result)
 
@@ -2225,6 +2302,7 @@ def _build_object_visual_fallback(
     context_hint: str = "",
     first_qa: Dict[str, object] | None = None,
     retry_qa: Dict[str, object] | None = None,
+    _build_circuit: "_VisualQABuildCircuit | None" = None,
 ) -> Tuple[BytesIO, Dict[str, str]]:
     rubric = (rubric_id or "").strip().lower()
     retry_exhausted = retry_qa is not None or str(trigger or "").startswith("visual_retry_failed:")
@@ -2331,6 +2409,7 @@ def _build_object_visual_fallback(
             audience=audience,
             category=category,
             visual_qa_api_key=visual_qa_api_key,
+            _build_circuit=_build_circuit,
         )
         last_object_qa = object_qa
         last_reason = str(object_qa.get("reason", "object_qa_rejected"))
@@ -2461,6 +2540,7 @@ def _fallback_for_required_visual_qa(
     visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
     visual_qa_api_key: str = "",
     first_qa: Dict[str, object] | None = None,
+    _build_circuit: "_VisualQABuildCircuit | None" = None,
 ) -> Tuple[BytesIO, Dict[str, str]]:
     qa_reason = _short_log_message(qa_result.get("reason"), max_len=220)
     print(
@@ -2488,6 +2568,7 @@ def _fallback_for_required_visual_qa(
         context_hint=prompt,
         first_qa=first_qa or qa_result,
         retry_qa=retry_qa,
+        _build_circuit=_build_circuit,
     )
 
 
@@ -2504,6 +2585,9 @@ def build_post_visual(
 ) -> Tuple[BytesIO, Dict[str, str]]:
     original_prompt = (image_prompt or "").strip()
     qa_fn = visual_qa_fn or evaluate_visual_quality
+    # Transient, build-local. Dies when this call returns, so the next build
+    # tries the primary visual QA model again.
+    build_circuit = _VisualQABuildCircuit()
     prompt = ""
     visual_brief: VisualBrief | None = None
     if original_prompt:
@@ -2628,6 +2712,7 @@ def build_post_visual(
                 audience=audience,
                 expected_prompt=expected_brief,
                 visual_qa_api_key=visual_qa_api_key,
+                _build_circuit=build_circuit,
             )
             print(
                 f"[VISUAL_QA] status={first_qa.get('status')} reason={_short_log_message(first_qa.get('reason'))} "
@@ -2688,6 +2773,7 @@ def build_post_visual(
                     audience=audience,
                     visual_qa_fn=qa_fn,
                     visual_qa_api_key=visual_qa_api_key,
+                    _build_circuit=build_circuit,
                 )
             if _visual_qa_passed(first_qa):
                 return buffer, first_meta
@@ -2721,6 +2807,7 @@ def build_post_visual(
                     audience=audience,
                     expected_prompt=_build_visual_qa_expected_brief(retry_prompt, rubric_id),
                     visual_qa_api_key=visual_qa_api_key,
+                    _build_circuit=build_circuit,
                 )
                 print(
                     f"[VISUAL_QA] status={retry_qa.get('status')} reason={_short_log_message(retry_qa.get('reason'))} "
@@ -2794,6 +2881,7 @@ def build_post_visual(
                         visual_qa_fn=qa_fn,
                         visual_qa_api_key=visual_qa_api_key,
                         first_qa=first_qa_result,
+                        _build_circuit=build_circuit,
                     )
                 if _visual_qa_passed(retry_qa):
                     return retry_buffer, retry_meta
@@ -2821,6 +2909,7 @@ def build_post_visual(
                 context_hint=retry_prompt,
                 first_qa=first_qa_result,
                 retry_qa=locals().get("retry_qa"),
+                _build_circuit=build_circuit,
             )
         except Exception as e:
             exception_type = e.__class__.__name__
@@ -2843,6 +2932,7 @@ def build_post_visual(
                 visual_qa_fn=qa_fn,
                 visual_qa_api_key=visual_qa_api_key,
                 context_hint=prompt,
+                _build_circuit=build_circuit,
             )
 
     return _build_object_visual_fallback(
@@ -2858,4 +2948,5 @@ def build_post_visual(
         visual_qa_fn=qa_fn,
         visual_qa_api_key=visual_qa_api_key,
         context_hint=original_prompt,
+        _build_circuit=build_circuit,
     )

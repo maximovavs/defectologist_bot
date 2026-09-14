@@ -11,6 +11,7 @@ import requests
 from src.services.visual_pipeline import (
     DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL,
     DEFAULT_GEMINI_VISUAL_QA_MODEL,
+    _VisualQABuildCircuit,
     VISUAL_QA_HARD_REASONS,
     VISUAL_STYLE_TAIL,
     VisualBrief,
@@ -1220,3 +1221,421 @@ class VisualFallbackLadderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_PRIMARY_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent"
+_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
+
+def _qa_fail_response(reason):
+    """A technically healthy QA response that rejects the image on content."""
+
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                '{"pass": false, "reason": "%s", "people_count": 3, '
+                                '"adult_count": 1, "child_count": 2, "ppe_detected": false, '
+                                '"text_detected": false, "ui_artifact_detected": false, '
+                                '"illustration_style_match": true, "character_roles_match": false, '
+                                '"action_match": false}' % reason
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    return _qa_response(200, payload=payload)
+
+
+class VisualQABuildCircuitTest(unittest.TestCase):
+    """Per-build circuit breaker for the primary visual QA model."""
+
+    def _urls(self, request):
+        return [call.args[0] for call in request.call_args_list]
+
+    # --- 1 / 2: healthy primary, then technical fallback --------------------
+
+    def test_healthy_first_primary_qa_uses_37(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", side_effect=[_qa_response(200)]
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(self._urls(request), [_PRIMARY_URL])
+        self.assertFalse(circuit.primary_unavailable)
+
+    def test_primary_timeout_uses_25_fallback_and_opens_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(self._urls(request), [_PRIMARY_URL, _FALLBACK_URL])
+        self.assertTrue(circuit.primary_unavailable)
+        self.assertEqual(circuit.primary_unavailable_reason, "timeout")
+
+    # --- 3 / 4 / 20: same build skips 3.7; a new build retries it -----------
+
+    def test_later_qa_cycle_in_same_build_skips_37(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_response(200), _qa_response(200), _qa_response(200)],
+        ) as request:
+            evaluate_visual_quality(BytesIO(b"a"), rubric_id="tip_of_day", _build_circuit=circuit)
+            evaluate_visual_quality(BytesIO(b"b"), rubric_id="tip_of_day", _build_circuit=circuit)
+            evaluate_visual_quality(BytesIO(b"c"), rubric_id="tip_of_day", _build_circuit=circuit)
+        # Only the first cycle pays the primary timeout; later cycles start on 2.5.
+        self.assertEqual(
+            self._urls(request), [_PRIMARY_URL, _FALLBACK_URL, _FALLBACK_URL, _FALLBACK_URL]
+        )
+
+    def test_next_build_tries_37_again(self):
+        first = _VisualQABuildCircuit()
+        second = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_response(200), _qa_response(200)],
+        ) as request:
+            evaluate_visual_quality(BytesIO(b"a"), rubric_id="tip_of_day", _build_circuit=first)
+            evaluate_visual_quality(BytesIO(b"b"), rubric_id="tip_of_day", _build_circuit=second)
+        self.assertEqual(self._urls(request), [_PRIMARY_URL, _FALLBACK_URL, _PRIMARY_URL])
+        self.assertTrue(first.primary_unavailable)
+        self.assertFalse(second.primary_unavailable)
+
+    def test_circuit_state_is_build_local_not_module_global(self):
+        import ast
+
+        source = Path("src/services/visual_pipeline.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # No ContextVar is imported or used (prose in docstrings does not count).
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.update(a.name for a in node.names)
+                if node.module:
+                    imported.add(node.module)
+        self.assertNotIn("ContextVar", imported)
+        self.assertNotIn("contextvars", imported)
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        self.assertNotIn("ContextVar", used)
+
+        # The circuit is only ever constructed inside build_post_visual.
+        builders = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(call.func, ast.Name) and call.func.id == "_VisualQABuildCircuit"
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            )
+        }
+        self.assertEqual(builders, {"build_post_visual"})
+
+        # No module-level instance exists.
+        module_level = {
+            target.id
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        self.assertNotIn("build_circuit", module_level)
+
+        fresh = _VisualQABuildCircuit()
+        self.assertFalse(fresh.primary_unavailable)
+        self.assertEqual(fresh.primary_unavailable_reason, "")
+
+    # --- 5 / 6 / 7: qualifying technical triggers open the circuit ----------
+
+    def test_404_opens_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(404, text="model not found"), _qa_response(200)],
+        ) as request:
+            evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit)
+        self.assertTrue(circuit.primary_unavailable)
+        self.assertEqual(circuit.primary_unavailable_reason, "http_404")
+        self.assertEqual(self._urls(request), [_PRIMARY_URL, _FALLBACK_URL])
+
+    def test_503_opens_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(503), _qa_response(200)],
+        ):
+            evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit)
+        self.assertTrue(circuit.primary_unavailable)
+        self.assertEqual(circuit.primary_unavailable_reason, "http_503")
+
+    def test_400_with_model_unavailable_marker_opens_circuit(self):
+        for marker in ("model", "not found", "decommissioned", "unsupported", "does not exist"):
+            with self.subTest(marker=marker):
+                circuit = _VisualQABuildCircuit()
+                with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+                    "src.services.visual_pipeline.requests.post",
+                    side_effect=[_qa_response(400, text=f"the {marker} is gone"), _qa_response(200)],
+                ):
+                    evaluate_visual_quality(
+                        BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+                    )
+                self.assertTrue(circuit.primary_unavailable)
+                self.assertEqual(circuit.primary_unavailable_reason, "http_400")
+
+    # --- 8 / 9 / 10 / 11: non-qualifying failures never open the circuit ----
+
+    def test_429_does_not_open_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(429), _qa_response(200)],
+        ) as request:
+            evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit)
+        self.assertFalse(circuit.primary_unavailable)
+        # 429 stays a key-level failure: same model, next key.
+        self.assertEqual(self._urls(request), [_PRIMARY_URL, _PRIMARY_URL])
+
+    def test_generic_5xx_does_not_open_circuit(self):
+        for status in (500, 502, 504):
+            with self.subTest(status=status):
+                circuit = _VisualQABuildCircuit()
+                with patch.dict(
+                    os.environ,
+                    {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+                    clear=True,
+                ), patch(
+                    "src.services.visual_pipeline.requests.post",
+                    side_effect=[_qa_response(status), _qa_response(200)],
+                ) as request:
+                    evaluate_visual_quality(
+                        BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+                    )
+                self.assertFalse(circuit.primary_unavailable)
+                self.assertEqual(self._urls(request), [_PRIMARY_URL, _PRIMARY_URL])
+
+    def test_generic_request_exception_does_not_open_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.ConnectionError(), _qa_response(200)],
+        ) as request:
+            evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit)
+        self.assertFalse(circuit.primary_unavailable)
+        self.assertEqual(self._urls(request), [_PRIMARY_URL, _PRIMARY_URL])
+
+    def test_ordinary_400_does_not_open_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(400, text="malformed request payload")],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        self.assertFalse(circuit.primary_unavailable)
+        self.assertEqual(self._urls(request), [_PRIMARY_URL])
+        self.assertEqual(result["status"], "skipped")
+
+    # --- 12 / 13: content rejections are never circuit triggers -------------
+
+    def test_semantic_rejection_by_37_does_not_open_circuit(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_fail_response("too_many_people")],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        self.assertFalse(circuit.primary_unavailable)
+        self.assertEqual(self._urls(request), [_PRIMARY_URL])
+        self.assertFalse(result["pass"])
+
+    def test_semantic_rejection_by_25_cannot_bypass_fallback_ladder(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_fail_response("action_mismatch")],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        self.assertTrue(circuit.primary_unavailable)
+        self.assertEqual(self._urls(request), [_PRIMARY_URL, _FALLBACK_URL])
+        # An open circuit never turns a rejection into an acceptance.
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["status"], "fail")
+
+    # --- 14 / 15: fail-closed -----------------------------------------------
+
+    def test_technical_primary_failure_plus_valid_fallback_pass_works(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(503), _qa_response(200)],
+        ):
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+        self.assertTrue(circuit.primary_unavailable)
+
+    def test_both_models_unavailable_remain_fail_closed(self):
+        circuit = _VisualQABuildCircuit()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), requests.Timeout()],
+        ):
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", _build_circuit=circuit
+            )
+        # "skipped" is the existing unavailable verdict; build_post_visual then
+        # routes required rubrics into the object/text ladder rather than
+        # publishing an unverified human image.
+        self.assertEqual(result["status"], "skipped")
+        self.assertTrue(circuit.primary_unavailable)
+
+    def test_open_circuit_still_requires_a_real_verdict_for_required_rubric(self):
+        """An open circuit must not let an unverified human image through."""
+
+        qa_results = iter([
+            {"status": "skipped", "pass": True, "reason": "qa_timeout"},
+            _object_pass(),
+        ])
+
+        def qa(*_args, **_kwargs):
+            return next(qa_results)
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"human"), {}), (BytesIO(b"object"), {})],
+        ):
+            buffer, meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_fn=qa,
+            )
+        self.assertEqual(buffer.getvalue(), b"object")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+
+    # --- 16 / 17 / 18 / 19: the ladder is unchanged -------------------------
+
+    def test_object_contains_text_remains_rejected(self):
+        qa_results = iter([
+            {"status": "fail", "pass": False, "reason": "action_mismatch"},
+            {"status": "fail", "pass": False, "reason": "action_mismatch"},
+            {"status": "fail", "pass": False, "reason": "object_contains_text",
+             "people_count": 0, "adult_count": 0, "child_count": 0,
+             "ppe_detected": False, "text_detected": True, "illustration_style_match": False},
+            {"status": "fail", "pass": False, "reason": "object_contains_text",
+             "people_count": 0, "adult_count": 0, "child_count": 0,
+             "ppe_detected": False, "text_detected": True, "illustration_style_match": False},
+        ])
+
+        def qa(*_args, **_kwargs):
+            return next(qa_results)
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"human"), {}),
+                (BytesIO(b"retry"), {}),
+                (BytesIO(b"object1"), {}),
+                (BytesIO(b"object2"), {}),
+            ],
+        ) as download:
+            _buffer, meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_fn=qa,
+            )
+        # exactly one human retry, exactly two object attempts, then text card
+        self.assertEqual(download.call_count, 4)
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_generation_status"], "rejected")
+
+    def test_model_ids_and_order_remain_unchanged(self):
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-3.7-flash")
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL, "gemini-2.5-flash")
+        self.assertEqual(
+            _visual_qa_model_candidates(), ("gemini-3.7-flash", "gemini-2.5-flash")
+        )
+
+    def test_method_piggybank_special_fallback_remains_unchanged(self):
+        qa_results = iter([
+            {"status": "fail", "pass": False, "reason": "wrong_character_roles"},
+            {"status": "fail", "pass": False, "reason": "wrong_character_roles"},
+        ])
+
+        def qa(*_args, **_kwargs):
+            return next(qa_results)
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"human"), {}), (BytesIO(b"retry"), {})],
+        ) as download:
+            _buffer, meta = build_post_visual(
+                title="Метод дня",
+                day_key="SA",
+                image_prompt="speech therapist demonstrates articulation",
+                rubric_id="method_piggybank",
+                visual_qa_fn=qa,
+            )
+        # method_piggybank goes straight to the text card after the human retry,
+        # without the two object attempts.
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(meta["mode"], "text_fallback")
+
+    def test_injected_qa_fn_is_not_forced_to_accept_the_private_parameter(self):
+        """Custom evaluators keep their existing signature."""
+
+        seen = []
+
+        def strict_qa(image_buffer, rubric_id="", audience="", expected_prompt="", gemini_api_key=""):
+            seen.append(rubric_id)
+            return _object_pass()
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[(BytesIO(b"human"), {})],
+        ):
+            _buffer, meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                rubric_id="tip_of_day",
+                visual_qa_fn=strict_qa,
+            )
+        self.assertTrue(seen)
+        self.assertNotEqual(meta["mode"], "")

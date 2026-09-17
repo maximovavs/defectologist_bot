@@ -2237,10 +2237,21 @@ def send_semantic_alert(
     audience: str,
     rubric_id: str,
     match_field: str,
+    *,
+    decision_threshold: float,
 ) -> None:
+    """Render a semantic dedup alert.
+
+    `decision_threshold` is the threshold that actually produced the rejection
+    and must be supplied by the caller that made the decision. The helper never
+    infers it: source rejection uses SEMANTIC_THRESHOLD_SOURCE and body
+    rejection uses the rubric-specific post threshold, so the module-global
+    SEMANTIC_THRESHOLD would misreport both.
+    """
+
     plain_text = (
         "⚠️ Semantic dedup alert\n"
-        f"Материал отклонён: cosine similarity ≥ {SEMANTIC_THRESHOLD:.2f}\n"
+        f"Материал отклонён: cosine similarity ≥ {decision_threshold:.2f}\n"
         f"AUDIENCE={audience} | RUBRIC={rubric_id} | FIELD={match_field}\n\n"
         f"Новый кандидат: {candidate_url}\n"
         f"Похож на: {matched_url}\n"
@@ -2750,16 +2761,20 @@ async def amain() -> None:
                                 limit=120,
                                 compare="evidence",
                             )
+                            # recent_hit stays purely an alert-eligibility gate;
+                            # the alert body reports sem_source_hit, which is
+                            # what actually rejected the candidate.
                             if recent_hit:
                                 try:
                                     send_semantic_alert(
                                         TELEGRAM_DRAFTS_CHAT_ID,
                                         canon,
-                                        recent_hit.canonical_url,
-                                        recent_hit.similarity,
+                                        sem_source_hit.canonical_url,
+                                        sem_source_hit.similarity,
                                         aud,
                                         rubric_id,
-                                        recent_hit.match_field,
+                                        sem_source_hit.match_field,
+                                        decision_threshold=SEMANTIC_THRESHOLD_SOURCE,
                                     )
                                 except Exception as e:
                                     print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)
@@ -3032,16 +3047,20 @@ async def amain() -> None:
                             limit=120,
                             compare="body",
                         )
+                        # recent_post_hit stays purely an alert-eligibility
+                        # gate; the alert body reports sem_body_hit, which is
+                        # what actually rejected the post.
                         if recent_post_hit:
                             try:
                                 send_semantic_alert(
                                     TELEGRAM_DRAFTS_CHAT_ID,
                                     canon,
-                                    recent_post_hit.canonical_url,
-                                    recent_post_hit.similarity,
+                                    sem_body_hit.canonical_url,
+                                    sem_body_hit.similarity,
                                     aud,
                                     rubric_id,
-                                    recent_post_hit.match_field,
+                                    sem_body_hit.match_field,
+                                    decision_threshold=sem_body_threshold,
                                 )
                             except Exception as e:
                                 print(f"[WARN] failed_to_send_semantic_alert err={e}", flush=True)

@@ -1474,5 +1474,227 @@ class DiversityUnderTopicRelevanceTest(unittest.TestCase):
         self.assertEqual(len(ordered), 2)
 
 
+# ---------------------------------------------------------------------------
+# Semantic alert observability: the alert must report the threshold and the hit
+# that actually produced the rejection, not the module-global gate values.
+# ---------------------------------------------------------------------------
+
+
+class _RecordedAlert:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, chat_id, text):
+        self.calls.append((chat_id, text))
+
+
+class SemanticAlertObservabilityTest(unittest.TestCase):
+    def setUp(self):
+        self.sent = _RecordedAlert()
+        self._original_send = publisher.send_plain_message
+        publisher.send_plain_message = self.sent
+        self.addCleanup(setattr, publisher, "send_plain_message", self._original_send)
+        self.source = inspect.getsource(publisher.amain)
+
+    # --- 1 / 2: the helper renders exactly what the caller decided on -------
+
+    def test_helper_renders_the_supplied_decision_threshold(self):
+        publisher.send_semantic_alert(
+            "DRAFTS",
+            "https://example.test/candidate",
+            "https://example.test/matched",
+            0.951,
+            "parents",
+            "play_and_speak",
+            "evidence",
+            decision_threshold=SEMANTIC_THRESHOLD_SOURCE,
+        )
+        self.assertEqual(len(self.sent.calls), 1)
+        chat_id, text = self.sent.calls[0]
+        self.assertEqual(chat_id, "DRAFTS")
+        self.assertIn("cosine similarity ≥ 0.93", text)
+
+    def test_explicit_threshold_wins_over_the_module_global(self):
+        """With the production env value 0.85, the alert must still say 0.93."""
+
+        original = publisher.SEMANTIC_THRESHOLD
+        publisher.SEMANTIC_THRESHOLD = 0.85
+        self.addCleanup(setattr, publisher, "SEMANTIC_THRESHOLD", original)
+        publisher.send_semantic_alert(
+            "DRAFTS",
+            "https://example.test/candidate",
+            "https://example.test/matched",
+            0.951,
+            "parents",
+            "play_and_speak",
+            "evidence",
+            decision_threshold=0.93,
+        )
+        _chat_id, text = self.sent.calls[0]
+        self.assertIn("cosine similarity ≥ 0.93", text)
+        self.assertNotIn("cosine similarity ≥ 0.85", text)
+
+    def test_helper_requires_an_explicit_decision_threshold(self):
+        params = inspect.signature(publisher.send_semantic_alert).parameters
+        threshold = params["decision_threshold"]
+        self.assertEqual(threshold.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(threshold.default, inspect.Parameter.empty)
+        with self.assertRaises(TypeError):
+            publisher.send_semantic_alert(
+                "DRAFTS", "a", "b", 0.9, "parents", "tip_of_day", "evidence"
+            )
+
+    def test_helper_never_infers_the_threshold_itself(self):
+        helper = inspect.getsource(publisher.send_semantic_alert)
+        body = helper.split('"""', 2)[-1]
+        self.assertNotIn("SEMANTIC_THRESHOLD", body)
+        self.assertNotIn("semantic_post_threshold_for_rubric", body)
+        self.assertIn("decision_threshold", body)
+
+    # --- 3 / 4 / 5 / 6: source caller --------------------------------------
+
+    def test_source_rejection_lookup_still_uses_the_source_threshold(self):
+        self.assertIn("sem_source_hit = store.find_semantic_duplicate(", self.source)
+        block = self.source.split("sem_source_hit = store.find_semantic_duplicate(", 1)[1]
+        block = block.split(")", 1)[0]
+        self.assertIn("threshold=SEMANTIC_THRESHOLD_SOURCE", block)
+        self.assertIn('compare="evidence"', block)
+
+    def test_source_recent_alert_gate_is_unchanged(self):
+        self.assertIn("recent_hit = store.find_semantic_duplicate(", self.source)
+        block = self.source.split("recent_hit = store.find_semantic_duplicate(", 1)[1]
+        block = block.split(")", 1)[0]
+        # The eligibility gate keeps the generic threshold and the recent window.
+        self.assertIn("threshold=SEMANTIC_THRESHOLD,", block)
+        self.assertIn("since_iso=recent_since_iso", block)
+        self.assertIn("limit=120", block)
+        self.assertIn('compare="evidence"', block)
+        self.assertIn("if recent_hit:", self.source)
+
+    def _source_alert_call(self):
+        marker = "if recent_hit:"
+        after = self.source.split(marker, 1)[1]
+        call = after.split("send_semantic_alert(", 1)[1]
+        return call.split(")", 1)[0]
+
+    def test_source_alert_reports_the_blocking_hit_not_the_gate_hit(self):
+        call = self._source_alert_call()
+        self.assertIn("sem_source_hit.canonical_url", call)
+        self.assertIn("sem_source_hit.similarity", call)
+        self.assertIn("sem_source_hit.match_field", call)
+        self.assertIn("decision_threshold=SEMANTIC_THRESHOLD_SOURCE", call)
+        # The gate hit must never be rendered as the cause of rejection.
+        self.assertNotIn("recent_hit.canonical_url", call)
+        self.assertNotIn("recent_hit.similarity", call)
+        self.assertNotIn("recent_hit.match_field", call)
+
+    def test_source_alert_routes_only_through_the_drafts_chat(self):
+        call = self._source_alert_call()
+        self.assertIn("TELEGRAM_DRAFTS_CHAT_ID", call)
+        self.assertIn("if not DRY_RUN and TELEGRAM_DRAFTS_CHAT_ID:", self.source)
+
+    # --- 7 / 8 / 9: post caller --------------------------------------------
+
+    def test_post_decision_still_uses_the_rubric_specific_threshold(self):
+        self.assertIn(
+            "sem_body_threshold = semantic_post_threshold_for_rubric(rubric_id)", self.source
+        )
+        block = self.source.split("sem_body_hit = store.find_semantic_duplicate(", 1)[1]
+        block = block.split(")", 1)[0]
+        self.assertIn("threshold=sem_body_threshold", block)
+        self.assertIn('compare="body"', block)
+
+    def test_post_recent_alert_gate_is_unchanged(self):
+        block = self.source.split("recent_post_hit = store.find_semantic_duplicate(", 1)[1]
+        block = block.split(")", 1)[0]
+        self.assertIn("threshold=sem_body_threshold", block)
+        self.assertIn("since_iso=recent_since_iso", block)
+        self.assertIn("limit=120", block)
+        self.assertIn('compare="body"', block)
+        self.assertIn("if recent_post_hit:", self.source)
+
+    def _post_alert_call(self):
+        after = self.source.split("if recent_post_hit:", 1)[1]
+        call = after.split("send_semantic_alert(", 1)[1]
+        return call.split(")", 1)[0]
+
+    def test_post_alert_reports_the_blocking_hit_and_rubric_threshold(self):
+        call = self._post_alert_call()
+        self.assertIn("sem_body_hit.canonical_url", call)
+        self.assertIn("sem_body_hit.similarity", call)
+        self.assertIn("sem_body_hit.match_field", call)
+        self.assertIn("decision_threshold=sem_body_threshold", call)
+        self.assertNotIn("recent_post_hit.canonical_url", call)
+        self.assertNotIn("recent_post_hit.similarity", call)
+        self.assertNotIn("recent_post_hit.match_field", call)
+        # A generic threshold must never be reported for a body rejection.
+        self.assertNotIn("decision_threshold=SEMANTIC_THRESHOLD,", call)
+
+    def test_post_alert_routes_only_through_the_drafts_chat(self):
+        call = self._post_alert_call()
+        self.assertIn("TELEGRAM_DRAFTS_CHAT_ID", call)
+
+    # --- rendering a rubric threshold end to end ---------------------------
+
+    def test_rubric_body_threshold_is_rendered_verbatim(self):
+        for rubric, expected in (
+            ("play_and_speak", 0.94),
+            ("bilingual_corner", 0.92),
+            ("age_norms", 0.985),
+            ("method_piggybank", 0.985),
+        ):
+            with self.subTest(rubric=rubric):
+                self.sent.calls.clear()
+                threshold = semantic_post_threshold_for_rubric(rubric)
+                self.assertAlmostEqual(threshold, expected)
+                publisher.send_semantic_alert(
+                    "DRAFTS", "a", "b", 0.99, "parents", rubric, "body",
+                    decision_threshold=threshold,
+                )
+                _chat_id, text = self.sent.calls[0]
+                self.assertIn(f"cosine similarity ≥ {expected:.2f}", text)
+
+    # --- unchanged contract -------------------------------------------------
+
+    def test_alert_format_and_routing_are_otherwise_unchanged(self):
+        publisher.send_semantic_alert(
+            "DRAFTS",
+            "https://example.test/candidate",
+            "https://example.test/matched",
+            0.937,
+            "parents",
+            "play_and_speak",
+            "evidence",
+            decision_threshold=SEMANTIC_THRESHOLD_SOURCE,
+        )
+        _chat_id, text = self.sent.calls[0]
+        self.assertIn("⚠️ Semantic dedup alert", text)
+        self.assertIn("AUDIENCE=parents | RUBRIC=play_and_speak | FIELD=evidence", text)
+        self.assertIn("Новый кандидат: https://example.test/candidate", text)
+        self.assertIn("Похож на: https://example.test/matched", text)
+        self.assertIn("Cosine: 0.937", text)
+
+    def test_thresholds_and_reasons_are_unchanged(self):
+        self.assertAlmostEqual(SEMANTIC_THRESHOLD_SOURCE, 0.93)
+        self.assertAlmostEqual(SEMANTIC_THRESHOLD_POST, 0.86)
+        self.assertAlmostEqual(semantic_editorial_core_threshold(), SEMANTIC_THRESHOLD_POST)
+        self.assertEqual(SOURCE_COOLDOWN_DAYS, 28)
+        self.assertIn('note("dup_semantic_source", canon)', self.source)
+        self.assertIn('note("dup_semantic_post", canon)', self.source)
+
+    def test_editorial_core_alerting_is_untouched(self):
+        # dup_editorial_core_recent logs its own core_threshold and never calls
+        # the shared alert helper.
+        after = self.source.split("dup_editorial_core_recent", 1)[1][:2000]
+        self.assertNotIn("send_semantic_alert(", after.split("dup_semantic_post", 1)[0])
+
+    def test_no_telegram_or_provider_call_happened(self):
+        # send_plain_message is replaced for the whole test case; the helper is
+        # the only transport the alert path touches.
+        self.assertIs(publisher.send_plain_message, self.sent)
+        self.assertEqual(self.sent.calls, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()

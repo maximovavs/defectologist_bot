@@ -459,7 +459,7 @@ class SensitiveSourceFidelityTest(unittest.TestCase):
         gate_at = source.index("if _requires_tier1_source(")
         llm_at = source.index("generate_post_plain_from_evidence_async(")
         visual_at = source.index("build_post_visual(")
-        topic_at = source.index("detected_topic_ids = detect_evidence_topics(evidence)")
+        topic_at = source.index("detected_topic_ids = detect_evidence_topics(topic_detection_text)")
         self.assertLess(topic_at, gate_at)
         self.assertLess(gate_at, llm_at)
         self.assertLess(gate_at, visual_at)

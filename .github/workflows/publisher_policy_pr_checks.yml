@@ -17,6 +17,7 @@ on:
       - ".github/workflows/myth_fact_source_probe.yml"
       - "tests/test_llm_provider_budget.py"
       - "tests/test_topic_policy.py"
+      - "tests/test_bounded_topic_detection_window.py"
       - "tests/test_editorial_freshness_policy.py"
       - "tests/test_myth_fact_fidelity.py"
       - "tests/test_myth_fact_claim_freshness.py"
@@ -72,6 +73,7 @@ jobs:
             scripts/resolve_production_state_predecessor.py \
             tests/test_llm_provider_budget.py \
             tests/test_topic_policy.py \
+            tests/test_bounded_topic_detection_window.py \
             tests/test_editorial_freshness_policy.py \
             tests/test_myth_fact_fidelity.py \
             tests/test_myth_fact_claim_freshness.py \
@@ -124,6 +126,7 @@ jobs:
           suite = unittest.defaultTestLoader.loadTestsFromNames([
               "tests.test_llm_provider_budget",
               "tests.test_topic_policy",
+              "tests.test_bounded_topic_detection_window",
               "tests.test_editorial_freshness_policy",
               "tests.test_myth_fact_fidelity",
               "tests.test_myth_fact_claim_freshness",

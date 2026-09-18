@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence
 from urllib.parse import urljoin, urlparse
 from src.publisher.dedup_policy import (
     EDITORIAL_CORE_COOLDOWN_DAYS,
@@ -1682,12 +1682,42 @@ def get_canonical(url: str) -> str:
         return url
 
 
-def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
+TOPIC_DETECTION_WINDOW_RATIO = 1.35
+
+
+class EvidenceExtraction(NamedTuple):
+    """One HTTP extraction, two bounded views of it.
+
+    `evidence_text` is the only surface any factual path may read: it keeps the
+    legacy `max_chars` semantics byte for byte, and everything derived from
+    evidence -- the sha1 hash, evidence and semantic dedup, the LLM prompt, the
+    stored publication evidence, and every grounding validator -- continues to
+    use it alone.
+
+    `topic_detection_text` is a strictly wider but still bounded view of the
+    same extraction, capped at `int(max_chars * TOPIC_DETECTION_WINDOW_RATIO)`.
+    It exists only so topic routing and the thematic topic-evidence consistency
+    check scan one and the same surface. It is never the unbounded join: the
+    chunk loop can overshoot that ratio by its last chunk, so the cap is
+    applied explicitly rather than inherited from the loop's break condition.
+    """
+
+    evidence_text: str
+    topic_detection_text: str
+
+
+def topic_detection_window_chars(max_chars: int = 3600) -> int:
+    """Hard cap for the topic-detection window (4860 for the production 3600)."""
+
+    return int(max_chars * TOPIC_DETECTION_WINDOW_RATIO)
+
+
+def extract_evidence_payload(url: str, max_chars: int = 3600) -> EvidenceExtraction:
     r = requests.get(url, headers=HEADERS, timeout=35, verify=_verify_for_url(url))
     r.raise_for_status()
     ctype = (r.headers.get("Content-Type") or "").lower()
     if "text/html" not in ctype and "application/xhtml" not in ctype:
-        return ""
+        return EvidenceExtraction("", "")
 
     soup = BeautifulSoup(_decode_response_text(r), "lxml")
     for tag in soup(["script", "style", "noscript"]):
@@ -1720,7 +1750,7 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
         ):
             continue
         chunks.append(txt)
-        if sum(len(x) for x in chunks) > max_chars * 1.35:
+        if sum(len(x) for x in chunks) > max_chars * TOPIC_DETECTION_WINDOW_RATIO:
             break
 
     seen = set()
@@ -1733,9 +1763,16 @@ def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
         uniq.append(c)
 
     out = "\n".join(uniq).strip()
+    topic_detection_text = out[: topic_detection_window_chars(max_chars)]
     if len(out) > max_chars:
         out = out[:max_chars].rsplit("\n", 1)[0].strip()
-    return out
+    return EvidenceExtraction(evidence_text=out, topic_detection_text=topic_detection_text)
+
+
+def extract_evidence_text(url: str, max_chars: int = 3600) -> str:
+    """Legacy evidence surface. Unchanged: the same single fetch, the same text."""
+
+    return extract_evidence_payload(url, max_chars=max_chars).evidence_text
 
 
 def load_topic_source_ids() -> Dict[str, set[str]]:
@@ -1758,6 +1795,7 @@ def _resolve_effective_topic_id(
     evidence: str,
     topic_source_ids: Dict[str, set[str]],
     detected_topic_ids: Optional[set[str]] = None,
+    topic_detection_text: str = "",
 ) -> tuple[str, str]:
     rubric = (rubric_id or "").strip().lower()
     source = (source_id or "").strip()
@@ -1775,7 +1813,8 @@ def _resolve_effective_topic_id(
         return mapped_topic_ids[0], ""
 
     if detected_topic_ids is None:
-        detected_topic_ids = detect_evidence_topics(evidence)
+        topic_scan = topic_detection_text or evidence
+        detected_topic_ids = detect_evidence_topics(topic_scan)
     if preferred and preferred in detected_topic_ids:
         return preferred, ""
     return next(
@@ -2577,7 +2616,9 @@ async def amain() -> None:
                         continue
 
                 try:
-                    evidence = extract_evidence_text(canon, max_chars=3600)
+                    evidence_payload = extract_evidence_payload(canon, max_chars=3600)
+                    evidence = evidence_payload.evidence_text
+                    topic_detection_text = evidence_payload.topic_detection_text
                 except Exception as e:
                     kind = note("evidence_fetch_failed", f"{canon} ({e})")
                     print(
@@ -2610,7 +2651,7 @@ async def amain() -> None:
                     rubric_id.lower() == "myth_fact"
                     and candidate_source_id in MYTH_FACT_CANONICAL_SOURCE_IDS
                 ):
-                    detected_topic_ids = detect_evidence_topics(evidence)
+                    detected_topic_ids = detect_evidence_topics(topic_detection_text)
                 effective_topic_id, topic_routing_reason = _resolve_effective_topic_id(
                     rubric_id,
                     candidate_source_id,
@@ -2618,6 +2659,7 @@ async def amain() -> None:
                     evidence,
                     topic_source_ids,
                     detected_topic_ids,
+                    topic_detection_text=topic_detection_text,
                 )
                 effective_topic_title = TOPICS[effective_topic_id] if effective_topic_id else ""
                 if topic_routing_reason:
@@ -2860,6 +2902,7 @@ async def amain() -> None:
                             source_domain=sd,
                             source_url=canon,
                             evidence_text=evidence,
+                            topic_detection_text=topic_detection_text,
                             disclaimer=disclaimer,
                             hashtags=hashtags if aud != "pros" else [],
                             provider=PROVIDER,

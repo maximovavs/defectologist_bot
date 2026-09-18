@@ -1551,7 +1551,17 @@ def _validate_thematic_output(
     text: str,
     evidence_text: str = "",
     topic_id: str = "",
+    topic_detection_text: str = "",
 ) -> Tuple[bool, str]:
+    """`topic_detection_text` is the publisher's bounded topic-detection window.
+
+    It is used for the topic-evidence consistency check only, so that routing
+    and `thematic_topic_mismatch` agree on one topic surface. Grounding below
+    still reads `evidence_text` and nothing else. When the caller supplies no
+    window the check falls back to `evidence_text`, which is the legacy
+    behaviour.
+    """
+
     out = (text or "").strip()
     if topic_id != "bilingualism" and re.search(
         r"🌍\s*что помогает в двуязычной семье|двуязычной семье|русский язык за границей",
@@ -1566,7 +1576,8 @@ def _validate_thematic_output(
     if not re.search(r"^💡\s*Что это да[её]т\s*[:：]?", out, flags=re.IGNORECASE | re.MULTILINE):
         return False, "thematic_missing_heading"
 
-    if topic_id and topic_id not in detect_evidence_topics(evidence_text):
+    topic_scan = topic_detection_text or evidence_text
+    if topic_id and topic_id not in detect_evidence_topics(topic_scan):
         return False, "thematic_topic_mismatch"
 
     actions = _extract_section_after_header(
@@ -2258,6 +2269,7 @@ def _validate_output(
     audience: str = "",
     evidence_text: str = "",
     topic_id: str = "",
+    topic_detection_text: str = "",
 ) -> Tuple[bool, str]:
     out = (text or "").strip()
     if not out:
@@ -2347,7 +2359,12 @@ def _validate_output(
         return _validate_parent_observable_benefit_output(out)
 
     if rf == "thematic_parents":
-        result = _validate_thematic_output(out, evidence_text, topic_id=topic_id)
+        result = _validate_thematic_output(
+            out,
+            evidence_text,
+            topic_id=topic_id,
+            topic_detection_text=topic_detection_text,
+        )
         if not result[0]:
             return result
         return _validate_parent_observable_benefit_output(out, thematic=True)
@@ -4067,6 +4084,7 @@ async def generate_post_plain_from_evidence_async(
     evidence_prevalidated: bool = False,
     topic_id: str = "",
     topic_title: str = "",
+    topic_detection_text: str = "",
 ) -> Tuple[str, bool, str]:
     prov = (provider or "auto").strip().lower()
     aud = (audience or "parents").strip().lower()
@@ -4076,6 +4094,10 @@ async def generate_post_plain_from_evidence_async(
     ev = (evidence_text or "").strip()
     if len(ev) < 260:
         return "", False, "no_evidence_short"
+
+    # Topic-detection only. `ev` stays the sole surface for the prompt and for
+    # every factual validator below; `topic_scan` is never substituted for it.
+    topic_scan = (topic_detection_text or "").strip() or ev
 
     is_pro_format = aud == "pros" or rf == "pro_friendly"
     is_bilingual_format = rf == "bilingual_parents"
@@ -4133,6 +4155,7 @@ async def generate_post_plain_from_evidence_async(
             audience=aud,
             evidence_text=ev,
             topic_id=topic_id,
+            topic_detection_text=topic_scan,
         )
 
     def postprocess_repaired(s: str) -> tuple[str, bool]:
@@ -4412,6 +4435,7 @@ def generate_post_plain_from_evidence(
     evidence_prevalidated: bool = False,
     topic_id: str = "",
     topic_title: str = "",
+    topic_detection_text: str = "",
 ) -> Tuple[str, bool, str]:
     try:
         asyncio.get_running_loop()
@@ -4435,6 +4459,7 @@ def generate_post_plain_from_evidence(
                 evidence_prevalidated=evidence_prevalidated,
                 topic_id=topic_id,
                 topic_title=topic_title,
+                topic_detection_text=topic_detection_text,
             )
         )
     raise RuntimeError(
@@ -4705,6 +4730,7 @@ def _validate_output(
     audience: str = "",
     evidence_text: str = "",
     topic_id: str = "",
+    topic_detection_text: str = "",
 ) -> Tuple[bool, str]:
     rf = (rubric_format or "").strip().lower()
     aud = (audience or "").strip().lower()
@@ -4715,6 +4741,7 @@ def _validate_output(
         audience=audience,
         evidence_text=evidence_text,
         topic_id=topic_id,
+        topic_detection_text=topic_detection_text,
     )
     if not ok:
         if reason in PARENT_STRUCTURAL_FIELD_REASONS:
@@ -4877,6 +4904,7 @@ async def generate_post_plain_from_evidence_async(
     evidence_prevalidated: bool = False,
     topic_id: str = "",
     topic_title: str = "",
+    topic_detection_text: str = "",
 ) -> Tuple[str, bool, str]:
     budget = _TextBudget(time.monotonic() + 175.0) if (provider or "auto").strip().lower() == "auto" else None
     budget_token = _TEXT_BUDGET.set(budget)
@@ -4906,6 +4934,7 @@ async def generate_post_plain_from_evidence_async(
             evidence_prevalidated=evidence_prevalidated,
             topic_id=topic_id,
             topic_title=topic_title,
+            topic_detection_text=topic_detection_text,
         )
         reason = _P2D_FAIL_REASON.get()
         if not ok and reason in P2D_FAIL_CLOSED_REASONS:

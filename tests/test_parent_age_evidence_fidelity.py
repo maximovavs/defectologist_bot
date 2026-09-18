@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -564,6 +565,231 @@ class ParentStructuralFieldRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("parent_age_field_empty", note)
         self.assertEqual(groq_mock.call_count, 2)
         gemini_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Friday question_week age repair: a deterministic allowed-age hint.
+# The parser and the validator stay exactly as they are; only the repair prompt
+# learns which ages the evidence actually anchors.
+# ---------------------------------------------------------------------------
+
+
+HEALTHYCHILDREN_LIKE_EVIDENCE = (
+    "Reading aloud with your child by 5 years of age builds narrative skills. "
+    "Ask your child to retell the story in their own words after you finish a book. "
+    "Studies with 4- and 5-year-old children show that shared storytelling supports "
+    "vocabulary and sequencing. Parents can pause and ask what happened next. "
+) * 3
+
+
+def _question_week_body(age: str) -> str:
+    return (
+        "Как помочь ребёнку пересказывать истории\n"
+        f"👶 Возраст: {age}\n"
+        "❓ Вопрос недели: как научить ребёнка пересказывать прочитанное?\n"
+        "Читайте книгу вместе и останавливайтесь на знакомых местах. "
+        "Просите ребёнка своими словами рассказать, что случилось дальше. "
+        "Задавайте простые вопросы о героях и порядке событий. "
+        "Хвалите любую попытку рассказать историю самостоятельно.\n"
+        "🧩 Что попробовать сегодня: прочитайте короткую сказку и попросите пересказать её своими словами.\n"
+        "💡 Что это дает: ребёнок чаще пересказывает знакомую историю своими словами.\n"
+    )
+
+
+QUESTION_WEEK_UNGROUNDED = _question_week_body("4–5 лет")
+QUESTION_WEEK_GROUNDED = _question_week_body("5 лет")
+
+
+class QuestionWeekAgeRepairAllowedSetTest(unittest.TestCase):
+    """A -- the parser must keep returning exactly the anchors it finds today."""
+
+    def test_healthychildren_like_evidence_anchors_only_five_years(self):
+        self.assertEqual(
+            llm._extract_evidence_age_ranges(HEALTHYCHILDREN_LIKE_EVIDENCE),
+            {(60, 60)},
+        )
+
+    def test_parser_grammar_is_untouched_by_this_change(self):
+        # "4- and 5-year-old" is not a range for the parser, and this change
+        # must not make it one.
+        self.assertNotIn(
+            (48, 60), llm._extract_evidence_age_ranges(HEALTHYCHILDREN_LIKE_EVIDENCE)
+        )
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Children 2–3 years old build phrases."),
+            {(24, 36)},
+        )
+
+    def test_the_fixture_isolates_exactly_the_age_failure(self):
+        self.assertEqual(
+            _validate_output(
+                QUESTION_WEEK_UNGROUNDED,
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+        self.assertEqual(
+            _validate_output(
+                QUESTION_WEEK_GROUNDED,
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (True, "ok"),
+        )
+
+    # --- B: the hint lists only the allowed age -----------------------------
+
+    def test_hint_offers_only_the_allowed_age(self):
+        hint = llm.question_week_allowed_age_instruction(HEALTHYCHILDREN_LIKE_EVIDENCE)
+        self.assertIn("5 лет", hint)
+        for forbidden in ("4-5", "4–5", "4 ", "3 года", "6 лет"):
+            self.assertNotIn(forbidden, hint, forbidden)
+        self.assertIn("ровно один", hint)
+        self.assertIn("Не объединяй", hint)
+        self.assertIn("Не сужай и не расширяй", hint)
+
+    def test_every_rendered_option_round_trips_through_the_parser(self):
+        """The hint may only offer values the untouched validator accepts."""
+
+        for evidence in (
+            HEALTHYCHILDREN_LIKE_EVIDENCE,
+            "Children at 2 years begin combining words. By 5 years they retell stories.",
+            "Children 2–3 years old build phrases.",
+            "By 18 months most toddlers use single words.",
+        ):
+            with self.subTest(evidence=evidence[:40]):
+                allowed = llm._extract_evidence_age_ranges(evidence)
+                for minimum, maximum in allowed:
+                    rendered = llm._format_allowed_age_tuple(minimum, maximum)
+                    parsed = llm._parse_parent_age_range(f"👶 Возраст: {rendered}")
+                    self.assertEqual((parsed.min_months, parsed.max_months), (minimum, maximum))
+
+    # --- E: separate anchors never become a spanning range ------------------
+
+    def test_separate_anchors_are_listed_separately_and_never_merged(self):
+        evidence = "Children at 2 years begin combining words. By 5 years they retell stories."
+        self.assertEqual(llm._extract_evidence_age_ranges(evidence), {(24, 24), (60, 60)})
+        hint = llm.question_week_allowed_age_instruction(evidence)
+        self.assertIn("2 года", hint)
+        self.assertIn("5 лет", hint)
+        for spanning in ("2-5", "2–5", "2 до 5"):
+            self.assertNotIn(spanning, hint, spanning)
+
+    # --- fail-closed --------------------------------------------------------
+
+    def test_empty_allowed_set_invents_no_age(self):
+        self.assertEqual(
+            llm.question_week_allowed_age_instruction("Storytelling supports narrative skills."),
+            "",
+        )
+
+    # --- F: the topic-detection window is not a factual surface -------------
+
+    def test_ages_seen_only_by_the_topic_window_never_enter_the_allowed_set(self):
+        evidence = HEALTHYCHILDREN_LIKE_EVIDENCE
+        # A span that the parser really does read as a range, but which lives
+        # past the evidence cut and therefore only in the topic window.
+        topic_window = evidence + " Later guidance covers children 6-7 years old directly."
+
+        self.assertEqual(llm._extract_evidence_age_ranges(evidence), {(60, 60)})
+        self.assertIn((72, 84), llm._extract_evidence_age_ranges(topic_window))
+
+        hint = llm.question_week_allowed_age_instruction(evidence)
+        self.assertIn("5 лет", hint)
+        self.assertNotIn("6-7", hint)
+        self.assertNotIn("4-5", hint)
+
+        # The hint helper takes one argument and the repair path passes `ev`,
+        # so no topic surface can reach it.
+        self.assertEqual(
+            list(inspect.signature(llm.question_week_allowed_age_instruction).parameters),
+            ["evidence_text"],
+        )
+        repair_source = inspect.getsource(llm.generate_post_plain_from_evidence_async)
+        if "question_week_allowed_age_instruction" not in repair_source:
+            repair_source = inspect.getsource(llm._P2D_GENERATE_POST_BASE)
+        self.assertIn("question_week_allowed_age_instruction(ev)", repair_source)
+        self.assertNotIn("question_week_allowed_age_instruction(topic_scan)", repair_source)
+        self.assertNotIn("question_week_allowed_age_instruction(topic_detection_text)", repair_source)
+
+    # --- the hint is scoped to question_week + parent_age_not_grounded ------
+
+    def test_hint_is_scoped_to_question_week_and_the_age_reason(self):
+        repair_source = inspect.getsource(llm._P2D_GENERATE_POST_BASE)
+        self.assertIn(
+            'if rf == "question_week" and reason == "parent_age_not_grounded":',
+            repair_source,
+        )
+
+
+class QuestionWeekAgeRepairProviderTest(unittest.IsolatedAsyncioTestCase):
+    """C and D -- one existing LLM repair, validator stays authoritative."""
+
+    async def _run(self, groq_outputs):
+        groq_mock = AsyncMock(side_effect=groq_outputs)
+        gemini_mock = AsyncMock(side_effect=AssertionError("gemini must not be called"))
+        with (
+            patch.object(llm, "groq_chat", groq_mock),
+            patch.object(llm, "gemini_generate", gemini_mock),
+        ):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Вопрос недели",
+                rubric_format="question_week",
+                audience="parents",
+                title_suffix="",
+                source_domain="healthychildren.org",
+                source_url="https://healthychildren.org/storytelling",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+                disclaimer="",
+                hashtags=[],
+                provider="groq",
+                groq_key="test-groq",
+                gemini_key="",
+                max_chars=1800,
+                day_key="FR",
+                topic_id="narrative_speech",
+            )
+        return out, ok, note, groq_mock, gemini_mock
+
+    async def test_repair_that_adopts_the_allowed_age_succeeds(self):
+        out, ok, note, groq_mock, gemini_mock = await self._run(
+            [QUESTION_WEEK_UNGROUNDED, QUESTION_WEEK_GROUNDED]
+        )
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertIn("5 лет", out)
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+    async def test_the_repair_prompt_carries_the_allowed_age_and_nothing_else(self):
+        _out, _ok, _note, groq_mock, _gemini = await self._run(
+            [QUESTION_WEEK_UNGROUNDED, QUESTION_WEEK_GROUNDED]
+        )
+        repair_prompt = groq_mock.await_args_list[1].args[0]
+        self.assertIn("parent_age_not_grounded", repair_prompt)
+        self.assertIn("5 лет", repair_prompt)
+        instruction = repair_prompt.split("не подтверждается источником.", 1)[1]
+        for forbidden in ("4-5", "4–5", "2-5", "6 лет"):
+            self.assertNotIn(forbidden, instruction, forbidden)
+
+    async def test_repair_that_keeps_the_ungrounded_age_stays_rejected(self):
+        out, ok, note, groq_mock, gemini_mock = await self._run(
+            [QUESTION_WEEK_UNGROUNDED, QUESTION_WEEK_UNGROUNDED]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_groq_retry:parent_age_not_grounded")
+        self.assertEqual(out, "")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+    async def test_only_one_repair_attempt_is_made(self):
+        _out, _ok, _note, groq_mock, _gemini = await self._run(
+            [QUESTION_WEEK_UNGROUNDED, QUESTION_WEEK_UNGROUNDED]
+        )
+        self.assertEqual(groq_mock.call_count, 2)
 
 
 if __name__ == "__main__":

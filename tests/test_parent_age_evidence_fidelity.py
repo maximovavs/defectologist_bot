@@ -792,12 +792,22 @@ class QuestionWeekAgeRepairProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(groq_mock.call_count, 2)
 
 
-QUESTION_WEEK_GROUNDED_WITH_UNRELATED_NUMBERS = (
+# Evidence that anchors the age *and* the two unrelated numeric facts the body
+# below reuses, so the test never asserts that an unsupported number is fine.
+EVIDENCE_GROUNDING_AGE_AND_UNRELATED_NUMBERS = (
+    "Reading aloud with your child by 5 years of age builds narrative skills. "
+    "Ask your child to retell the story in 2-3 sentences after you finish a book. "
+    "About 5 minutes a day of shared storytelling is enough to see progress. "
+    "Parents can pause and ask what happened next. "
+) * 3
+
+
+QUESTION_WEEK_WITH_GROUNDED_UNRELATED_NUMBERS = (
     "Как помочь ребёнку пересказывать истории\n"
     "👶 Возраст: 5 лет\n"
     "❓ Вопрос недели: как научить ребёнка пересказывать прочитанное?\n"
     "Читайте книгу вместе и останавливайтесь на знакомых местах. "
-    "Просите ребёнка своими словами рассказать 2–3 предложения о том, что случилось. "
+    "Просите ребёнка пересказать историю в 2-3 предложениях своими словами. "
     "Хватит 5 минут в день, чтобы ребёнок привык к такому разговору. "
     "Хвалите любую попытку рассказать историю самостоятельно.\n"
     "🧩 Что попробовать сегодня: прочитайте короткую сказку и попросите пересказать её своими словами.\n"
@@ -843,26 +853,40 @@ class QuestionWeekAgeHintScopeTest(unittest.TestCase):
             if "Не указывай" in sentence:
                 self.assertIn("👶 Возраст:", sentence, sentence)
 
-    def test_unrelated_numbers_alongside_the_allowed_age_stay_valid(self):
-        """What the hint forbids must match what the validator rejects."""
+    def test_grounded_unrelated_numbers_alongside_the_allowed_age_stay_valid(self):
+        """What the hint forbids must match what the validator rejects.
+
+        The evidence here anchors all three numbers the body reuses -- the
+        5-year age, "2-3 sentences" and "5 minutes" -- so this test only ever
+        claims that a *supported* unrelated number survives the age rule. It
+        deliberately does not assert anything about unsupported numeric facts.
+        """
+
+        evidence = EVIDENCE_GROUNDING_AGE_AND_UNRELATED_NUMBERS
+
+        # The unrelated numbers must not create age anchors of their own:
+        # neither "sentences" nor "minutes" is an age unit.
+        self.assertEqual(llm._extract_evidence_age_ranges(evidence), {(60, 60)})
+        for grounded_fact in ("2-3 sentences", "5 minutes"):
+            self.assertIn(grounded_fact, evidence, grounded_fact)
 
         self.assertEqual(
             _validate_output(
-                QUESTION_WEEK_GROUNDED_WITH_UNRELATED_NUMBERS,
+                QUESTION_WEEK_WITH_GROUNDED_UNRELATED_NUMBERS,
                 rubric_format="question_week",
                 audience="parents",
-                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+                evidence_text=evidence,
             ),
             (True, "ok"),
         )
         self.assertEqual(
             _validate_output(
-                QUESTION_WEEK_GROUNDED_WITH_UNRELATED_NUMBERS.replace(
+                QUESTION_WEEK_WITH_GROUNDED_UNRELATED_NUMBERS.replace(
                     "👶 Возраст: 5 лет", "👶 Возраст: 4–5 лет"
                 ),
                 rubric_format="question_week",
                 audience="parents",
-                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+                evidence_text=evidence,
             ),
             (False, "parent_age_not_grounded"),
         )

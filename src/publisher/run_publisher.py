@@ -2247,11 +2247,17 @@ def send_semantic_alert(
     infers it: source rejection uses SEMANTIC_THRESHOLD_SOURCE and body
     rejection uses the rubric-specific post threshold, so the module-global
     SEMANTIC_THRESHOLD would misreport both.
+
+    The threshold is rendered with `.10g` rather than a fixed number of
+    decimals: the configured values differ in precision (0.92, 0.93, 0.94,
+    0.985) and two-decimal rounding turned 0.985 into "0.98", understating the
+    threshold that had actually rejected the post. `.10g` round-trips every
+    configured threshold while still absorbing binary-float noise.
     """
 
     plain_text = (
         "⚠️ Semantic dedup alert\n"
-        f"Материал отклонён: cosine similarity ≥ {decision_threshold:.2f}\n"
+        f"Материал отклонён: cosine similarity ≥ {decision_threshold:.10g}\n"
         f"AUDIENCE={audience} | RUBRIC={rubric_id} | FIELD={match_field}\n\n"
         f"Новый кандидат: {candidate_url}\n"
         f"Похож на: {matched_url}\n"

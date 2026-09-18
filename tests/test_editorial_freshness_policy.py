@@ -1637,22 +1637,74 @@ class SemanticAlertObservabilityTest(unittest.TestCase):
     # --- rendering a rubric threshold end to end ---------------------------
 
     def test_rubric_body_threshold_is_rendered_verbatim(self):
-        for rubric, expected in (
-            ("play_and_speak", 0.94),
-            ("bilingual_corner", 0.92),
-            ("age_norms", 0.985),
-            ("method_piggybank", 0.985),
+        """The rendered threshold must be the configured one, digit for digit.
+
+        The expected strings are written out literally instead of being derived
+        with production's own format spec: a test that reuses the formatting
+        rule cannot detect that the rule itself is lossy. Two-decimal rounding
+        turned the 0.985 rubrics into "0.98", understating the threshold that
+        had rejected the post.
+        """
+
+        for rubric, expected_value, expected_text in (
+            ("play_and_speak", 0.94, "0.94"),
+            ("bilingual_corner", 0.92, "0.92"),
+            ("age_norms", 0.985, "0.985"),
+            ("method_piggybank", 0.985, "0.985"),
         ):
             with self.subTest(rubric=rubric):
                 self.sent.calls.clear()
                 threshold = semantic_post_threshold_for_rubric(rubric)
-                self.assertAlmostEqual(threshold, expected)
+                self.assertAlmostEqual(threshold, expected_value)
                 publisher.send_semantic_alert(
                     "DRAFTS", "a", "b", 0.99, "parents", rubric, "body",
                     decision_threshold=threshold,
                 )
                 _chat_id, text = self.sent.calls[0]
-                self.assertIn(f"cosine similarity ≥ {expected:.2f}", text)
+                self.assertIn(f"cosine similarity ≥ {expected_text}\n", text)
+                # Any rounded form of a three-decimal threshold is a defect.
+                for lossy in ("0.98\n", "0.99\n", "1.00\n", "1\n"):
+                    if lossy != f"{expected_text}\n":
+                        self.assertNotIn(
+                            f"cosine similarity ≥ {lossy}",
+                            text,
+                            f"{rubric}: threshold {threshold!r} rendered lossily",
+                        )
+
+    def test_source_threshold_still_renders_as_two_decimals(self):
+        """0.93 must keep rendering as 0.93, not 0.9 or 0.930."""
+
+        publisher.send_semantic_alert(
+            "DRAFTS", "a", "b", 0.99, "parents", "tip_of_day", "evidence",
+            decision_threshold=SEMANTIC_THRESHOLD_SOURCE,
+        )
+        _chat_id, text = self.sent.calls[0]
+        self.assertIn("cosine similarity ≥ 0.93\n", text)
+        self.assertNotIn("cosine similarity ≥ 0.9\n", text)
+        self.assertNotIn("cosine similarity ≥ 0.930\n", text)
+
+    def test_rendered_threshold_round_trips_to_the_configured_value(self):
+        """Whatever the helper prints must parse back to the exact threshold."""
+
+        import re
+
+        for threshold in (
+            SEMANTIC_THRESHOLD_SOURCE,
+            SEMANTIC_THRESHOLD_POST,
+            semantic_post_threshold_for_rubric("play_and_speak"),
+            semantic_post_threshold_for_rubric("bilingual_corner"),
+            semantic_post_threshold_for_rubric("age_norms"),
+            semantic_post_threshold_for_rubric("method_piggybank"),
+        ):
+            with self.subTest(threshold=threshold):
+                self.sent.calls.clear()
+                publisher.send_semantic_alert(
+                    "DRAFTS", "a", "b", 0.99, "parents", "age_norms", "body",
+                    decision_threshold=threshold,
+                )
+                _chat_id, text = self.sent.calls[0]
+                rendered = re.search(r"cosine similarity ≥ (\S+)", text).group(1)
+                self.assertEqual(float(rendered), threshold)
 
     # --- unchanged contract -------------------------------------------------
 

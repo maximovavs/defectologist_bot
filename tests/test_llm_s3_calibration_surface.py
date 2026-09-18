@@ -26,6 +26,7 @@ from scripts import calibrate_llm_s3 as cal
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "calibrate_llm_s3.py"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "llm_s3_calibration.yml"
+GROQ_ONLY_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "llm_s3_groq_calibration.yml"
 RESEARCH_DIR = ROOT / "research" / "llm_s3"
 PROMPT_PATH = RESEARCH_DIR / "classification_prompt.txt"
 CORPUS_PATH = RESEARCH_DIR / "validation_corpus.json"
@@ -42,7 +43,7 @@ GEMINI_MODEL = "gemini-3.7-flash"
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent"
 
-SURFACE_FILES = (SCRIPT_PATH, WORKFLOW_PATH)
+SURFACE_FILES = (SCRIPT_PATH, WORKFLOW_PATH, GROQ_ONLY_WORKFLOW_PATH)
 
 
 def _forbidden_fallback_model_ids() -> tuple[str, ...]:
@@ -119,6 +120,9 @@ def _identifiers(path: Path) -> set[str]:
 
 def _workflow() -> Dict[str, Any]:
     return yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+
+def _groq_only_workflow() -> Dict[str, Any]:
+    return yaml.safe_load(GROQ_ONLY_WORKFLOW_PATH.read_text(encoding="utf-8"))
 
 
 def _workflow_triggers(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -313,6 +317,86 @@ def test_workflow_checkouts_do_not_persist_credentials() -> None:
         assert checkouts, name
         for step in checkouts:
             assert step["with"]["persist-credentials"] is False, name
+
+
+
+# ---------------------------------------------------------------------------
+# Groq-only Stage 5 execution surface
+# ---------------------------------------------------------------------------
+
+
+def test_groq_only_workflow_is_manual_owner_only_and_read_only() -> None:
+    doc = _groq_only_workflow()
+    triggers = _workflow_triggers(doc)
+    assert list(triggers) == ["workflow_dispatch"]
+    assert triggers["workflow_dispatch"] in (None, {})
+    assert doc["permissions"] == {"contents": "read"}
+    assert list(doc["jobs"]) == ["classify-groq", "evaluate-groq"]
+    assert doc["jobs"]["classify-groq"]["if"] == "github.actor == github.repository_owner"
+    assert doc["jobs"]["evaluate-groq"]["if"] == "github.actor == github.repository_owner"
+    assert doc["jobs"]["evaluate-groq"]["needs"] == "classify-groq"
+
+
+def test_groq_only_workflow_exposes_no_gemini_or_provider_switch_surface() -> None:
+    raw = GROQ_ONLY_WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "gemini" not in raw.lower()
+    assert "inputs:" not in raw
+    assert raw.count("--provider groq") == 1
+    assert "--provider gemini" not in raw
+    assert "GEMINI_API_KEY" not in raw
+
+
+def test_groq_only_workflow_runs_full_frozen_corpus_at_existing_pace() -> None:
+    job = _groq_only_workflow()["jobs"]["classify-groq"]
+    assert job["timeout-minutes"] == 45
+    assert _job_secret_names(job) == {"GROQ_API_KEY"}
+    classify = next(s for s in job["steps"] if s.get("name") == "Classify full corpus with Groq primary model")
+    command = classify["run"]
+    assert "--provider groq" in command
+    assert "--min-request-interval-seconds 16" in command
+    assert "--ids" not in command
+    assert cal.PRIMARY_ITEM_COUNT == 124
+    assert cal.GROQ_MODEL == GROQ_MODEL
+    assert cal.GROQ_ENDPOINT == GROQ_ENDPOINT
+
+
+def test_groq_only_classifier_never_sees_gold_and_evaluator_only_scores_groq() -> None:
+    jobs = _groq_only_workflow()["jobs"]
+    classify_checkout = next(
+        s for s in jobs["classify-groq"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert "validation_gold.json" not in classify_checkout["with"]["sparse-checkout"]
+    evaluate_checkout = next(
+        s for s in jobs["evaluate-groq"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert "validation_gold.json" in evaluate_checkout["with"]["sparse-checkout"]
+    assert _job_secret_names(jobs["evaluate-groq"]) == set()
+    score = next(
+        s
+        for s in jobs["evaluate-groq"]["steps"]
+        if s.get("name") == "Score frozen Groq predictions against frozen gold"
+    )
+    assert '--predictions "$RUNNER_TEMP/llm_s3_predictions/groq/groq.json"' in score["run"]
+    assert "gemini" not in score["run"].lower()
+
+
+def test_groq_only_workflow_avoids_production_and_retry_surfaces() -> None:
+    raw = GROQ_ONLY_WORKFLOW_PATH.read_text(encoding="utf-8").lower()
+    for forbidden in (
+        "actions/cache",
+        "cache/restore",
+        "cache/save",
+        ".state",
+        "telegram",
+        "pollinations",
+        "run_publisher",
+        "set -x",
+        "retry",
+        "fallback",
+        "repair",
+        "backoff",
+    ):
+        assert forbidden not in raw, forbidden
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,129 @@
+name: LLM S3 Groq-only calibration
+
+# Isolated, owner-only research surface for the preregistered Stage 5 Groq
+# calibration. Manual dispatch only. The classifier never sees gold labels and
+# the evaluator never receives a provider credential.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROMPT_PATH: research/llm_s3/classification_prompt.txt
+  CORPUS_PATH: research/llm_s3/validation_corpus.json
+  GOLD_PATH: research/llm_s3/validation_gold.json
+
+jobs:
+  classify-groq:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/calibrate_llm_s3.py
+            research/llm_s3/classification_prompt.txt
+            research/llm_s3/validation_corpus.json
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install research dependencies
+        run: python -m pip install "requests>=2.31.0,<3"
+
+      - name: Stage isolated classifier input
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/llm_s3_inputs"
+          cp "$PROMPT_PATH" "$RUNNER_TEMP/llm_s3_inputs/classification_prompt.txt"
+          cp "$CORPUS_PATH" "$RUNNER_TEMP/llm_s3_inputs/validation_corpus.json"
+          rm -f "$GOLD_PATH"
+          if [ -e "$GOLD_PATH" ] || [ -e "$RUNNER_TEMP/llm_s3_inputs/validation_gold.json" ]; then
+            echo "gold labels reachable from classifier workspace" >&2
+            exit 1
+          fi
+
+      - name: Verify frozen classifier inputs
+        run: |
+          python -m scripts.calibrate_llm_s3 verify-inputs \
+            --prompt "$RUNNER_TEMP/llm_s3_inputs/classification_prompt.txt" \
+            --corpus "$RUNNER_TEMP/llm_s3_inputs/validation_corpus.json"
+
+      - name: Classify full corpus with Groq primary model
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python -m scripts.calibrate_llm_s3 classify \
+            --provider groq \
+            --prompt "$RUNNER_TEMP/llm_s3_inputs/classification_prompt.txt" \
+            --corpus "$RUNNER_TEMP/llm_s3_inputs/validation_corpus.json" \
+            --run-label "${{ github.run_id }}" \
+            --min-request-interval-seconds 16 \
+            --out "$RUNNER_TEMP/llm_s3_predictions/groq.json"
+
+      - name: Freeze Groq predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-s3-groq-only-predictions
+          path: ${{ runner.temp }}/llm_s3_predictions/groq.json
+          if-no-files-found: error
+          retention-days: 7
+
+  evaluate-groq:
+    if: github.actor == github.repository_owner
+    needs: classify-groq
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/calibrate_llm_s3.py
+            research/llm_s3/classification_prompt.txt
+            research/llm_s3/validation_corpus.json
+            research/llm_s3/validation_gold.json
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Download frozen Groq predictions
+        uses: actions/download-artifact@v4
+        with:
+          name: llm-s3-groq-only-predictions
+          path: ${{ runner.temp }}/llm_s3_predictions/groq
+
+      - name: Verify frozen evaluation inputs
+        run: |
+          python -m scripts.calibrate_llm_s3 verify-inputs \
+            --prompt "$PROMPT_PATH" \
+            --corpus "$CORPUS_PATH" \
+            --gold "$GOLD_PATH"
+
+      - name: Score frozen Groq predictions against frozen gold
+        run: |
+          python -m scripts.calibrate_llm_s3 evaluate \
+            --gold "$GOLD_PATH" \
+            --predictions "$RUNNER_TEMP/llm_s3_predictions/groq/groq.json" \
+            --out "$RUNNER_TEMP/llm_s3_report/groq_calibration_report.json"
+
+      - name: Upload Groq calibration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-s3-groq-only-calibration-report
+          path: ${{ runner.temp }}/llm_s3_report/groq_calibration_report.json
+          if-no-files-found: warn
+          retention-days: 7

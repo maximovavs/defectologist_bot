@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import re
 
@@ -125,6 +126,8 @@ RUBRIC_TOPIC_ROTATION: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_COORDINATION_RUBRICS = tuple(RUBRIC_TOPIC_ROTATION)
+
 
 def _normalize(value: str) -> str:
     return (value or "").strip().lower()
@@ -138,6 +141,76 @@ def _week_number(week_key: str) -> int:
     if not 1 <= week <= 53:
         raise ValueError(f"invalid ISO week number: {week}")
     return week
+
+
+def _baseline_topic_position(rubric: str, week_number: int) -> int:
+    rotation = RUBRIC_TOPIC_ROTATION[rubric]
+    digest = hashlib.sha1(f"topic-v1|{rubric}".encode("utf-8")).digest()
+    offset = int.from_bytes(digest[:8], "big") % len(rotation)
+    return (week_number - 1 + offset) % len(rotation)
+
+
+def _baseline_auto_topics(week_number: int) -> dict[str, str]:
+    return {
+        rubric: RUBRIC_TOPIC_ROTATION[rubric][_baseline_topic_position(rubric, week_number)]
+        for rubric in _COORDINATION_RUBRICS
+    }
+
+
+def _coordinated_auto_topics(week_number: int) -> dict[str, str]:
+    """Coordinate auto preferred topics across rubrics without creating a hard gate.
+
+    The baseline rotation remains the first preference for every rubric. When two
+    rubrics collide in the same ISO week, a small deterministic assignment search
+    chooses allowed alternatives while minimizing total rotation displacement,
+    then the largest single displacement. A week-rotated rubric priority breaks
+    remaining ties so the same rubric is not systematically favoured.
+
+    If the configured rotations ever make a collision-free assignment impossible,
+    return the original independent baseline unchanged. Coordination is editorial
+    planning only; it must never suppress a rubric or create publication starvation.
+    """
+    baselines = _baseline_auto_topics(week_number)
+    if len(_COORDINATION_RUBRICS) < 2:
+        return baselines
+
+    priority_offset = (week_number - 1) % len(_COORDINATION_RUBRICS)
+    rubric_priority = (
+        _COORDINATION_RUBRICS[priority_offset:] + _COORDINATION_RUBRICS[:priority_offset]
+    )
+
+    @lru_cache(maxsize=None)
+    def solve(position: int, used_topics: frozenset[str]):
+        if position >= len(rubric_priority):
+            return 0, 0, (), ()
+
+        rubric = rubric_priority[position]
+        rotation = RUBRIC_TOPIC_ROTATION[rubric]
+        baseline_position = _baseline_topic_position(rubric, week_number)
+        best = None
+
+        for shift in range(len(rotation)):
+            topic_id = rotation[(baseline_position + shift) % len(rotation)]
+            if topic_id in used_topics:
+                continue
+            tail = solve(position + 1, used_topics | frozenset((topic_id,)))
+            if tail is None:
+                continue
+
+            total_shift = shift + tail[0]
+            max_shift = max(shift, tail[1])
+            shift_vector = (shift,) + tail[2]
+            assignments = ((rubric, topic_id),) + tail[3]
+            candidate = (total_shift, max_shift, shift_vector, assignments)
+            if best is None or candidate[:3] < best[:3]:
+                best = candidate
+
+        return best
+
+    result = solve(0, frozenset())
+    if result is None:
+        return baselines
+    return dict(result[3])
 
 
 def select_topic_plan(rubric_id: str, week_key: str, topic_override: str = "auto") -> TopicPlan:
@@ -155,11 +228,8 @@ def select_topic_plan(rubric_id: str, week_key: str, topic_override: str = "auto
         return TopicPlan(override, TOPICS[override], override_used=True)
 
     week_number = _week_number(week_key)
-    digest = hashlib.sha1(f"topic-v1|{rubric}".encode("utf-8")).digest()
-    offset = int.from_bytes(digest[:8], "big") % len(rotation)
-    topic_id = rotation[(week_number - 1 + offset) % len(rotation)]
+    topic_id = _coordinated_auto_topics(week_number).get(rubric, "")
     return TopicPlan(topic_id, TOPICS[topic_id], override_used=False)
-
 
 def _topic_match(text: str, topic_id: str) -> bool:
     normalized = (text or "").lower().replace("ё", "е")

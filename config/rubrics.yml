@@ -166,6 +166,7 @@ audiences:
           - "parents_baby_language_activities"
           - "verywell_dramatic_play_language"
           - "verywell_household_objects_play"
+          - "asha_parent_narrative_speech"
         format: "question_week"
         media: ["image_card"]
 

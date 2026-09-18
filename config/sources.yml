@@ -272,6 +272,12 @@ sources:
       - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/language-delay.aspx"
       - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/Language-Development-2-Year-Olds.aspx"
 
+  - id: healthychildren_school_readiness_storytelling
+    name: "HealthyChildren — School readiness storytelling"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/news/Pages/Steps-to-Ensure-School-Readiness-for-All-Children.aspx"
+
   - id: zerotothree_dual_language
     name: "ZERO TO THREE — Dual language development"
     type: static

@@ -167,6 +167,7 @@ audiences:
           - "verywell_dramatic_play_language"
           - "verywell_household_objects_play"
           - "asha_parent_narrative_speech"
+          - "healthychildren_school_readiness_storytelling"
         format: "question_week"
         media: ["image_card"]
 

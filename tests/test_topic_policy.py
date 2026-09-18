@@ -516,7 +516,7 @@ class QuestionWeekP2KCoverageTest(unittest.TestCase):
         self.assertIn(source_id, sources_by_id)
         self.assertEqual(sources_by_id[source_id].get("urls"), [expected_url])
         self.assertNotIn(source_id, friday["sources"])
-        self.assertEqual(len(friday["sources"]), 23)
+        self.assertEqual(len(friday["sources"]), 24)
 
 
     def test_question_week_narrative_recovery_adds_asha_parent_source(self):
@@ -529,6 +529,21 @@ class QuestionWeekP2KCoverageTest(unittest.TestCase):
         self.assertIn(source_id, sources_by_id)
         self.assertEqual(sources_by_id[source_id].get("type"), "static")
         self.assertEqual(sources_by_id[source_id].get("urls"), expected_urls)
+        self.assertIn(source_id, friday["sources"])
+        self.assertIn(source_id, topics_cfg["topics"]["narrative_speech"]["source_ids"])
+        for topic_id, topic_cfg in topics_cfg["topics"].items():
+            if topic_id != "narrative_speech":
+                self.assertNotIn(source_id, topic_cfg.get("source_ids", []))
+
+
+
+    def test_question_week_narrative_recovery_adds_healthychildren_storytelling_source(self):
+        _source_cfg, topics_cfg, friday, sources_by_id = self._configs()
+        source_id = "healthychildren_school_readiness_storytelling"
+        expected_url = "https://www.healthychildren.org/English/news/Pages/Steps-to-Ensure-School-Readiness-for-All-Children.aspx"
+        self.assertIn(source_id, sources_by_id)
+        self.assertEqual(sources_by_id[source_id].get("type"), "static")
+        self.assertEqual(sources_by_id[source_id].get("urls"), [expected_url])
         self.assertIn(source_id, friday["sources"])
         self.assertIn(source_id, topics_cfg["topics"]["narrative_speech"]["source_ids"])
         for topic_id, topic_cfg in topics_cfg["topics"].items():

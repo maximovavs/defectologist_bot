@@ -73,8 +73,10 @@ class TopicPolicyTest(unittest.TestCase):
                 self.assertTrue(set(rotation).issubset(TOPICS))
                 self.assertEqual(len(rotation), len(set(rotation)))
 
-    def test_selection_is_deterministic_rotation_bounded_and_weekly_unique(self):
+    def test_selection_is_deterministic_rotation_bounded_unique_and_covers_rotation(self):
         rubrics = tuple(RUBRIC_TOPIC_ROTATION)
+        selected_by_rubric = {rubric_id: [] for rubric_id in rubrics}
+
         for week in range(1, 54):
             week_key = f"2026-W{week:02d}"
             forward = {
@@ -90,6 +92,17 @@ class TopicPolicyTest(unittest.TestCase):
                 self.assertEqual(len(set(forward.values())), len(rubrics), forward)
                 for rubric_id, topic_id in forward.items():
                     self.assertIn(topic_id, RUBRIC_TOPIC_ROTATION[rubric_id])
+                    selected_by_rubric[rubric_id].append(topic_id)
+
+        for rubric_id, rotation in RUBRIC_TOPIC_ROTATION.items():
+            with self.subTest(rubric_id=rubric_id):
+                self.assertEqual(set(selected_by_rubric[rubric_id]), set(rotation))
+
+        self.assertGreater(
+            selected_by_rubric["question_week"].count("preliteracy"),
+            0,
+            "question_week/preliteracy must not be starved by weekly coordination",
+        )
 
     def test_coordination_falls_back_softly_when_unique_plan_is_impossible(self):
         one_topic_rotations = {

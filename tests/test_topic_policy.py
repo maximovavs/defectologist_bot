@@ -2,6 +2,7 @@ import inspect
 import random
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -72,28 +73,48 @@ class TopicPolicyTest(unittest.TestCase):
                 self.assertTrue(set(rotation).issubset(TOPICS))
                 self.assertEqual(len(rotation), len(set(rotation)))
 
-    def test_selection_is_deterministic_and_covers_full_cycle(self):
-        for rubric_id, rotation in RUBRIC_TOPIC_ROTATION.items():
-            selected = [
-                select_topic_plan(rubric_id, f"2026-W{week:02d}").preferred_topic_id
-                for week in range(1, len(rotation) + 1)
-            ]
-            with self.subTest(rubric_id=rubric_id):
-                self.assertEqual(set(selected), set(rotation))
-                self.assertEqual(
-                    select_topic_plan(rubric_id, "2026-W29"),
-                    select_topic_plan(rubric_id, "2026-W29"),
-                )
+    def test_selection_is_deterministic_rotation_bounded_unique_and_covers_rotation(self):
+        rubrics = tuple(RUBRIC_TOPIC_ROTATION)
+        selected_by_rubric = {rubric_id: [] for rubric_id in rubrics}
 
-    def test_rubric_offsets_do_not_synchronize_every_week(self):
-        pairs = [(first, second) for first in RUBRIC_TOPIC_ROTATION for second in RUBRIC_TOPIC_ROTATION if first < second]
-        for first, second in pairs:
-            same = sum(
-                select_topic_plan(first, f"2026-W{week:02d}").preferred_topic_id
-                == select_topic_plan(second, f"2026-W{week:02d}").preferred_topic_id
-                for week in range(1, 11)
-            )
-            self.assertLess(same, 10, (first, second))
+        for week in range(1, 54):
+            week_key = f"2026-W{week:02d}"
+            forward = {
+                rubric_id: select_topic_plan(rubric_id, week_key).preferred_topic_id
+                for rubric_id in rubrics
+            }
+            reverse = {
+                rubric_id: select_topic_plan(rubric_id, week_key).preferred_topic_id
+                for rubric_id in reversed(rubrics)
+            }
+            with self.subTest(week=week):
+                self.assertEqual(forward, reverse)
+                self.assertEqual(len(set(forward.values())), len(rubrics), forward)
+                for rubric_id, topic_id in forward.items():
+                    self.assertIn(topic_id, RUBRIC_TOPIC_ROTATION[rubric_id])
+                    selected_by_rubric[rubric_id].append(topic_id)
+
+        for rubric_id, rotation in RUBRIC_TOPIC_ROTATION.items():
+            with self.subTest(rubric_id=rubric_id):
+                self.assertEqual(set(selected_by_rubric[rubric_id]), set(rotation))
+
+        self.assertGreater(
+            selected_by_rubric["question_week"].count("preliteracy"),
+            0,
+            "question_week/preliteracy must not be starved by weekly coordination",
+        )
+
+    def test_coordination_falls_back_softly_when_unique_plan_is_impossible(self):
+        one_topic_rotations = {
+            rubric_id: ("early_communication",)
+            for rubric_id in RUBRIC_TOPIC_ROTATION
+        }
+        with patch.dict(RUBRIC_TOPIC_ROTATION, one_topic_rotations, clear=False):
+            selected = {
+                rubric_id: select_topic_plan(rubric_id, "2026-W38").preferred_topic_id
+                for rubric_id in RUBRIC_TOPIC_ROTATION
+            }
+        self.assertEqual(set(selected.values()), {"early_communication"})
 
     def test_override_and_invalid_override(self):
         plan = select_topic_plan("bilingual_corner", "2026-W29", "speech_sounds")

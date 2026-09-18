@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import re
 
@@ -125,6 +126,8 @@ RUBRIC_TOPIC_ROTATION: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_COORDINATION_RUBRICS = tuple(RUBRIC_TOPIC_ROTATION)
+
 
 def _normalize(value: str) -> str:
     return (value or "").strip().lower()
@@ -139,6 +142,115 @@ def _week_number(week_key: str) -> int:
         raise ValueError(f"invalid ISO week number: {week}")
     return week
 
+
+def _rotation_signature() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple(
+        (rubric, tuple(RUBRIC_TOPIC_ROTATION[rubric]))
+        for rubric in _COORDINATION_RUBRICS
+    )
+
+
+@lru_cache(maxsize=8)
+def _coordinated_auto_topic_schedule(
+    rotation_signature: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Build a deterministic 53-week soft coordination schedule.
+
+    Weekly uniqueness remains the primary feasibility constraint. Within the set
+    of unique assignments, a topic that has never been selected for its rubric
+    gets protected on its last baseline opportunity in W01-W53. This prevents a
+    valid rotation topic from being starved forever by repeated cross-rubric
+    collision tie-breaks while preserving the legacy SHA1 baseline everywhere
+    that coverage does not require intervention.
+
+    If uniqueness is impossible for a future rotation configuration, that week
+    falls back to the independent baseline instead of blocking publication.
+    """
+    rotations = dict(rotation_signature)
+    offsets: dict[str, int] = {}
+    last_baseline_week: dict[tuple[str, str], int] = {}
+
+    for rubric, rotation in rotations.items():
+        digest = hashlib.sha1(f"topic-v1|{rubric}".encode("utf-8")).digest()
+        offsets[rubric] = int.from_bytes(digest[:8], "big") % len(rotation)
+        for topic_id in rotation:
+            last_baseline_week[(rubric, topic_id)] = max(
+                week_number
+                for week_number in range(1, 54)
+                if rotation[(week_number - 1 + offsets[rubric]) % len(rotation)] == topic_id
+            )
+
+    coverage_counts = {
+        rubric: {topic_id: 0 for topic_id in rotation}
+        for rubric, rotation in rotations.items()
+    }
+    schedule: list[tuple[tuple[str, str], ...]] = []
+
+    for week_number in range(1, 54):
+        priority_offset = (week_number - 1) % len(_COORDINATION_RUBRICS)
+        rubric_priority = (
+            _COORDINATION_RUBRICS[priority_offset:] + _COORDINATION_RUBRICS[:priority_offset]
+        )
+
+        @lru_cache(maxsize=None)
+        def solve(position: int, used_topics: frozenset[str]):
+            if position >= len(rubric_priority):
+                return 0, 0, 0, (), ()
+
+            rubric = rubric_priority[position]
+            rotation = rotations[rubric]
+            baseline_position = (week_number - 1 + offsets[rubric]) % len(rotation)
+            baseline_topic = rotation[baseline_position]
+            coverage_due = (
+                coverage_counts[rubric][baseline_topic] == 0
+                and last_baseline_week[(rubric, baseline_topic)] == week_number
+            )
+            best = None
+
+            for shift in range(len(rotation)):
+                topic_id = rotation[(baseline_position + shift) % len(rotation)]
+                if topic_id in used_topics:
+                    continue
+                tail = solve(position + 1, used_topics | frozenset((topic_id,)))
+                if tail is None:
+                    continue
+
+                coverage_miss = int(coverage_due and topic_id != baseline_topic)
+                candidate = (
+                    coverage_miss + tail[0],
+                    shift + tail[1],
+                    max(shift, tail[2]),
+                    (shift,) + tail[3],
+                    ((rubric, topic_id),) + tail[4],
+                )
+                if best is None or candidate[:4] < best[:4]:
+                    best = candidate
+            return best
+
+        result = solve(0, frozenset())
+        if result is None:
+            week_plan = tuple(
+                (
+                    rubric,
+                    rotations[rubric][
+                        (week_number - 1 + offsets[rubric]) % len(rotations[rubric])
+                    ],
+                )
+                for rubric in _COORDINATION_RUBRICS
+            )
+        else:
+            week_plan = result[4]
+
+        for rubric, topic_id in week_plan:
+            coverage_counts[rubric][topic_id] += 1
+        schedule.append(week_plan)
+
+    return tuple(schedule)
+
+
+def _coordinated_auto_topics(week_number: int) -> dict[str, str]:
+    schedule = _coordinated_auto_topic_schedule(_rotation_signature())
+    return dict(schedule[week_number - 1])
 
 def select_topic_plan(rubric_id: str, week_key: str, topic_override: str = "auto") -> TopicPlan:
     rubric = _normalize(rubric_id)
@@ -155,11 +267,8 @@ def select_topic_plan(rubric_id: str, week_key: str, topic_override: str = "auto
         return TopicPlan(override, TOPICS[override], override_used=True)
 
     week_number = _week_number(week_key)
-    digest = hashlib.sha1(f"topic-v1|{rubric}".encode("utf-8")).digest()
-    offset = int.from_bytes(digest[:8], "big") % len(rotation)
-    topic_id = rotation[(week_number - 1 + offset) % len(rotation)]
+    topic_id = _coordinated_auto_topics(week_number).get(rubric, "")
     return TopicPlan(topic_id, TOPICS[topic_id], override_used=False)
-
 
 def _topic_match(text: str, topic_id: str) -> bool:
     normalized = (text or "").lower().replace("ё", "е")

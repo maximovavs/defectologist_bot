@@ -792,5 +792,106 @@ class QuestionWeekAgeRepairProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(groq_mock.call_count, 2)
 
 
+QUESTION_WEEK_GROUNDED_WITH_UNRELATED_NUMBERS = (
+    "Как помочь ребёнку пересказывать истории\n"
+    "👶 Возраст: 5 лет\n"
+    "❓ Вопрос недели: как научить ребёнка пересказывать прочитанное?\n"
+    "Читайте книгу вместе и останавливайтесь на знакомых местах. "
+    "Просите ребёнка своими словами рассказать 2–3 предложения о том, что случилось. "
+    "Хватит 5 минут в день, чтобы ребёнок привык к такому разговору. "
+    "Хвалите любую попытку рассказать историю самостоятельно.\n"
+    "🧩 Что попробовать сегодня: прочитайте короткую сказку и попросите пересказать её своими словами.\n"
+    "💡 Что это дает: ребёнок чаще пересказывает знакомую историю своими словами.\n"
+)
+
+
+class QuestionWeekAgeHintScopeTest(unittest.TestCase):
+    """The hint's prohibition is about the age field, not about numbers at all.
+
+    The first wording said "Не указывай никакой другой возраст, число или
+    диапазон", which reads as a blanket ban on every other number in the post
+    and would suppress legitimate content such as "2–3 предложения" or
+    "5 минут". The rule the validator actually enforces is narrower: it only
+    ever inspects the "👶 Возраст:" line.
+    """
+
+    def setUp(self):
+        self.hint = llm.question_week_allowed_age_instruction(
+            HEALTHYCHILDREN_LIKE_EVIDENCE
+        )
+
+    def test_prohibition_names_the_age_field(self):
+        self.assertIn(
+            "Не указывай в строке «👶 Возраст:» никакой другой числовой возраст "
+            "или возрастной диапазон.",
+            self.hint,
+        )
+
+    def test_another_numeric_age_is_still_forbidden(self):
+        prohibition = self.hint.split("перенеси его дословно.", 1)[1]
+        self.assertIn("числовой возраст", prohibition)
+        self.assertIn("возрастной диапазон", prohibition)
+        # The allowed value is still the only one offered.
+        self.assertIn("5 лет", self.hint)
+        for other_age in ("4-5", "4–5", "6 лет", "3 года"):
+            self.assertNotIn(other_age, self.hint, other_age)
+
+    def test_no_blanket_ban_on_unrelated_numbers(self):
+        self.assertNotIn("Не указывай никакой другой возраст, число или диапазон", self.hint)
+        # No sentence forbids numbers in general, only in the age line.
+        for sentence in self.hint.split(". "):
+            if "Не указывай" in sentence:
+                self.assertIn("👶 Возраст:", sentence, sentence)
+
+    def test_unrelated_numbers_alongside_the_allowed_age_stay_valid(self):
+        """What the hint forbids must match what the validator rejects."""
+
+        self.assertEqual(
+            _validate_output(
+                QUESTION_WEEK_GROUNDED_WITH_UNRELATED_NUMBERS,
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            _validate_output(
+                QUESTION_WEEK_GROUNDED_WITH_UNRELATED_NUMBERS.replace(
+                    "👶 Возраст: 5 лет", "👶 Возраст: 4–5 лет"
+                ),
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+
+    def test_the_thirteen_existing_regressions_are_still_present(self):
+        expected = {
+            "test_healthychildren_like_evidence_anchors_only_five_years",
+            "test_parser_grammar_is_untouched_by_this_change",
+            "test_the_fixture_isolates_exactly_the_age_failure",
+            "test_hint_offers_only_the_allowed_age",
+            "test_every_rendered_option_round_trips_through_the_parser",
+            "test_separate_anchors_are_listed_separately_and_never_merged",
+            "test_empty_allowed_set_invents_no_age",
+            "test_ages_seen_only_by_the_topic_window_never_enter_the_allowed_set",
+            "test_hint_is_scoped_to_question_week_and_the_age_reason",
+            "test_repair_that_adopts_the_allowed_age_succeeds",
+            "test_the_repair_prompt_carries_the_allowed_age_and_nothing_else",
+            "test_repair_that_keeps_the_ungrounded_age_stays_rejected",
+            "test_only_one_repair_attempt_is_made",
+        }
+        present = {
+            name
+            for cls in (QuestionWeekAgeRepairAllowedSetTest, QuestionWeekAgeRepairProviderTest)
+            for name in dir(cls)
+            if name.startswith("test_")
+        }
+        self.assertEqual(len(expected), 13)
+        self.assertEqual(expected - present, set())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1032,6 +1032,67 @@ def _extract_evidence_age_ranges(evidence_text: str) -> set[tuple[int, int]]:
     return ranges
 
 
+def _russian_age_unit(value: int, months: bool) -> str:
+    """Agree the unit with `value`, the way the age line is written in posts."""
+
+    last_two, last = value % 100, value % 10
+    if 11 <= last_two <= 14:
+        return "месяцев" if months else "лет"
+    if last == 1:
+        return "месяц" if months else "год"
+    if 2 <= last <= 4:
+        return "месяца" if months else "года"
+    return "месяцев" if months else "лет"
+
+
+def _format_allowed_age_tuple(minimum: int, maximum: int) -> str:
+    """Render one allowed (min_months, max_months) tuple as an age line value.
+
+    The rendering must round-trip through `_parse_parent_age_range`, so that an
+    output copying it verbatim satisfies `_validate_parent_age_evidence_output`
+    without that validator or the parser changing in any way. Years are used
+    only when both endpoints are whole years, which is how the evidence states
+    them; the unit agrees with the upper endpoint, as in "2-3 года", "5 лет".
+    """
+
+    months = not (minimum % 12 == 0 and maximum % 12 == 0)
+    low = minimum if months else minimum // 12
+    high = maximum if months else maximum // 12
+    unit = _russian_age_unit(high, months)
+    return f"{low} {unit}" if low == high else f"{low}-{high} {unit}"
+
+
+def question_week_allowed_age_instruction(evidence_text: str) -> str:
+    """Deterministic allowed-age hint for a question_week age repair.
+
+    The allowed set comes only from `_extract_evidence_age_ranges` over the
+    original evidence -- never from the bounded topic-detection window, which
+    is not a factual surface. Each tuple the extractor found is listed exactly
+    as it stands: separate anchors stay separate, so evidence naming 2 years
+    and 5 years never authorises "2-5 лет", and a tuple is neither narrowed nor
+    widened. When the extractor finds nothing the hint is empty and the current
+    fail-closed behaviour is preserved: no age is invented, and the validator
+    stays authoritative over whatever the single repair returns.
+    """
+
+    allowed = sorted(_extract_evidence_age_ranges(evidence_text))
+    if not allowed:
+        return ""
+
+    rendered = [_format_allowed_age_tuple(minimum, maximum) for minimum, maximum in allowed]
+    options = "; ".join(rendered)
+    return (
+        "\nВозраст в строке «👶 Возраст:» не подтверждается источником. "
+        "EVIDENCE допускает ровно такие варианты возраста, и никакие другие: "
+        f"{options}. "
+        "Выбери ровно один из перечисленных вариантов и перенеси его дословно. "
+        "Не указывай в строке «👶 Возраст:» никакой другой числовой возраст или возрастной диапазон. "
+        "Не объединяй два отдельных варианта в один общий диапазон. "
+        "Не сужай и не расширяй выбранный вариант. "
+        "Остальной текст оставь по существу прежним."
+    )
+
+
 def _validate_parent_age_evidence_output(text: str, evidence_text: str) -> Tuple[bool, str]:
     parsed = _parse_parent_age_range(text)
     if not parsed or parsed.min_months is None or parsed.max_months is None:
@@ -4203,6 +4264,12 @@ async def generate_post_plain_from_evidence_async(
             repair += "\n" + PARENT_RUSSIAN_PHONEME_REPAIR_INSTRUCTION
         if reason in PARENT_CONTENT_REPAIR_REASONS:
             repair += "\n" + _parent_content_repair_instruction(reason)
+
+        if rf == "question_week" and reason == "parent_age_not_grounded":
+            # Deterministic allowed-age hint, derived only from the original
+            # evidence. Empty when the evidence anchors no age, which keeps the
+            # existing fail-closed behaviour instead of inventing one.
+            repair += question_week_allowed_age_instruction(ev)
 
         if is_myth_fact_format and reason in MYTH_FACT_REPAIR_REASONS:
             repair += (

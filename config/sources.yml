@@ -190,6 +190,13 @@ sources:
       - "https://www.asha.org/public/developmental-milestones/communication-milestones-3-to-4-years/"
       - "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/"
 
+  - id: asha_parent_narrative_speech
+    name: "ASHA — Parent narrative speech"
+    type: static
+    urls:
+      - "https://www.asha.org/public/speech/development/kindergarten/"
+      - "https://www.asha.org/public/speech/development/suggestions/"
+
   # ---------- Colorín Colorado ----------
 
   - id: colorin_bilingual_parents

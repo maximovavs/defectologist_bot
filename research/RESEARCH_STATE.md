@@ -34,7 +34,7 @@ Research execution/evaluation:
 
 ### Frozen evaluation structure
 
-Commit #55 (`a6029a5b99c355f10ba4f5671da5a3cffaa31cb2`) established the isolated Stage 5 surface with:
+PR #55, merged at commit `a6029a5b99c355f10ba4f5671da5a3cffaa31cb2`, established the isolated Stage 5 surface with:
 
 - 124 primary scoring items;
 - 30 paraphrase groups;
@@ -48,7 +48,7 @@ The evaluator measures joint/per-frame quality, MODEL_WAIT behavior, hard-negati
 
 ### Execution-block semantics
 
-Commit #56 (`68061056053721748ec3c0ed1b64e506df2add22`) supersedes any interpretation of transport exhaustion as model quality.
+PR #56, merged at commit `68061056053721748ec3c0ed1b64e506df2add22`, supersedes any interpretation of transport exhaustion as model quality.
 
 The observed run shape recorded by that commit had:
 
@@ -66,7 +66,7 @@ If any primary item is execution-blocked, provider quality metrics are not score
 
 ### Groq-only execution surface
 
-Commit #64 (`16c42ff2c1f55690a4e31f8692bb146e79495224`) added a separate Groq-only Stage 5 workflow:
+PR #64, merged at commit `16c42ff2c1f55690a4e31f8692bb146e79495224`, added a separate Groq-only Stage 5 workflow:
 
 - manual `workflow_dispatch` only;
 - repository-owner guard;

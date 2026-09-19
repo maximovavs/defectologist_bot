@@ -23,6 +23,7 @@ on:
       - "tests/test_myth_fact_claim_freshness.py"
       - "tests/test_myth_fact_source_probe.py"
       - "tests/test_parent_age_evidence_fidelity.py"
+      - "tests/test_question_week_over_max_chars.py"
       - "tests/test_parent_modality_fidelity.py"
       - "tests/test_parent_diagnostic_role_boundary.py"
       - "tests/test_exercise_coherence_policy.py"
@@ -79,6 +80,7 @@ jobs:
             tests/test_myth_fact_claim_freshness.py \
             tests/test_myth_fact_source_probe.py \
             tests/test_parent_age_evidence_fidelity.py \
+            tests/test_question_week_over_max_chars.py \
             tests/test_parent_modality_fidelity.py \
             tests/test_parent_diagnostic_role_boundary.py \
             tests/test_exercise_coherence_policy.py \
@@ -132,6 +134,7 @@ jobs:
               "tests.test_myth_fact_claim_freshness",
               "tests.test_myth_fact_source_probe",
               "tests.test_parent_age_evidence_fidelity",
+              "tests.test_question_week_over_max_chars",
               "tests.test_parent_modality_fidelity",
               "tests.test_parent_diagnostic_role_boundary",
               "tests.test_exercise_coherence_policy",

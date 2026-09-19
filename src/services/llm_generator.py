@@ -4200,7 +4200,8 @@ async def generate_post_plain_from_evidence_async(
             source_domain=source_domain,
             source_url=source_url,
         )
-        s = enforce_total_chars_keep_structure(s, max_chars)
+        if rf != "question_week":
+            s = enforce_total_chars_keep_structure(s, max_chars)
         return s.strip()
 
     def validate(out: str) -> Tuple[bool, str]:
@@ -4209,7 +4210,7 @@ async def generate_post_plain_from_evidence_async(
             out_lines and out_lines[0].strip().upper().startswith("НЕТ_ДАННЫХ")
         ):
             return False, "no_data_in_source"
-        return _validate_output(
+        ok, reason = _validate_output(
             out,
             day_key=dk,
             rubric_format=rf,
@@ -4218,6 +4219,11 @@ async def generate_post_plain_from_evidence_async(
             topic_id=topic_id,
             topic_detection_text=topic_scan,
         )
+        if not ok:
+            return ok, reason
+        if rf == "question_week" and len(out) > max_chars:
+            return False, "question_week_over_max_chars"
+        return True, "ok"
 
     def postprocess_repaired(s: str) -> tuple[str, bool]:
         out = postprocess(s)
@@ -4291,6 +4297,11 @@ async def generate_post_plain_from_evidence_async(
                 "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
                 "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
             )
+            if reason == "question_week_over_max_chars":
+                repair += (
+                    f" Сократи весь пост целиком до {max_chars} символов, сохрани все обязательные блоки, "
+                    "не обрывай текст и не используй «...» или «…»."
+                )
 
         if dk == "SU" or rf == "age_norms":
             repair += (

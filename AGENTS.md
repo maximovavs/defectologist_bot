@@ -47,6 +47,14 @@ Keep always-loaded context small.
 
 Do not duplicate long history into this file.
 
+## AI execution routing
+
+- Use ordinary ChatGPT with direct connected tools as the default for repository work, research operations, tests, CI diagnostics, and bounded authorized GitHub actions.
+- Do not use ChatGPT Work merely because a research or engineering task is difficult or multi-step. Use it only for substantial external UI/browser execution that direct tools cannot perform.
+- Use Claude primarily as an independent adversarial reviewer when a research conclusion, semantic judgment, or production change needs falsification.
+- Use Gemini only when a distinct alternative or provider/Google-specific perspective is useful. Use source-grounded notebook tools for large external corpora when appropriate, not as the source of truth for live repository state or frozen committed calibration evidence.
+- Do not ask multiple models the same question without assigning distinct reviewer roles.
+
 ## Operational principles
 
 - Separate diagnostics from mutations.

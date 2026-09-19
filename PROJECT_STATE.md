@@ -4,6 +4,10 @@ Repository: `maximovavs/defectologist_bot`
 
 Purpose: evidence-grounded automated content generation and publishing for the speech-development channel, with strict source, quality, freshness, and safety checks.
 
+## Operating contract
+
+Permission and action boundaries are defined in `AGENTS.md`. This file grants no authorization.
+
 ## Last verified baseline
 
 Verified read-only on 2026-09-19 before this documentation-only Draft PR:
@@ -29,25 +33,6 @@ No single global blocker is encoded here.
 
 The active blocker is stage-specific and must be established from the user's latest handoff plus fresh repository/run evidence. Do not infer it from an old PR description or from this file.
 
-## Next allowed step
-
-Read-only discovery/audit only, unless the user separately authorizes a specific mutation.
-
-For any future stage:
-
-1. read this file;
-2. inspect the live GitHub state relevant to the stage;
-3. consult `research/RESEARCH_STATE.md` when the task depends on prior research;
-4. read only the minimum necessary code/tests/workflow evidence;
-5. confirm the exact permission boundary;
-6. mutate only when explicitly authorized.
-
-## Authorization required
-
-Explicit authorization is required for all writes and production-affecting actions, including commits, branch/PR mutations, Ready/merge, workflow dispatch or rerun/retry, provider calls, Telegram calls, publication, state/cache/database mutation, and secret/config changes.
-
-This file grants no such authorization.
-
 ## Evidence pointers
 
 Use these on demand:
@@ -58,9 +43,3 @@ Use these on demand:
 - `.github/workflows/llm_s3_calibration.yml` and `.github/workflows/llm_s3_groq_calibration.yml` — owner-only research execution surfaces.
 - `tests/` — executable contracts for production and research behavior.
 - `.github/workflows/post.yml` — production publisher workflow; do not dispatch without explicit authorization.
-
-## Context-efficiency rule
-
-Do not turn this file into a chronological log.
-
-Keep only the minimal current entry point here. Put durable research conclusions in `research/RESEARCH_STATE.md`; keep raw corpora, gold, logs, and workflow artifacts in their existing locations and read them only when a concrete task requires them.

@@ -80,7 +80,7 @@ This is an execution/calibration surface only. Its existence is not a production
 
 ## Do not repeat / do not infer
 
-- Do not quote the original low joint-accuracy numbers from the transport-exhausted multi-provider run as model-quality results; commit #56 explicitly invalidates that interpretation.
+- Do not quote the original low joint-accuracy numbers from the transport-exhausted multi-provider run as model-quality results; PR #56, merged at commit 68061056053721748ec3c0ed1b64e506df2add22, explicitly invalidates that interpretation.
 - Do not alter frozen Stage 5 prompt/corpus/gold while claiming comparability with the preregistered calibration.
 - Do not add provider retries, fallback, repair, or hidden pacing changes to a calibration run without treating that as a new research contract.
 - Do not promote S3 research findings into production guards without a separate validated production stage.

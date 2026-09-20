@@ -4237,7 +4237,7 @@ async def generate_post_plain_from_evidence_async(
     groq_err = ""
     groq_fail_closed_reason = ""
     repair_prompt = ""
-    def build_generic_repair_prompt(reason: str) -> str:
+    def build_generic_repair_prompt(reason: str, previous_output: str = "") -> str:
         repair = (
             prompt
             + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
@@ -4302,6 +4302,20 @@ async def generate_post_plain_from_evidence_async(
                     f" Сократи весь пост целиком до {max_chars} символов, сохрани все обязательные блоки, "
                     "не обрывай текст и не используй «...» или «…»."
                 )
+                # The model cannot shorten what it cannot see. The length is
+                # measured on the postprocessed text, which already carries the
+                # "Источник:" and "🔗" lines that _ensure_source_and_link may
+                # have appended, so the previous output is handed over exactly
+                # as it was measured. Scoped to question_week over-max only:
+                # every other repair reason keeps its current prompt verbatim.
+                if rf == "question_week" and previous_output.strip():
+                    repair += (
+                        "\n\nПРЕДЫДУЩИЙ ВАРИАНТ (ровно тот текст, длина которого превысила лимит, "
+                        f"{len(previous_output)} символов, включая строки «Источник:» и «🔗»):\n"
+                        + previous_output.strip()
+                        + "\n\nСократи именно этот текст, сохрани его смысл, структуру и последние "
+                        "строки «Источник:» и «🔗» без изменений."
+                    )
 
         if dk == "SU" or rf == "age_norms":
             repair += (
@@ -4348,7 +4362,7 @@ async def generate_post_plain_from_evidence_async(
                     topic_title=topic_title,
                 )
             else:
-                repair_prompt = build_generic_repair_prompt(reason)
+                repair_prompt = build_generic_repair_prompt(reason, previous_output=out)
             if repair_prompt:
                 out2, repaired_age_removed = postprocess_repaired(
                     await _text_provider_call("groq", repair_prompt, groq_key, repair=True)
@@ -4463,7 +4477,17 @@ async def generate_post_plain_from_evidence_async(
             elif (dk == "FR" or rf == "question_week") and (
                 reason in {"too_short", "no_data_in_source"} or reason.startswith("question_week_")
             ):
-                gemini_repair_prompt = repair_prompt or (
+                # `repair_prompt` is the Groq attempt's prompt. Reusing it for a
+                # length repair would hand Gemini the Groq text to shorten while
+                # its own, different output is what actually exceeded the limit,
+                # so this one reason is rebuilt from Gemini's postprocessed
+                # output. Every other question_week reason keeps the existing
+                # reuse and the existing fallback semantics unchanged.
+                gemini_repair_prompt = (
+                    build_generic_repair_prompt(reason, previous_output=out)
+                    if reason == "question_week_over_max_chars"
+                    else repair_prompt
+                ) or (
                     prompt
                     + "\n\nПОВТОРИ. Предыдущий вариант оказался невалидным: "
                     + reason

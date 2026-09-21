@@ -1,5 +1,7 @@
 import inspect
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import AsyncMock, patch
 
 from src.services import llm_generator as llm
@@ -337,6 +339,157 @@ class QuestionWeekOverMaxPreviousOutputTest(unittest.IsolatedAsyncioTestCase):
             source,
         )
         self.assertIn("build_generic_repair_prompt(reason, previous_output=out)", source)
+
+
+# ---------------------------------------------------------------------------
+# Runtime validation observability.
+#
+# A question_week run that ends in a skip currently reports only the last
+# reason, so an initial failure that differs from the retry failure is
+# invisible in production logs. These regressions pin the structured
+# diagnostic and, just as importantly, pin that it never leaks candidate text.
+# ---------------------------------------------------------------------------
+
+RAW_MARKER = "ZZCANDIDATETEXTMARKERZZ"
+
+MARKED_OVER_LIMIT = OVER_LIMIT_QUESTION_WEEK.replace(
+    "Дополнение: ", f"Дополнение: {RAW_MARKER} ", 1
+)
+
+# A complete, otherwise valid body with the "👶 Возраст:" line removed.
+QUESTION_WEEK_WITHOUT_AGE_FIELD = COMPLETE_QUESTION_WEEK.replace(
+    "👶 Возраст: 2–3 года\n", "", 1
+)
+
+
+class QuestionWeekRuntimeValidationDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
+    async def _generate(self, outputs, provider_name="groq", gemini_key=""):
+        """Run the generator with mocked providers and capture stdout."""
+
+        provider = AsyncMock(side_effect=outputs)
+        buffer = StringIO()
+        with patch.object(llm, "_text_provider_call", provider):
+            with redirect_stdout(buffer):
+                result = await llm.generate_post_plain_from_evidence_async(
+                    rubric_title="Вопрос недели",
+                    rubric_format="question_week",
+                    audience="parents",
+                    title_suffix="",
+                    source_domain="example.org",
+                    source_url="https://example.org/source",
+                    evidence_text=EVIDENCE,
+                    disclaimer="",
+                    hashtags=[],
+                    provider=provider_name,
+                    groq_key="offline-key",
+                    gemini_key=gemini_key,
+                    max_chars=1000,
+                    day_key="FR",
+                )
+        return result, provider, buffer.getvalue()
+
+    @staticmethod
+    def _providers(provider):
+        return [c.args[0] for c in provider.await_args_list]
+
+    # --- 1 ------------------------------------------------------------------
+
+    async def test_runtime_validation_diagnostics_log_reasons_lengths_without_raw_output(self):
+        (text, ok, note), provider, out = await self._generate(
+            [MARKED_OVER_LIMIT, OVER_LIMIT_QUESTION_WEEK]
+        )
+
+        self.assertEqual(provider.await_count, 2)
+        self.assertIn(
+            "[LLM][validation] rubric=question_week provider=groq stage=initial "
+            "reason=question_week_over_max_chars chars=1443",
+            out,
+        )
+        self.assertIn(
+            "[LLM][validation] rubric=question_week provider=groq stage=retry "
+            "reason=question_week_over_max_chars chars=1419",
+            out,
+        )
+
+        # The diagnostic must never carry candidate text.
+        self.assertIn(RAW_MARKER, MARKED_OVER_LIMIT)
+        self.assertNotIn(RAW_MARKER, out)
+        self.assertNotIn("❓ Вопрос недели:", out)
+        self.assertNotIn("https://example.org/source", out)
+
+        self.assertFalse(ok)
+        self.assertEqual(text, "")
+        self.assertEqual(note, "invalid_groq_retry:question_week_over_max_chars")
+
+    # --- 2 ------------------------------------------------------------------
+
+    async def test_runtime_validation_diagnostics_expose_initial_fail_closed_reason(self):
+        """The opaque shape of run 35597800265: two different reasons, one note."""
+
+        (text, ok, note), provider, out = await self._generate(
+            [QUESTION_WEEK_WITHOUT_AGE_FIELD, OVER_LIMIT_QUESTION_WEEK],
+            provider_name="auto",
+            gemini_key="offline-gemini",
+        )
+
+        self.assertEqual(provider.await_count, 2)
+        self.assertEqual(self._providers(provider), ["groq", "groq"])
+
+        self.assertIn(
+            "[LLM][validation] rubric=question_week provider=groq stage=initial "
+            "reason=parent_age_field_missing chars=731",
+            out,
+        )
+        self.assertIn(
+            "[LLM][validation] rubric=question_week provider=groq stage=retry "
+            "reason=question_week_over_max_chars chars=1419",
+            out,
+        )
+
+        # The initial reason is fail-closed, so no fallback happens.
+        self.assertNotIn("[LLM][fallback] rubric=question_week", out)
+
+        # The returned note still shows only the retry reason -- which is
+        # exactly why the initial one has to be logged.
+        self.assertFalse(ok)
+        self.assertEqual(text, "")
+        self.assertEqual(note, "invalid_groq_retry:question_week_over_max_chars")
+
+    # --- 3 ------------------------------------------------------------------
+
+    async def test_runtime_validation_diagnostics_expose_groq_to_gemini_fallback(self):
+        (text, ok, note), provider, out = await self._generate(
+            [
+                OVER_LIMIT_QUESTION_WEEK,
+                OVER_LIMIT_QUESTION_WEEK,
+                GEMINI_OVER_LIMIT,
+                COMPLETE_QUESTION_WEEK,
+            ],
+            provider_name="auto",
+            gemini_key="offline-gemini",
+        )
+
+        self.assertEqual(self._providers(provider), ["groq", "groq", "gemini", "gemini"])
+
+        self.assertIn(
+            "[LLM][fallback] rubric=question_week from=groq to=gemini "
+            "reason=invalid_groq_retry:question_week_over_max_chars",
+            out,
+        )
+        self.assertIn(
+            "[LLM][validation] rubric=question_week provider=gemini stage=initial "
+            "reason=question_week_over_max_chars chars=1208",
+            out,
+        )
+        self.assertIn(
+            "[LLM][validation] rubric=question_week provider=gemini stage=retry "
+            "reason=ok chars=751",
+            out,
+        )
+
+        self.assertTrue(ok, note)
+        self.assertEqual(note, f"ok:gemini_retry:{llm.GEMINI_MODELS[0]}")
+        self.assertLessEqual(len(text), 1000)
 
 
 if __name__ == "__main__":

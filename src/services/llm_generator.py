@@ -4225,6 +4225,29 @@ async def generate_post_plain_from_evidence_async(
             return False, "question_week_over_max_chars"
         return True, "ok"
 
+    def log_runtime_validation(
+        provider_name: str,
+        stage: str,
+        reason: str,
+        char_count: int,
+    ) -> None:
+        """Diagnostic only: what the validator decided, never the candidate.
+
+        A question_week run that ends in a skip is currently opaque: the note
+        carries the last reason, so an initial failure that differs from the
+        retry failure is invisible. This prints the structured outcome and
+        nothing else. Raw output, prompt, evidence, URL, API key and Telegram
+        data are not parameters, so no candidate text can reach the log here.
+        """
+
+        if rf != "question_week":
+            return
+        print(
+            f"[LLM][validation] rubric=question_week provider={provider_name} "
+            f"stage={stage} reason={reason} chars={int(char_count)}",
+            flush=True,
+        )
+
     def postprocess_repaired(s: str) -> tuple[str, bool]:
         out = postprocess(s)
         if not is_myth_fact_format:
@@ -4332,6 +4355,7 @@ async def generate_post_plain_from_evidence_async(
         try:
             out = postprocess(await _text_provider_call("groq", prompt, groq_key))
             ok, reason = validate(out)
+            log_runtime_validation("groq", "initial", reason, len(out))
             if ok:
                 return out, True, "ok:groq"
             if reason in {"parent_modality_not_grounded", "parent_diagnostic_role_violation"}:
@@ -4368,6 +4392,7 @@ async def generate_post_plain_from_evidence_async(
                     await _text_provider_call("groq", repair_prompt, groq_key, repair=True)
                 )
                 ok2, reason2 = validate(out2)
+                log_runtime_validation("groq", "retry", reason2, len(out2))
                 if ok2:
                     return out2, True, "ok:groq_retry"
                 groq_err = f"invalid_groq_retry:{reason2}"
@@ -4389,6 +4414,11 @@ async def generate_post_plain_from_evidence_async(
             if prov == "groq":
                 return "", False, groq_err
 
+            if rf == "question_week":
+                print(
+                    f"[LLM][fallback] rubric=question_week from=groq to=gemini reason={groq_err}",
+                    flush=True,
+                )
             print(f"[LLM][groq] invalid output, falling back to gemini: {groq_err}", flush=True)
         except Exception as e:
             groq_err = str(e)
@@ -4405,6 +4435,7 @@ async def generate_post_plain_from_evidence_async(
         try:
             out = postprocess(await _text_provider_call("gemini", prompt, gemini_key))
             ok, reason = validate(out)
+            log_runtime_validation("gemini", "initial", reason, len(out))
             if ok:
                 return out, True, f"ok:gemini:{GEMINI_MODELS[0]}"
 
@@ -4470,6 +4501,7 @@ async def generate_post_plain_from_evidence_async(
                         await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True)
                     )
                     ok2, reason2 = validate(out2)
+                    log_runtime_validation("gemini", "retry", reason2, len(out2))
                     if ok2:
                         return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
                     return "", False, f"invalid_gemini_retry:{reason2}"
@@ -4504,6 +4536,7 @@ async def generate_post_plain_from_evidence_async(
                 )
                 out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))
                 ok2, reason2 = validate(out2)
+                log_runtime_validation("gemini", "retry", reason2, len(out2))
                 if ok2:
                     return out2, True, f"ok:gemini_retry:{GEMINI_MODELS[0]}"
                 return "", False, f"invalid_gemini_retry:{reason2}"

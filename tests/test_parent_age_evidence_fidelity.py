@@ -754,6 +754,32 @@ class QuestionWeekAgeRepairProviderTest(unittest.IsolatedAsyncioTestCase):
             )
         return out, ok, note, groq_mock, gemini_mock
 
+    async def _run_auto_with_1000_limit(self, groq_outputs):
+        groq_mock = AsyncMock(side_effect=groq_outputs)
+        gemini_mock = AsyncMock(return_value=QUESTION_WEEK_GROUNDED)
+        with (
+            patch.object(llm, "groq_chat", groq_mock),
+            patch.object(llm, "gemini_generate", gemini_mock),
+        ):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Вопрос недели",
+                rubric_format="question_week",
+                audience="parents",
+                title_suffix="",
+                source_domain="healthychildren.org",
+                source_url="https://healthychildren.org/storytelling",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+                disclaimer="",
+                hashtags=[],
+                provider="auto",
+                groq_key="test-groq",
+                gemini_key="test-gemini",
+                max_chars=1000,
+                day_key="FR",
+                topic_id="narrative_speech",
+            )
+        return out, ok, note, groq_mock, gemini_mock
+
     async def test_repair_that_adopts_the_allowed_age_succeeds(self):
         out, ok, note, groq_mock, gemini_mock = await self._run(
             [QUESTION_WEEK_UNGROUNDED, QUESTION_WEEK_GROUNDED]
@@ -784,6 +810,118 @@ class QuestionWeekAgeRepairProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, "")
         self.assertEqual(groq_mock.call_count, 2)
         gemini_mock.assert_not_awaited()
+
+    async def test_combined_age_and_overmax_repair_can_succeed_in_one_retry(self):
+        pad = (
+            "Родитель может попросить ребёнка своими словами рассказать, что произошло дальше, "
+            "и спокойно выслушать ответ. "
+        )
+        initial = QUESTION_WEEK_UNGROUNDED + ("\nДополнение: " + pad * 8)
+        measured = llm._ensure_source_and_link(
+            text=initial,
+            source_domain="healthychildren.org",
+            source_url="https://healthychildren.org/storytelling",
+        )
+        self.assertGreater(len(measured), 1000)
+        self.assertEqual(
+            _validate_output(
+                measured,
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+
+        out, ok, note, groq_mock, gemini_mock = await self._run_auto_with_1000_limit(
+            [initial, QUESTION_WEEK_GROUNDED]
+        )
+
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+        self.assertLessEqual(len(out), 1000)
+
+        repair_prompt = groq_mock.await_args_list[1].args[0]
+        self.assertIn("parent_age_not_grounded", repair_prompt)
+        self.assertIn("5 лет", repair_prompt)
+        self.assertIn("Сократи весь пост целиком до 1000 символов", repair_prompt)
+        self.assertIn(measured.strip(), repair_prompt)
+        self.assertIn("Источник: healthychildren.org", repair_prompt)
+        self.assertIn("🔗 https://healthychildren.org/storytelling", repair_prompt)
+
+    async def test_combined_age_and_overmax_repair_still_fails_closed_if_retry_is_overmax(self):
+        pad = (
+            "Родитель может попросить ребёнка своими словами рассказать, что произошло дальше, "
+            "и спокойно выслушать ответ. "
+        )
+        initial = QUESTION_WEEK_UNGROUNDED + ("\nДополнение: " + pad * 8)
+        initial_measured = llm._ensure_source_and_link(
+            text=initial,
+            source_domain="healthychildren.org",
+            source_url="https://healthychildren.org/storytelling",
+        )
+        self.assertGreater(len(initial_measured), 1000)
+        self.assertEqual(
+            _validate_output(
+                initial_measured,
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+
+        grounded_overmax = QUESTION_WEEK_GROUNDED + ("\nДополнение: " + pad * 8)
+        retry_measured = llm._ensure_source_and_link(
+            text=grounded_overmax,
+            source_domain="healthychildren.org",
+            source_url="https://healthychildren.org/storytelling",
+        )
+        self.assertGreater(len(retry_measured), 1000)
+        self.assertEqual(
+            _validate_output(
+                retry_measured,
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=HEALTHYCHILDREN_LIKE_EVIDENCE,
+            ),
+            (True, "ok"),
+        )
+
+        out, ok, note, groq_mock, gemini_mock = await self._run_auto_with_1000_limit(
+            [initial, grounded_overmax]
+        )
+
+        self.assertEqual(out, "")
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_groq_retry:question_week_over_max_chars")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+    async def test_age_only_repair_under_limit_keeps_previous_prompt_shape(self):
+        measured = llm._ensure_source_and_link(
+            text=QUESTION_WEEK_UNGROUNDED,
+            source_domain="healthychildren.org",
+            source_url="https://healthychildren.org/storytelling",
+        )
+        self.assertLessEqual(len(measured), 1000)
+
+        out, ok, note, groq_mock, gemini_mock = await self._run_auto_with_1000_limit(
+            [QUESTION_WEEK_UNGROUNDED, QUESTION_WEEK_GROUNDED]
+        )
+
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+        repair_prompt = groq_mock.await_args_list[1].args[0]
+        self.assertIn("parent_age_not_grounded", repair_prompt)
+        self.assertIn("5 лет", repair_prompt)
+        self.assertNotIn("Сократи весь пост целиком до 1000 символов", repair_prompt)
+        self.assertNotIn("ПРЕДЫДУЩИЙ ВАРИАНТ", repair_prompt)
 
     async def test_only_one_repair_attempt_is_made(self):
         _out, _ok, _note, groq_mock, _gemini = await self._run(

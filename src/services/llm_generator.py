@@ -4320,7 +4320,12 @@ async def generate_post_plain_from_evidence_async(
                 "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
                 "Итоговый текст должен быть не слишком коротким: примерно 350–800 символов."
             )
-            if reason == "question_week_over_max_chars":
+            if reason == "question_week_over_max_chars" or (
+                rf == "question_week"
+                and reason == "parent_age_not_grounded"
+                and previous_output.strip()
+                and len(previous_output) > max_chars
+            ):
                 repair += (
                     f" Сократи весь пост целиком до {max_chars} символов, сохрани все обязательные блоки, "
                     "не обрывай текст и не используй «...» или «…»."
@@ -4329,8 +4334,8 @@ async def generate_post_plain_from_evidence_async(
                 # measured on the postprocessed text, which already carries the
                 # "Источник:" and "🔗" lines that _ensure_source_and_link may
                 # have appended, so the previous output is handed over exactly
-                # as it was measured. Scoped to question_week over-max only:
-                # every other repair reason keeps its current prompt verbatim.
+                # as it was measured. This also covers the combined question_week
+                # age-grounding + already-over-max repair in the same one retry.
                 if rf == "question_week" and previous_output.strip():
                     repair += (
                         "\n\nПРЕДЫДУЩИЙ ВАРИАНТ (ровно тот текст, длина которого превысила лимит, "

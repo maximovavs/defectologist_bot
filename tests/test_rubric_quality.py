@@ -571,6 +571,7 @@ class RubricQualityTest(unittest.TestCase):
     def test_parent_safety_rejects_blanket_reassurance(self):
         text = (
             "Если малыш мало говорит\n\n"
+            "👶 Возраст: 3 года\n"
             "❓ Вопрос недели: ребенок мало говорит?\n"
             "Не стоит беспокоиться, что ваш малыш пока говорит немного.\n"
             "🧩 Что попробовать сегодня:\n"
@@ -584,7 +585,7 @@ class RubricQualityTest(unittest.TestCase):
             day_key="FR",
             rubric_format="question_week",
             audience="parents",
-            evidence_text="Есть разные темпы развития, но при задержке речи важно обсудить развитие со специалистом.",
+            evidence_text="Для детей 3 лет есть разные темпы развития, но при задержке речи важно обсудить развитие со специалистом.",
         )
 
         self.assertFalse(ok)
@@ -593,6 +594,7 @@ class RubricQualityTest(unittest.TestCase):
     def test_parent_safety_valid_note_passes(self):
         text = (
             "Если ребенок мало говорит\n\n"
+            "👶 Возраст: 3 года\n"
             "❓ Вопрос недели: ребенок мало говорит?\n"
             "Сначала спокойно посмотрите, понимает ли ребенок бытовые просьбы и появляются ли новые слова. "
             "Если есть потеря навыков или ребенок не понимает речь, лучше обсудить с педиатром и проверить слух.\n"
@@ -607,7 +609,7 @@ class RubricQualityTest(unittest.TestCase):
             day_key="FR",
             rubric_format="question_week",
             audience="parents",
-            evidence_text="При потере навыков, непонимании речи или задержке речи рекомендуется консультация специалиста.",
+            evidence_text="Для детей 3 лет при потере навыков, непонимании речи или задержке речи рекомендуется консультация специалиста.",
         )
 
         self.assertTrue(ok, reason)
@@ -630,7 +632,7 @@ class RubricQualityTest(unittest.TestCase):
             day_key="MO",
             rubric_format="tip_of_day",
             audience="parents",
-            evidence_text="Короткие модели помогают детям повторять просьбы.",
+            evidence_text="Для детей 2–3 лет короткие модели помогают детям повторять просьбы.",
         )
 
         self.assertFalse(ok)

@@ -39,6 +39,31 @@ SAFE_NOTATION = (
     "Источник: example.org/p/",
 )
 
+
+STRUCTURAL_CONTEXT = (
+    "Тестовая карточка\n"
+    "👶 Возраст: 3 года\n"
+    "❓ Вопрос недели: Что можно попробовать дома?\n"
+    "Ориентиры: наблюдайте за участием ребёнка.\n"
+)
+
+MYTH_EVIDENCE = (
+    "A common myth is that bilingualism causes language delay. "
+    "Bilingualism does not cause language delay, and two languages by themselves do not create a language disorder."
+)
+
+MYTH_CONTEXT = (
+    "Два языка не вызывают задержку сами по себе\n"
+    "🔴 Миф: Два языка вызывают задержку речи.\n"
+    "Двуязычие само по себе не вызывает задержку речи.\n"
+)
+
+AMBIGUOUS_PARENT_CARD = (
+    "Совет по звукам\n"
+    "👶 Возраст: 3 года\n"
+    "Выберите звук /p/."
+)
+
 VALID_PARENT_POST = (
     "Повторяем звук [п]\n"
     "👶 Возраст: 3–4 года\n"
@@ -79,10 +104,15 @@ class ParentPhonemeNotationTest(unittest.TestCase):
             "age_norms",
         ):
             with self.subTest(rubric_format=rubric_format):
+                evidence = MYTH_EVIDENCE if rubric_format == "myth_fact" else ""
+                prefix = MYTH_CONTEXT if rubric_format == "myth_fact" else STRUCTURAL_CONTEXT
+                topic_id = "bilingualism" if rubric_format == "myth_fact" else ""
                 ok, reason = _validate_output(
-                    body + "Выберите звук /p/.",
+                    prefix + body + "Выберите звук /p/.",
                     rubric_format=rubric_format,
                     audience="parents",
+                    evidence_text=evidence,
+                    topic_id=topic_id,
                 )
                 self.assertFalse(ok)
                 self.assertEqual(reason, "parent_ambiguous_latin_phoneme")
@@ -101,8 +131,8 @@ class ParentPhonemeNotationTest(unittest.TestCase):
             VALID_PARENT_POST,
             rubric_format="tip_of_day",
             audience="parents",
-            evidence_text="Взрослый показывает картинку и предлагает ребёнку повторить звук в словах папа и пирог. "
-            "Ребёнок повторяет звук в слогах.",
+            evidence_text="Для детей 3–4 лет взрослый показывает картинку и предлагает ребёнку повторить звук "
+            "в словах папа и пирог. Ребёнок повторяет звук в слогах.",
         )
         self.assertTrue(ok, reason)
 
@@ -139,7 +169,7 @@ class ParentPhonemeNotationTest(unittest.TestCase):
 
 class ParentPhonemeNotationRepairTest(unittest.IsolatedAsyncioTestCase):
     async def test_generic_groq_repair_is_one_attempt(self):
-        responses = ["Выберите звук /p/.", "Выберите звук /p/."]
+        responses = [AMBIGUOUS_PARENT_CARD, AMBIGUOUS_PARENT_CARD]
 
         async def fake_groq(prompt, api_key):
             return responses.pop(0)
@@ -168,7 +198,7 @@ class ParentPhonemeNotationRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(groq_mock.call_count, 2)
 
     async def test_generic_gemini_repair_is_one_attempt_and_revalidates(self):
-        responses = ["Выберите звук /p/.", "Выберите звук /p/."]
+        responses = [AMBIGUOUS_PARENT_CARD, AMBIGUOUS_PARENT_CARD]
 
         async def fake_gemini(prompt, api_key):
             return responses.pop(0)

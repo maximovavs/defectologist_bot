@@ -10,6 +10,30 @@ from src.services.llm_generator import (
     build_thematic_parents_repair_prompt,
 )
 
+STRUCTURAL_CONTEXT = (
+    "Тестовая карточка\n"
+    "👶 Возраст: 3 года\n"
+    "❓ Вопрос недели: Что можно попробовать дома?\n"
+    "Ориентиры: наблюдайте за участием ребёнка.\n"
+)
+
+MYTH_EVIDENCE = (
+    "A common myth is that bilingualism causes language delay. "
+    "Bilingualism does not cause language delay, and two languages by themselves do not create a language disorder."
+)
+
+MYTH_CONTEXT = (
+    "Два языка не вызывают задержку сами по себе\n"
+    "🔴 Миф: Два языка вызывают задержку речи.\n"
+    "Двуязычие само по себе не вызывает задержку речи.\n"
+)
+
+RISKY_PARENT_CARD = (
+    "Совет для домашней практики\n"
+    "👶 Возраст: 3 года\n"
+    "Зафиксируйте язык ребёнка."
+)
+
 
 class ParentOralSafetyTest(unittest.TestCase):
     def test_risky_oral_manipulations_are_rejected(self):
@@ -58,10 +82,15 @@ class ParentOralSafetyTest(unittest.TestCase):
             "age_norms",
         ):
             with self.subTest(rubric_format=rubric_format):
+                evidence = MYTH_EVIDENCE if rubric_format == "myth_fact" else ""
+                prefix = MYTH_CONTEXT if rubric_format == "myth_fact" else STRUCTURAL_CONTEXT
+                topic_id = "bilingualism" if rubric_format == "myth_fact" else ""
                 ok, reason = _validate_output(
-                    body + " Зафиксируйте язык ребёнка.",
+                    prefix + body + " Зафиксируйте язык ребёнка.",
                     rubric_format=rubric_format,
                     audience="parents",
+                    evidence_text=evidence,
+                    topic_id=topic_id,
                 )
                 self.assertFalse(ok)
                 self.assertEqual(reason, "parent_risky_oral_manipulation")
@@ -90,7 +119,7 @@ class ParentOralSafetyTest(unittest.TestCase):
 
 class ParentOralSafetyRepairTest(unittest.IsolatedAsyncioTestCase):
     async def test_generic_gemini_repair_gets_one_attempt(self):
-        responses = ["Зафиксируйте язык ребёнка.", "Зафиксируйте язык ребёнка."]
+        responses = [RISKY_PARENT_CARD, RISKY_PARENT_CARD]
         prompts = []
 
         async def fake_gemini(prompt, api_key):

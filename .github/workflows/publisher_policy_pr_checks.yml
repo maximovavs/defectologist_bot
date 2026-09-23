@@ -6,15 +6,38 @@ on:
       - main
     paths:
       - "src/publisher/run_publisher.py"
+      - "src/publisher/dedup_policy.py"
       - "src/services/publication_store.py"
       - "src/services/topic_policy.py"
       - "src/services/llm_generator.py"
+      - "src/services/engagement_builder.py"
+      - "src/services/poll_builder.py"
       - "config/sources.yml"
       - "config/topics.yml"
       - "config/rubrics.yml"
       - "scripts/probe_myth_fact_sources.py"
       - "scripts/resolve_production_state_predecessor.py"
       - ".github/workflows/myth_fact_source_probe.yml"
+      - ".github/workflows/post.yml"
+      - "tests/test_bilingual_corner_policy.py"
+      - "tests/test_bilingual_repair.py"
+      - "tests/test_content_grounding.py"
+      - "tests/test_cross_language_sound_policy.py"
+      - "tests/test_editorial_apparatus_boundary.py"
+      - "tests/test_engagement_builder.py"
+      - "tests/test_hashtag_policy.py"
+      - "tests/test_parent_age_policy.py"
+      - "tests/test_parent_benefit_policy.py"
+      - "tests/test_parent_hearing_inference.py"
+      - "tests/test_parent_oral_safety.py"
+      - "tests/test_parent_phoneme_notation.py"
+      - "tests/test_parent_step_count_policy.py"
+      - "tests/test_poll_builder.py"
+      - "tests/test_pro_friendly_repair.py"
+      - "tests/test_response_decoding.py"
+      - "tests/test_rubric_quality.py"
+      - "tests/test_thematic_parents_policy.py"
+      - "tests/test_workflow_contract.py"
       - "tests/test_llm_provider_budget.py"
       - "tests/test_topic_policy.py"
       - "tests/test_bounded_topic_detection_window.py"
@@ -67,11 +90,33 @@ jobs:
         run: |
           python -m py_compile \
             src/publisher/run_publisher.py \
+            src/publisher/dedup_policy.py \
             src/services/publication_store.py \
             src/services/topic_policy.py \
             src/services/llm_generator.py \
+            src/services/engagement_builder.py \
+            src/services/poll_builder.py \
             scripts/probe_myth_fact_sources.py \
             scripts/resolve_production_state_predecessor.py \
+            tests/test_bilingual_corner_policy.py \
+            tests/test_bilingual_repair.py \
+            tests/test_content_grounding.py \
+            tests/test_cross_language_sound_policy.py \
+            tests/test_editorial_apparatus_boundary.py \
+            tests/test_engagement_builder.py \
+            tests/test_hashtag_policy.py \
+            tests/test_parent_age_policy.py \
+            tests/test_parent_benefit_policy.py \
+            tests/test_parent_hearing_inference.py \
+            tests/test_parent_oral_safety.py \
+            tests/test_parent_phoneme_notation.py \
+            tests/test_parent_step_count_policy.py \
+            tests/test_poll_builder.py \
+            tests/test_pro_friendly_repair.py \
+            tests/test_response_decoding.py \
+            tests/test_rubric_quality.py \
+            tests/test_thematic_parents_policy.py \
+            tests/test_workflow_contract.py \
             tests/test_llm_provider_budget.py \
             tests/test_topic_policy.py \
             tests/test_bounded_topic_detection_window.py \
@@ -126,6 +171,25 @@ jobs:
           sys.modules["sentence_transformers"] = sentence_transformers
 
           suite = unittest.defaultTestLoader.loadTestsFromNames([
+              "tests.test_bilingual_corner_policy",
+              "tests.test_bilingual_repair",
+              "tests.test_content_grounding",
+              "tests.test_cross_language_sound_policy",
+              "tests.test_editorial_apparatus_boundary",
+              "tests.test_engagement_builder",
+              "tests.test_hashtag_policy",
+              "tests.test_parent_age_policy",
+              "tests.test_parent_benefit_policy",
+              "tests.test_parent_hearing_inference",
+              "tests.test_parent_oral_safety",
+              "tests.test_parent_phoneme_notation",
+              "tests.test_parent_step_count_policy",
+              "tests.test_poll_builder",
+              "tests.test_pro_friendly_repair",
+              "tests.test_response_decoding",
+              "tests.test_rubric_quality",
+              "tests.test_thematic_parents_policy",
+              "tests.test_workflow_contract",
               "tests.test_llm_provider_budget",
               "tests.test_topic_policy",
               "tests.test_bounded_topic_detection_window",

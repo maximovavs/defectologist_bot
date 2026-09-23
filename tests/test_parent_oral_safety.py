@@ -84,11 +84,13 @@ class ParentOralSafetyTest(unittest.TestCase):
             with self.subTest(rubric_format=rubric_format):
                 evidence = MYTH_EVIDENCE if rubric_format == "myth_fact" else ""
                 prefix = MYTH_CONTEXT if rubric_format == "myth_fact" else STRUCTURAL_CONTEXT
+                topic_id = "bilingualism" if rubric_format == "myth_fact" else ""
                 ok, reason = _validate_output(
                     prefix + body + " Зафиксируйте язык ребёнка.",
                     rubric_format=rubric_format,
                     audience="parents",
                     evidence_text=evidence,
+                    topic_id=topic_id,
                 )
                 self.assertFalse(ok)
                 self.assertEqual(reason, "parent_risky_oral_manipulation")

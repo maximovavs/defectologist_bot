@@ -6,7 +6,7 @@ from src.services import llm_generator as llm
 
 
 EVIDENCE = (
-    "Families can support a home language through ordinary shared routines. Parents can read "
+    "For children aged 3–6 years, families can support a home language through ordinary shared routines. Parents can read "
     "familiar books, discuss pictures, retell family events, and use the home language during "
     "meals and play. Regular opportunities to hear and use the language help children participate "
     "in family conversations while they continue learning the community language outside home."
@@ -106,7 +106,7 @@ class BilingualValidationReasonTest(unittest.TestCase):
 
 class BilingualRepairTest(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_gemini_bilingual_output_gets_exactly_one_valid_repair(self):
-        responses = ["Слишком короткий ответ", VALID_CARD]
+        responses = [MISSING_ACTION_CARD, VALID_CARD]
         prompts = []
 
         async def fake_gemini(prompt, api_key):

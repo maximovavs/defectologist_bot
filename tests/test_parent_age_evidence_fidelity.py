@@ -953,6 +953,361 @@ QUESTION_WEEK_WITH_GROUNDED_UNRELATED_NUMBERS = (
 )
 
 
+# Run 36144439258 (#498) published a question_week post built from this source
+# shape: one HaBilNet answer that both anchors a 2-month picture-book start and
+# asks about the child's school language, plus primary-school-age advice.
+HABILNET_SHAPED_EVIDENCE = (
+    "Answers to the three most common parental questions. "
+    "Question No. 1: How can I support my language if it is not my child's school language? "
+    "Keep using your own language at home in everyday family conversations. "
+    "Start with very short picture books when your baby is 2 months old! "
+    "For primary school age, keep reading together in your language and talk about the school day. "
+    "Parents often worry that the community language will take over, but the home language keeps its place."
+)
+
+QUESTION_WEEK_CURRENT_SCHOOL_QUESTION = (
+    "Поддержка вашего языка в семье\n"
+    "👶 Возраст: 2 месяца\n"
+    "❓ Вопрос недели: Как увеличить количество общения на вашем языке, "
+    "если ребёнок учится в школе на другом?\n"
+    "🧩 Что попробовать сегодня: Читайте вместе простую книжку с картинками на вашем языке "
+    "и спокойно называйте то, что видите на страницах.\n"
+    "💡 Что это даёт: Ребёнок чаще слышит домашний язык и реагирует на знакомые слова "
+    "в обычных разговорах."
+)
+
+QUESTION_WEEK_INFANT_QUESTION = QUESTION_WEEK_CURRENT_SCHOOL_QUESTION.replace(
+    "Как увеличить количество общения на вашем языке, если ребёнок учится в школе на другом?",
+    "Когда можно начинать рассматривать первые книжки с картинками на вашем языке?",
+)
+
+QUESTION_WEEK_FUTURE_SCHOOL_QUESTION = QUESTION_WEEK_CURRENT_SCHOOL_QUESTION.replace(
+    "Как увеличить количество общения на вашем языке, если ребёнок учится в школе на другом?",
+    "Как сохранить домашний язык, чтобы он остался с ребёнком, когда он пойдёт в школу?",
+)
+
+HABILNET_SHAPED_EVIDENCE_WITH_SCHOOL_AGE = HABILNET_SHAPED_EVIDENCE + (
+    " Among children 6-7 years old the school language often becomes dominant within one year."
+)
+
+QUESTION_WEEK_SCHOOL_AGE_AND_SCHOOL_QUESTION = QUESTION_WEEK_CURRENT_SCHOOL_QUESTION.replace(
+    "👶 Возраст: 2 месяца", "👶 Возраст: 6-7 лет"
+)
+
+
+def _with_question(question: str) -> str:
+    """The published post shape with only its ❓ question line replaced."""
+
+    return QUESTION_WEEK_CURRENT_SCHOOL_QUESTION.replace(
+        "Как увеличить количество общения на вашем языке, если ребёнок учится в школе на другом?",
+        question,
+    )
+
+
+# Every one of these was a deterministic false positive of the first candidate
+# regex: it matched an affirmative attendance phrase inside a negation, or found
+# "школьник" inside "дошкольник".
+QUESTION_WEEK_NONCURRENT_QUESTIONS = {
+    "not_yet_attending": "Если ребенок еще не учится в школе, как поддерживать язык дома?",
+    "preschooler_noun": "Что важно для дошкольника в двуязычной семье?",
+    "not_going_yet": "Если ребенок пока не ходит в школу, как поддерживать язык?",
+    "does_not_attend": "Если ребенок не посещает школу, как поддерживать язык?",
+    "not_a_schoolchild": "Если ребенок не школьник, что делать?",
+}
+
+# School wording that belongs to a DIFFERENT child than the one the age line is
+# about. Each of these was a deterministic false positive of the subjectless
+# detector: an older sibling at school contradicts nothing about the infant.
+QUESTION_WEEK_OTHER_CHILD_QUESTIONS = {
+    "older_sibling_attends": (
+        "Если старший ребенок учится в школе, как поддерживать язык у двухмесячного малыша?"
+    ),
+    "older_sibling_noun": "Как поддерживать язык младенца, если старший ребенок школьник?",
+    "older_sister_subjectless": "Как поддерживать язык младенца, если старшая сестра уже в школе?",
+}
+
+# Wordings that DO bind current school attendance to the target child, so the
+# guard must keep firing on them.
+QUESTION_WEEK_TARGET_CHILD_QUESTIONS = (
+    "Как увеличить количество общения на вашем языке, если ребёнок учится в школе на другом?",
+    "Как поддержать домашний язык, если ваш ребёнок ходит в школу на другом языке?",
+    "Как быть, если ребёнок уже учится в школе на другом языке?",
+    "Что делать, если ребёнок посещает школу на другом языке?",
+)
+
+
+class QuestionWeekAgeQuestionContextTest(unittest.TestCase):
+    """The published age<->question mismatch, and the cases that must stay valid."""
+
+    def _validate(self, output: str, evidence: str):
+        return _validate_output(
+            output,
+            rubric_format="question_week",
+            day_key="FR",
+            audience="parents",
+            evidence_text=evidence,
+        )
+
+    def test_infant_age_beside_a_current_school_question_is_rejected(self):
+        """The exact shape run 36144439258 published must now fail closed.
+
+        Every pre-existing age validator still accepts this post: the 2-month
+        age is genuinely anchored in the evidence, and no infant is asked to
+        speak. Only the new pair-level guard rejects it, with one reason.
+        """
+
+        self.assertEqual(
+            _validate_parent_age_evidence_output(
+                QUESTION_WEEK_CURRENT_SCHOOL_QUESTION, HABILNET_SHAPED_EVIDENCE
+            ),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            _validate_parent_age_action_fit(QUESTION_WEEK_CURRENT_SCHOOL_QUESTION),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._parse_parent_age_range(QUESTION_WEEK_CURRENT_SCHOOL_QUESTION).max_months,
+            2,
+        )
+        self.assertIn((2, 2), llm._extract_evidence_age_ranges(HABILNET_SHAPED_EVIDENCE))
+
+        self.assertEqual(
+            self._validate(QUESTION_WEEK_CURRENT_SCHOOL_QUESTION, HABILNET_SHAPED_EVIDENCE),
+            (False, "question_week_age_question_context_mismatch"),
+        )
+
+    def test_infant_age_with_an_infant_question_stays_valid(self):
+        """The 2-month picture-book guidance the source really supports."""
+
+        self.assertEqual(
+            self._validate(QUESTION_WEEK_INFANT_QUESTION, HABILNET_SHAPED_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_future_school_reference_is_not_a_mismatch(self):
+        """"Школа" as a future plan must not reject an infant age on its own."""
+
+        self.assertIn("школу", QUESTION_WEEK_FUTURE_SCHOOL_QUESTION)
+        self.assertEqual(
+            self._validate(QUESTION_WEEK_FUTURE_SCHOOL_QUESTION, HABILNET_SHAPED_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_school_age_line_with_the_same_school_question_stays_valid(self):
+        """The guard is about the pair, never about the question alone."""
+
+        self.assertEqual(
+            self._validate(
+                QUESTION_WEEK_SCHOOL_AGE_AND_SCHOOL_QUESTION,
+                HABILNET_SHAPED_EVIDENCE_WITH_SCHOOL_AGE,
+            ),
+            (True, "ok"),
+        )
+
+    def test_school_wording_outside_the_question_line_is_not_a_mismatch(self):
+        """Only the «Вопрос недели» line carries the premise being checked."""
+
+        body_mentions_school = QUESTION_WEEK_INFANT_QUESTION.replace(
+            "💡 Что это даёт: Ребёнок чаще слышит домашний язык",
+            "💡 Что это даёт: Дома звучит ваш язык, а позже ребёнок ходит в школу "
+            "и слышит второй; ребёнок чаще слышит домашний язык",
+        )
+        self.assertIn("ходит в школу", body_mentions_school)
+        self.assertEqual(
+            self._validate(body_mentions_school, HABILNET_SHAPED_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_new_reason_is_unreachable_outside_question_week_even_on_friday(self):
+        """The guard is gated on rubric_format, not on the Friday day_key.
+
+        `_validate_question_week_output` runs for `dk == "FR" or rf ==
+        "question_week"`, so a Friday post in another rubric reaches that legacy
+        structural check. The new age<->question guard must not travel with it.
+        Other rubrics may still reject this body for their own unrelated
+        reasons, so what is asserted is which reason is reachable, not the
+        verdict.
+        """
+
+        # The guard itself does fire on this exact body: the only thing keeping
+        # it out of other rubrics is the rubric_format gate in _validate_output.
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(
+                QUESTION_WEEK_CURRENT_SCHOOL_QUESTION
+            ),
+            (False, "question_week_age_question_context_mismatch"),
+        )
+
+        for rubric in ("bilingual_parents", "thematic_parents", "tip_of_day", "age_norms", ""):
+            _, reason = _validate_output(
+                QUESTION_WEEK_CURRENT_SCHOOL_QUESTION,
+                day_key="FR",
+                rubric_format=rubric,
+                audience="parents",
+                evidence_text=HABILNET_SHAPED_EVIDENCE,
+            )
+            self.assertNotEqual(
+                reason,
+                "question_week_age_question_context_mismatch",
+                f"new reason leaked into day_key=FR rubric_format={rubric!r}",
+            )
+
+        # A post with no school premise at all is untouched by the guard.
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(VALID_OUTPUT),
+            (True, "ok"),
+        )
+
+    def test_not_yet_attending_school_is_not_a_mismatch(self):
+        """«еще не учится в школе» denies attendance; it must not assert it."""
+
+        output = _with_question(QUESTION_WEEK_NONCURRENT_QUESTIONS["not_yet_attending"])
+        self.assertIn("учится в школе", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_not_going_to_school_yet_is_not_a_mismatch(self):
+        """«пока не ходит в школу» denies attendance."""
+
+        output = _with_question(QUESTION_WEEK_NONCURRENT_QUESTIONS["not_going_yet"])
+        self.assertIn("ходит в школу", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_does_not_attend_school_is_not_a_mismatch(self):
+        """«не посещает школу» denies attendance."""
+
+        output = _with_question(QUESTION_WEEK_NONCURRENT_QUESTIONS["does_not_attend"])
+        self.assertIn("посещает школу", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_preschooler_noun_is_not_a_school_premise(self):
+        """"школьник" is a substring of "дошкольник" and must not be read as one."""
+
+        output = _with_question(QUESTION_WEEK_NONCURRENT_QUESTIONS["preschooler_noun"])
+        self.assertIn("дошкольника", output)
+        self.assertIsNone(
+            llm.QUESTION_WEEK_TARGET_CHILD_AT_SCHOOL_RE.search("дошкольника"),
+            "«дошкольник» must not match the target-child school premise",
+        )
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_negated_schoolchild_noun_is_not_a_mismatch(self):
+        """«не школьник» denies the noun it negates."""
+
+        output = _with_question(QUESTION_WEEK_NONCURRENT_QUESTIONS["not_a_schoolchild"])
+        self.assertIn("не школьник", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_every_reproduced_false_positive_now_stands_down(self):
+        """All five reviewed false positives, asserted as one closed set."""
+
+        for label, question in QUESTION_WEEK_NONCURRENT_QUESTIONS.items():
+            output = _with_question(question)
+            self.assertEqual(
+                llm._validate_question_week_age_question_context(output),
+                (True, "ok"),
+                label,
+            )
+
+    def test_older_sibling_at_school_is_not_a_mismatch(self):
+        """School wording about an older sibling contradicts no infant age."""
+
+        output = _with_question(QUESTION_WEEK_OTHER_CHILD_QUESTIONS["older_sibling_attends"])
+        self.assertIn("учится в школе", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_older_sibling_schoolchild_noun_is_not_a_mismatch(self):
+        """«старший ребенок школьник» is about the sibling, not the target child."""
+
+        output = _with_question(QUESTION_WEEK_OTHER_CHILD_QUESTIONS["older_sibling_noun"])
+        self.assertIn("школьник", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_older_sister_already_at_school_is_not_a_mismatch(self):
+        """A subjectless «уже в школе» clause may belong to another child."""
+
+        output = _with_question(QUESTION_WEEK_OTHER_CHILD_QUESTIONS["older_sister_subjectless"])
+        self.assertIn("уже в школе", output)
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(output), (True, "ok")
+        )
+        self.assertEqual(self._validate(output, HABILNET_SHAPED_EVIDENCE), (True, "ok"))
+
+    def test_every_other_child_wording_stands_down(self):
+        """All three reviewed other-child false positives, as one closed set."""
+
+        for label, question in QUESTION_WEEK_OTHER_CHILD_QUESTIONS.items():
+            self.assertEqual(
+                llm._validate_question_week_age_question_context(_with_question(question)),
+                (True, "ok"),
+                label,
+            )
+
+    def test_target_child_bound_wordings_still_fire(self):
+        """Narrowing the subject must not disarm the contradiction itself."""
+
+        for question in QUESTION_WEEK_TARGET_CHILD_QUESTIONS:
+            self.assertEqual(
+                llm._validate_question_week_age_question_context(_with_question(question)),
+                (False, "question_week_age_question_context_mismatch"),
+                question,
+            )
+
+    def test_unbound_school_wording_fails_open_by_design(self):
+        """Recorded deliberately: an unrecognised wording is never rejected.
+
+        These read as the target child being at school, but the subject is not
+        bound in a form the guard recognises, so it stands down. Failing open on
+        wording the rule does not recognise is preferred over false-closing a
+        coherent post; this test pins that choice rather than hiding it.
+        """
+
+        for question in (
+            "Ребёнок уже в школе — как не потерять домашний язык?",
+            "Ребёнок школьник: как удержать домашний язык?",
+            "Если ребёнок школьница, как поддерживать домашний язык?",
+        ):
+            self.assertEqual(
+                llm._validate_question_week_age_question_context(_with_question(question)),
+                (True, "ok"),
+                question,
+            )
+
+    def test_ungrounded_age_still_reports_the_age_reason_first(self):
+        """Validator ordering is untouched: grounding is still decided first."""
+
+        self.assertEqual(
+            self._validate(
+                QUESTION_WEEK_CURRENT_SCHOOL_QUESTION.replace(
+                    "👶 Возраст: 2 месяца", "👶 Возраст: 9 месяцев"
+                ),
+                HABILNET_SHAPED_EVIDENCE,
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+
+
 class QuestionWeekAgeHintScopeTest(unittest.TestCase):
     """The hint's prohibition is about the age field, not about numbers at all.
 

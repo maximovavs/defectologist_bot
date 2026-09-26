@@ -2252,6 +2252,76 @@ def _validate_parent_numbered_steps(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+# Operational cutoff for the guard below, in months. It is not a school-entry
+# policy and encodes no claim about any country's school system: it is simply a
+# deliberately conservative bound chosen to catch the observed infant/toddler
+# contradiction and nothing wider. An age line whose upper bound reaches this
+# value or beyond is left entirely alone by the guard.
+QUESTION_WEEK_MIN_SCHOOL_ATTENDANCE_MONTHS = 36
+
+# The one shape the guard recognises: the question binds current school
+# attendance to the generic target child the post is about -- "если (ваш)
+# ребенок (уже) учится в школе / ходит в школу / посещает школу". The subject is
+# part of the pattern on purpose. A bare attendance phrase would also match a
+# question about a different child ("если старший ребенок учится в школе", "если
+# старшая сестра уже в школе"), and a bare noun would match "школьник" inside a
+# sibling clause -- none of which contradicts the target child's age. Matched
+# against the "Вопрос недели" line only, in its "ё"-normalised form, which is why
+# the subject is spelled "ребенок". Anything this pattern does not recognise,
+# including negated and future wording ("если ребенок еще не учится в школе",
+# "когда ребенок пойдет в школу") and any phrasing naming another child, simply
+# fails open: an unrecognised wording is never worth rejecting a coherent post.
+QUESTION_WEEK_TARGET_CHILD_AT_SCHOOL_RE = re.compile(
+    r"\bесли\s+(?:ваш\s+)?ребенок\s+(?:уже\s+)?"
+    r"(?:учится\s+в\s+школе|ходит\s+в\s+школу|посещает\s+школу)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_question_week_age_question_context(text: str) -> Tuple[bool, str]:
+    """Refuse a question_week post whose age line contradicts its own question.
+
+    Run 36144439258 published "👶 Возраст: 2 месяца" beside a question whose
+    premise is that the child already attends school in another language. Both
+    facts are present in the HaBilNet evidence -- the 2-month picture-book
+    anchor and the school-language question -- so every existing age validator
+    accepts the pair: the age is grounded, and nothing asks an infant to speak.
+    What is contradictory is the pair itself, not either half.
+
+    The guard is therefore narrow on purpose, and the contradiction it looks for
+    is between the age of the target child and the school status of that same
+    target child. It fires only when both hold: the age line resolves to an
+    upper bound below `QUESTION_WEEK_MIN_SCHOOL_ATTENDANCE_MONTHS`, and the
+    "Вопрос недели" line explicitly binds current school attendance to the
+    generic target child. Everything else is left exactly as it was -- an infant
+    age with infant guidance, a question about an older sibling who is at school,
+    negated or future school wording, a question about a "дошкольник", a school
+    question beside a school-age line, or the word "школа" anywhere outside the
+    question line. The caller applies this only for
+    `rubric_format == "question_week"`.
+    """
+
+    parsed = _parse_parent_age_range(text)
+    if not parsed or parsed.max_months is None:
+        return True, "ok"
+    if parsed.max_months >= QUESTION_WEEK_MIN_SCHOOL_ATTENDANCE_MONTHS:
+        return True, "ok"
+
+    match = re.search(
+        r"(?im)^[ \t]*❓\s*Вопрос недели\s*[:：](?P<value>[^\r\n]*)$",
+        text or "",
+    )
+    if not match:
+        return True, "ok"
+    question = (match.group("value") or "").strip().replace("ё", "е")
+    if not question:
+        return True, "ok"
+
+    if QUESTION_WEEK_TARGET_CHILD_AT_SCHOOL_RE.search(question):
+        return False, "question_week_age_question_context_mismatch"
+    return True, "ok"
+
+
 def _validate_question_week_output(text: str) -> Tuple[bool, str]:
     out = (text or "").strip()
     lines = _extract_nonempty_lines(out)
@@ -2383,6 +2453,14 @@ def _validate_output(
         ok, reason = _validate_question_week_output(out)
         if not ok:
             return ok, reason
+
+    # Strictly question_week, unlike the Friday-or-question_week structural
+    # check above: this guard is about the ❓ question line's own premise, so it
+    # must not reach any other rubric that happens to publish on a Friday.
+    if rf == "question_week":
+        ok, reason = _validate_question_week_age_question_context(out)
+        if not ok:
+            return False, reason
 
     if dk == "FR" or rf == "question_week":
         min_len = 200

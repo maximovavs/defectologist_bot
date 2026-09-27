@@ -20,6 +20,7 @@ from src.services.visual_pipeline import (
     OBJECT_TEXT_FAILURE_REASON,
     OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS,
     OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS,
+    OBJECT_SCENE_CONTEXT_STYLE_MARKER,
     OBJECT_TEXT_SAFE_RETRY_CATEGORY,
     OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY,
     _VisualQABuildCircuit,
@@ -31,6 +32,7 @@ from src.services.visual_pipeline import (
     _object_scene_category,
     _parse_compiled_visual_prompt,
     _object_provider_composition,
+    _object_scene_context_semantics,
     _prepare_pollinations_prompt,
     _text_safe_object_retry_category,
     build_object_provider_prompt,
@@ -1849,14 +1851,23 @@ class VisualQABuildCircuitIntegrationTest(unittest.TestCase):
         self.assertEqual(buffer.getvalue(), b"human")
 
 
-# --- run #500: object_contains_text -> text-safe final object attempt ---------
+# --- genuine reading_prep: object_contains_text -> text-safe final attempt ----
 #
-# Production chain (run 36324830249, post #500, rubric age_norms): human QA
-# rejected twice, then BOTH bounded object attempts were rendered from the
-# `reading_prep` props (picture cards, letter-like blocks, children's book,
-# pencil and blank paper) and both were rejected with `object_contains_text`,
-# so the publication fell through to the text card. The second attempt is now
-# redirected to an intrinsically text-safe scene for that one reason only.
+# What this block validates: for a publication whose CLEAN semantic category is
+# `reading_prep`, a first bounded object attempt rejected with
+# `object_contains_text` redirects the second/final attempt to an intrinsically
+# text-safe scene, for that one reason only.
+#
+# Run #500 (run 36324830249, post #500, rubric age_norms) was historically the
+# trigger for investigating this text-prone retry path: human QA rejected twice,
+# both bounded object attempts were rendered from the `reading_prep` props
+# (picture cards, letter-like blocks, children's book, pencil and blank paper)
+# and both were rejected with `object_contains_text`, so the publication fell
+# through to the text card. Run #500 reached those props only through classifier
+# contamination, though — its own clean category is
+# `books_vocab_phrases_stories`. Its corrected semantics are covered separately
+# by ObjectSceneCompiledContextContaminationTest below; the fixtures here stand
+# for a genuinely reading publication.
 
 # The reading-prep props that must not survive into the text-safe retry.
 _READING_PREP_RISKY_PHRASES = (
@@ -1869,14 +1880,31 @@ _READING_PREP_RISKY_PHRASES = (
     "pencil",
 )
 
-# The reading-prep classification is driven by the compiled brief. Note that
-# `build_post_visual` passes the COMPILED prompt as the context hint, and that
-# text always carries the "no ... letters" negative block, so in practice almost
-# any publication classifies as reading_prep unless an earlier marker family
-# (articulation, bilingual, hearing, household) matches first. That widening is
-# pre-existing pipeline behavior and is not addressed here.
-_READING_PREP_TITLE = "Что обычно умеет трехлетний ребенок"
-_READING_PREP_PROMPT = "the parent and child look at letter cards and learn to read together"
+def _compiled_context(action, props, title_rubric="age_norms", setting="simple uncluttered home play area"):
+    """Compile a brief exactly the way the production visual path does."""
+
+    return _compile_visual_prompt(
+        VisualBrief(
+            rubric_id=title_rubric,
+            role_rule=build_visual_role_rule(title_rubric),
+            age_descriptor="",
+            setting=setting,
+            action=action,
+            props=tuple(props),
+        )
+    )
+
+
+# The reading-prep fixture must carry GENUINE reading semantics in the compiled
+# brief's action/props. A raw image_prompt does not: `build_post_visual` rebuilds
+# the action through the role normalizer, which replaces it with a generic
+# phrase, so a raw fixture used to reach reading_prep only through the compiled
+# style tail ("No readable text ... letters") that the classifier now excludes.
+_READING_PREP_TITLE = "Готовим ребенка к чтению"
+_READING_PREP_PROMPT = _compiled_context(
+    "The parent and child look at letter cards and learn to read",
+    ("letter cards",),
+)
 
 # A different derived category that also carries picture cards, so it is
 # text-prone in the same way. The switch must NOT reach it: only `reading_prep`
@@ -1934,7 +1962,11 @@ def _object_non_text_fail():
 
 
 class ObjectContainsTextSafeRetryTest(unittest.TestCase):
-    """The bounded object retry after `object_contains_text` (run #500)."""
+    """The bounded object retry after `object_contains_text` for real reading_prep.
+
+    Run #500 prompted this behavior but is not one of these cases: its clean
+    semantic category is `books_vocab_phrases_stories`.
+    """
 
     def _run_ladder(self, object_qa_results, title=None, image_prompt=None):
         """Drive the full ladder: human fail, human retry fail, then objects."""
@@ -2306,6 +2338,229 @@ class ObjectContainsTextSafeRetryTest(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertNotIn(token, source)
+
+
+# --- compiled-context contamination of the object category (post-PR #78) ------
+#
+# `build_post_visual` hands the COMPILED visual prompt to the object fallback as
+# `context_hint`, and every compiled prompt ends with a fixed style tail saying
+# "No readable text ... letters ...". The reading markers are "чита", "букв",
+# "read" and "letter", so that boilerplate matched "readable"/"letters" and
+# shadowed the publication's real semantics. Run #500 is the production case: a
+# brief whose action was "The preschool child points to the book" with props
+# "book, picture" was classified `reading_prep` instead of
+# `books_vocab_phrases_stories`.
+
+_RUN_500_TITLE = "\u0427\u0442\u043e \u043e\u0431\u044b\u0447\u043d\u043e \u0443\u043c\u0435\u0435\u0442 \u0442\u0440\u0435\u0445\u043b\u0435\u0442\u043d\u0438\u0439 \u0440\u0435\u0431\u0435\u043d\u043e\u043a"
+_RUN_500_ACTION = "The preschool child points to the book"
+_RUN_500_PROPS = ("book", "picture")
+
+
+class ObjectSceneCompiledContextContaminationTest(unittest.TestCase):
+    """The object category must read publication semantics, not style boilerplate."""
+
+    def _category(self, title, action, props, rubric="age_norms"):
+        return _object_scene_category(
+            title, rubric, context_hint=_compiled_context(action, props, rubric)
+        )
+
+    def test_compiled_style_tail_is_excluded_from_classification(self):
+        """The helper cuts the hint at the style marker and nowhere else."""
+
+        compiled = _compiled_context(_RUN_500_ACTION, _RUN_500_PROPS)
+        self.assertIn(OBJECT_SCENE_CONTEXT_STYLE_MARKER, compiled)
+        # The tail really does carry the words the reading markers look for.
+        self.assertIn("readable text", compiled)
+        self.assertIn("letters", compiled)
+
+        semantics = _object_scene_context_semantics(compiled)
+        self.assertTrue(compiled.startswith(semantics))
+        self.assertNotIn(OBJECT_SCENE_CONTEXT_STYLE_MARKER, semantics)
+        self.assertNotIn("readable", semantics)
+        self.assertNotIn("letters", semantics)
+        # Genuine semantics before the marker survive untouched.
+        self.assertIn(_RUN_500_ACTION, semantics)
+        # A hint without the marker is passed through unchanged.
+        self.assertEqual(
+            _object_scene_context_semantics("the child looks at letter cards"),
+            "the child looks at letter cards",
+        )
+        self.assertEqual(_object_scene_context_semantics(""), "")
+
+    def test_run_500_book_picture_brief_is_books_vocab_not_reading_prep(self):
+        """Regression 1: the exact run #500 semantic case."""
+
+        category = self._category(_RUN_500_TITLE, _RUN_500_ACTION, _RUN_500_PROPS)
+
+        self.assertEqual(category, "books_vocab_phrases_stories")
+        self.assertNotEqual(category, "reading_prep")
+
+    def test_neutral_compiled_brief_stays_default(self):
+        """Regression 2: `readable`/`letters` alone must not mean reading_prep."""
+
+        category = self._category(
+            "\u0421\u043f\u043e\u043a\u043e\u0439\u043d\u043e\u0435 \u0443\u0442\u0440\u043e \u0434\u043e\u043c\u0430",
+            "The child sits calmly at the low table",
+            (),
+        )
+
+        self.assertEqual(category, "default")
+        self.assertNotEqual(category, "reading_prep")
+
+    def test_game_compiled_brief_stays_games_everyday_communication(self):
+        """Regression 3: genuine ball/game semantics win over the boilerplate."""
+
+        category = self._category(
+            "\u0412\u0435\u0441\u0435\u043b\u0430\u044f \u0438\u0433\u0440\u0430 \u0441 \u043c\u044f\u0447\u043e\u043c",
+            "The parent and child roll a ball to each other",
+            ("ball", "basket"),
+        )
+
+        self.assertEqual(category, "games_everyday_communication")
+        self.assertNotEqual(category, "reading_prep")
+
+    def test_genuine_reading_semantics_still_classify_as_reading_prep(self):
+        """Regression 4: real reading content before the marker is preserved."""
+
+        category = self._category(
+            "\u0413\u043e\u0442\u043e\u0432\u0438\u043c \u0440\u0435\u0431\u0435\u043d\u043a\u0430 \u043a \u0447\u0442\u0435\u043d\u0438\u044e",
+            "The parent and child look at letter cards and learn to read",
+            ("letter cards",),
+        )
+
+        self.assertEqual(category, "reading_prep")
+
+    def test_higher_priority_categories_are_preserved(self):
+        """Regression 5: precedence above reading_prep is untouched."""
+
+        cases = (
+            (
+                "articulation_speech",
+                "\u041a\u0430\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0430\u0440\u0442\u0438\u043a\u0443\u043b\u044f\u0446\u0438\u044e \u0437\u0432\u0443\u043a\u0430 \u0421",
+                "The child watches tongue position in a mirror",
+                ("mirror",),
+            ),
+            (
+                "bilingual_languages",
+                "\u0420\u0435\u0431\u0435\u043d\u043e\u043a \u0440\u0430\u0441\u0442\u0435\u0442 \u0432 \u0434\u0432\u0443\u044f\u0437\u044b\u0447\u043d\u043e\u0439 \u0441\u0435\u043c\u044c\u0435",
+                "The parent speaks the home language with the child",
+                ("globe",),
+            ),
+            (
+                "hearing_sounds_music",
+                "\u0420\u0435\u0430\u043a\u0446\u0438\u044f \u043c\u0430\u043b\u044b\u0448\u0430 \u043d\u0430 \u043a\u043e\u043b\u043e\u043a\u043e\u043b\u044c\u0447\u0438\u043a",
+                "The parent rings a small bell",
+                ("bell", "drum"),
+            ),
+            (
+                "household_routines",
+                "\u0420\u0430\u0437\u0433\u043e\u0432\u043e\u0440\u044b \u0432\u043e \u0432\u0440\u0435\u043c\u044f \u0431\u044b\u0442\u043e\u0432\u044b\u0445 \u0434\u0435\u043b",
+                "The parent folds laundry with the child",
+                ("laundry basket",),
+            ),
+        )
+
+        for expected, title, action, props in cases:
+            with self.subTest(category=expected):
+                self.assertEqual(self._category(title, action, props), expected)
+
+    def test_run_500_like_ladder_uses_books_vocab_and_never_switches(self):
+        """Regression 6: the full offline ladder for the production brief."""
+
+        qa_results = iter(
+            [
+                _human_fail("action_mismatch"),
+                _human_fail("object_contains_text"),
+                _object_text_fail(),
+                _object_text_fail(),
+            ]
+        )
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ), patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"text-card"),
+        ):
+            buffer, meta = build_post_visual(
+                title=_RUN_500_TITLE,
+                day_key="2026-09-25",
+                image_prompt=_compiled_context(_RUN_500_ACTION, _RUN_500_PROPS),
+                rubric_id="age_norms",
+                audience="parents",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        human_prompts, object_prompts = prompts[:2], prompts[2:]
+        categories = ObjectContainsTextSafeRetryTest._marker_categories(object_prompts)
+
+        # Human stage untouched.
+        self.assertEqual(len(human_prompts), 2)
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+        # First object category is the clean semantic one ...
+        self.assertEqual(categories[0], "books_vocab_phrases_stories")
+        # ... and the text-safe switch does NOT fire for it, even though the old
+        # contaminated behavior called this publication reading_prep.
+        self.assertEqual(
+            categories, ["books_vocab_phrases_stories", "books_vocab_phrases_stories"]
+        )
+        self.assertNotIn(OBJECT_TEXT_SAFE_RETRY_CATEGORY, categories)
+        self.assertEqual(meta["object_scene_category"], "books_vocab_phrases_stories")
+        # Object budget and terminal fallback unchanged.
+        self.assertEqual(len(object_prompts), 2)
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["final_reason"], "object_fallback_rejected")
+        self.assertEqual(buffer.getvalue(), b"text-card")
+
+    def test_pr_78_text_safe_retry_still_fires_for_genuine_reading(self):
+        """Regression 7: PR #78 behavior is preserved where it belongs."""
+
+        qa_results = iter(
+            [
+                _human_fail("action_mismatch"),
+                _human_fail("object_contains_text"),
+                _object_text_fail(),
+                _object_pass(),
+            ]
+        )
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ):
+            _buffer, meta = build_post_visual(
+                title="\u0413\u043e\u0442\u043e\u0432\u0438\u043c \u0440\u0435\u0431\u0435\u043d\u043a\u0430 \u043a \u0447\u0442\u0435\u043d\u0438\u044e",
+                day_key="2026-09-25",
+                image_prompt=_compiled_context(
+                    "The parent and child look at letter cards and learn to read",
+                    ("letter cards",),
+                ),
+                rubric_id="age_norms",
+                audience="parents",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        object_prompts = prompts[2:]
+        categories = ObjectContainsTextSafeRetryTest._marker_categories(object_prompts)
+
+        self.assertEqual(categories[0], "reading_prep")
+        self.assertEqual(categories, ["reading_prep", OBJECT_TEXT_SAFE_RETRY_CATEGORY])
+        self.assertEqual(meta["object_scene_category"], OBJECT_TEXT_SAFE_RETRY_CATEGORY)
+        self.assertEqual(len(object_prompts), 2)
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
 
 
 

@@ -2170,9 +2170,17 @@ OBJECT_SCENE_GUARDS = {
 
 # The single object-QA rejection reason that says the rendered scene itself
 # carried readable text, and the single derived category whose props (picture
-# cards, letter-like blocks, a book, pencil and blank paper) provoked it in
-# run #500. Only that pair may redirect the bounded object retry to a text-safe
-# scene; any other category or reason keeps the derived category.
+# cards, letter-like blocks, a book, pencil and blank paper) are most likely to
+# provoke it. Only that pair may redirect the bounded object retry to a
+# text-safe scene; any other category or reason keeps the derived category.
+#
+# Run #500 was the production observation that led here, but it is not itself a
+# reading_prep publication: its brief was a book/picture scene, and once the
+# classifier stopped reading the compiled style tail (see
+# `_object_scene_context_semantics`) its clean semantic category is
+# `books_vocab_phrases_stories`. The switch below stays deliberately scoped to
+# genuinely reading_prep publications whose FIRST bounded object attempt is
+# rejected with `object_contains_text`.
 OBJECT_TEXT_FAILURE_REASON = "object_contains_text"
 OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY = "reading_prep"
 OBJECT_TEXT_SAFE_RETRY_CATEGORY = "text_safe_objects"
@@ -2184,11 +2192,15 @@ def _text_safe_object_retry_category(
 ) -> str:
     """Return the text-safe retry category for a reading_prep text rejection.
 
-    Requires BOTH the run #500 conditions: the publication was classified as
-    `reading_prep`, and the previous bounded object attempt was rejected with
+    Requires BOTH conditions: the publication was classified as `reading_prep`,
+    and the previous bounded object attempt was rejected with
     `object_contains_text`. Returns "" otherwise (any other category, any other
     reason, and a missing/empty reason after a generation failure), so the first
     attempt and every unrelated path keep the derived category.
+
+    Run #500 prompted this switch but does not satisfy the first condition: its
+    clean semantic category is `books_vocab_phrases_stories`, so it keeps that
+    scene on both attempts.
     """
     if str(derived_category or "").strip() != OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY:
         return ""
@@ -2236,9 +2248,34 @@ OBJECT_SCENE_COMPOSITIONS = (
 )
 
 
+# `build_post_visual` passes the COMPILED visual prompt as the context hint, and
+# every compiled prompt ends with a fixed style tail that says "No readable text
+# ... letters ...". The reading markers below look for "read" and "letter", so
+# that boilerplate matched "readable"/"letters" and shadowed the publication's
+# real semantics with reading_prep (run #500: a book/picture brief classified as
+# reading_prep). Classification therefore stops at the style boundary; the same
+# literal already marks that boundary in `_prepare_pollinations_prompt` and
+# `_parse_compiled_visual_prompt`.
+OBJECT_SCENE_CONTEXT_STYLE_MARKER = "Warm soft editorial illustration"
+
+
+def _object_scene_context_semantics(context_hint: str) -> str:
+    """Return only the publication-specific part of a compiled context hint.
+
+    Everything from the style marker onwards is fixed boilerplate, never
+    publication semantics. A hint without the marker is returned unchanged, so
+    genuine reading words in a title, action or props are still classified.
+    """
+    text = context_hint or ""
+    boundary = text.find(OBJECT_SCENE_CONTEXT_STYLE_MARKER)
+    if boundary == -1:
+        return text
+    return text[:boundary]
+
+
 def _object_scene_category(title: str, rubric_id: str, context_hint: str = "") -> str:
     del rubric_id
-    value = f"{title or ''} {context_hint or ''}".lower()
+    value = f"{title or ''} {_object_scene_context_semantics(context_hint)}".lower()
     articulation_markers = (
         "артикуля", "положение языка", "движение языка", "язык за зубами", "язык находится за", "губ", "произношение",
         "звукопроизнош", "речевой звук", "speech sound", "pronunciation", "articulation", "tongue position",

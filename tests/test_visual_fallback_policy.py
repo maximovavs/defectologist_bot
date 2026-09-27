@@ -1,5 +1,6 @@
 from io import BytesIO
 from contextlib import redirect_stdout
+import hashlib
 import os
 from io import StringIO
 from pathlib import Path
@@ -8,9 +9,19 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from src.services import visual_pipeline
 from src.services.visual_pipeline import (
     DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL,
     DEFAULT_GEMINI_VISUAL_QA_MODEL,
+    OBJECT_PROVIDER_COMPOSITIONS,
+    OBJECT_PROVIDER_NEGATIVES,
+    OBJECT_SCENE_CATEGORIES,
+    OBJECT_SCENE_MARKER_RE,
+    OBJECT_TEXT_FAILURE_REASON,
+    OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS,
+    OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS,
+    OBJECT_TEXT_SAFE_RETRY_CATEGORY,
+    OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY,
     _VisualQABuildCircuit,
     VISUAL_QA_HARD_REASONS,
     VISUAL_STYLE_TAIL,
@@ -19,6 +30,10 @@ from src.services.visual_pipeline import (
     _enforce_object_visual_qa,
     _object_scene_category,
     _parse_compiled_visual_prompt,
+    _object_provider_composition,
+    _prepare_pollinations_prompt,
+    _text_safe_object_retry_category,
+    build_object_provider_prompt,
     _visual_qa_model_candidates,
     _visual_qa_key_candidates,
     build_object_only_visual_prompt,
@@ -1832,6 +1847,465 @@ class VisualQABuildCircuitIntegrationTest(unittest.TestCase):
             )
         self.assertEqual(self._models(request), ["gemini-3.7-flash"])
         self.assertEqual(buffer.getvalue(), b"human")
+
+
+# --- run #500: object_contains_text -> text-safe final object attempt ---------
+#
+# Production chain (run 36324830249, post #500, rubric age_norms): human QA
+# rejected twice, then BOTH bounded object attempts were rendered from the
+# `reading_prep` props (picture cards, letter-like blocks, children's book,
+# pencil and blank paper) and both were rejected with `object_contains_text`,
+# so the publication fell through to the text card. The second attempt is now
+# redirected to an intrinsically text-safe scene for that one reason only.
+
+# The reading-prep props that must not survive into the text-safe retry.
+_READING_PREP_RISKY_PHRASES = (
+    "picture cards",
+    "letter-like blocks",
+    "children’s book",
+    "pencil and blank paper",
+    "book",
+    "card",
+    "pencil",
+)
+
+# The reading-prep classification is driven by the compiled brief. Note that
+# `build_post_visual` passes the COMPILED prompt as the context hint, and that
+# text always carries the "no ... letters" negative block, so in practice almost
+# any publication classifies as reading_prep unless an earlier marker family
+# (articulation, bilingual, hearing, household) matches first. That widening is
+# pre-existing pipeline behavior and is not addressed here.
+_READING_PREP_TITLE = "Что обычно умеет трехлетний ребенок"
+_READING_PREP_PROMPT = "the parent and child look at letter cards and learn to read together"
+
+# A different derived category that also carries picture cards, so it is
+# text-prone in the same way. The switch must NOT reach it: only `reading_prep`
+# was authorized. (`_object_scene_category` resolves articulation before
+# reading_prep, so this classification survives the compiled brief.)
+_NON_READING_TITLE = "Как поставить артикуляцию звука С"
+_NON_READING_PROMPT = "the parent and child practice the sound in front of a small mirror"
+_NON_READING_CATEGORY = "articulation_speech"
+
+
+def _human_fail(reason):
+    return {
+        "status": "fail",
+        "pass": False,
+        "reason": reason,
+        "people_count": 2,
+        "adult_count": 1,
+        "child_count": 1,
+        "ppe_detected": False,
+        "text_detected": False,
+        "illustration_style_match": True,
+    }
+
+
+def _object_text_fail():
+    """Object QA rejecting the rendered scene for readable text."""
+
+    return {
+        "status": "fail",
+        "pass": False,
+        "reason": OBJECT_TEXT_FAILURE_REASON,
+        "people_count": 0,
+        "adult_count": 0,
+        "child_count": 0,
+        "ppe_detected": False,
+        "text_detected": True,
+        "illustration_style_match": True,
+    }
+
+
+def _object_non_text_fail():
+    """Object QA rejecting for a reason unrelated to rendered text."""
+
+    return {
+        "status": "fail",
+        "pass": False,
+        "reason": "object_style_mismatch",
+        "people_count": 0,
+        "adult_count": 0,
+        "child_count": 0,
+        "ppe_detected": False,
+        "text_detected": False,
+        "illustration_style_match": False,
+    }
+
+
+class ObjectContainsTextSafeRetryTest(unittest.TestCase):
+    """The bounded object retry after `object_contains_text` (run #500)."""
+
+    def _run_ladder(self, object_qa_results, title=None, image_prompt=None):
+        """Drive the full ladder: human fail, human retry fail, then objects."""
+
+        qa_results = iter(
+            [_human_fail("action_mismatch"), _human_fail("object_contains_text")]
+            + list(object_qa_results)
+        )
+        prompts = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ), patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"text-card"),
+        ):
+            buffer, meta = build_post_visual(
+                title=_READING_PREP_TITLE if title is None else title,
+                day_key="2026-09-25",
+                image_prompt=_READING_PREP_PROMPT if image_prompt is None else image_prompt,
+                rubric_id="age_norms",
+                audience="parents",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        return buffer, meta, prompts
+
+    @staticmethod
+    def _marker_categories(prompts):
+        return [
+            OBJECT_SCENE_MARKER_RE.search(prompt).group(1)
+            for prompt in prompts
+            if OBJECT_SCENE_MARKER_RE.search(prompt)
+        ]
+
+    def test_reading_prep_is_the_derived_category_for_this_publication(self):
+        self.assertEqual(
+            _object_scene_category(
+                _READING_PREP_TITLE, "age_norms", context_hint=_READING_PREP_PROMPT
+            ),
+            "reading_prep",
+        )
+
+    def test_first_object_attempt_still_uses_reading_prep(self):
+        """Regression 1: the first bounded object attempt is unchanged."""
+
+        _buffer, meta, prompts = self._run_ladder([_object_pass()])
+
+        object_prompts = prompts[2:]
+        self.assertEqual(len(object_prompts), 1)
+        self.assertEqual(self._marker_categories(object_prompts), ["reading_prep"])
+        self.assertEqual(meta["object_scene_category"], "reading_prep")
+        self.assertEqual(meta["object_generation_attempts"], "1")
+        self.assertIn(
+            OBJECT_SCENE_CATEGORIES["reading_prep"],
+            _prepare_pollinations_prompt(object_prompts[0]),
+        )
+
+    def test_object_contains_text_switches_only_the_final_object_attempt(self):
+        """Regression 2: attempt 1 keeps reading_prep, attempt 2 goes text-safe."""
+
+        _buffer, meta, prompts = self._run_ladder([_object_text_fail(), _object_pass()])
+
+        object_prompts = prompts[2:]
+        self.assertEqual(len(object_prompts), 2)
+        self.assertEqual(
+            self._marker_categories(object_prompts),
+            ["reading_prep", OBJECT_TEXT_SAFE_RETRY_CATEGORY],
+        )
+        self.assertEqual(meta["object_scene_category"], OBJECT_TEXT_SAFE_RETRY_CATEGORY)
+
+    def test_text_safe_retry_prompt_drops_the_reading_prep_props(self):
+        """Regression 3: the risky reading-prep vocabulary is gone from attempt 2."""
+
+        _buffer, _meta, prompts = self._run_ladder([_object_text_fail(), _object_pass()])
+
+        first = _prepare_pollinations_prompt(prompts[2]).lower()
+        retry = _prepare_pollinations_prompt(prompts[3]).lower()
+
+        self.assertIn(OBJECT_SCENE_CATEGORIES["reading_prep"].lower(), first)
+        self.assertNotIn(OBJECT_SCENE_CATEGORIES["reading_prep"].lower(), retry)
+        for phrase in _READING_PREP_RISKY_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, retry)
+        # The props themselves carry no printable surface at all, so the retry
+        # cannot regress by re-adding one through the category constant.
+        safe_props = OBJECT_SCENE_CATEGORIES[OBJECT_TEXT_SAFE_RETRY_CATEGORY].lower()
+        for token in ("book", "card", "letter", "pencil", "paper", "page", "sign", "label", "screen"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, safe_props)
+
+    def test_object_attempt_count_stays_exactly_two(self):
+        """Regression 4: the bounded object budget is unchanged."""
+
+        _buffer, meta, prompts = self._run_ladder(
+            [_object_text_fail(), _object_text_fail()]
+        )
+
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(len(prompts[2:]), 2)
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_attempts"], "2")
+
+    def test_human_visual_retry_count_stays_unchanged(self):
+        """Regression 5: the human stage still gets exactly one retry."""
+
+        _buffer, meta, prompts = self._run_ladder(
+            [_object_text_fail(), _object_text_fail()]
+        )
+
+        human_prompts = prompts[:2]
+        self.assertEqual(len(human_prompts), 2)
+        # Human prompts carry no object-scene marker: the human stage is untouched.
+        self.assertEqual(self._marker_categories(human_prompts), [])
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+        self.assertEqual(meta["human_qa_first_reason"], "action_mismatch")
+        self.assertEqual(meta["human_qa_retry_reason"], "object_contains_text")
+
+    def test_passing_text_safe_retry_is_accepted_through_the_object_path(self):
+        """Regression 6: a passing safe retry publishes as an object fallback."""
+
+        buffer, meta, prompts = self._run_ladder([_object_text_fail(), _object_pass()])
+
+        self.assertEqual(buffer.getvalue(), b"image-4")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+        self.assertEqual(meta["visual_source"], "object_ai")
+        self.assertEqual(meta["fallback_stage"], "object")
+        self.assertEqual(meta["final_reason"], "object_fallback_success")
+        self.assertEqual(meta["object_prompt_used"], "True")
+        self.assertEqual(meta["text_fallback_used"], "False")
+
+    def test_failing_text_safe_retry_still_reaches_the_text_fallback(self):
+        """Regression 7: the terminal text card is unchanged."""
+
+        buffer, meta, _prompts = self._run_ladder(
+            [_object_text_fail(), _object_text_fail()]
+        )
+
+        self.assertEqual(buffer.getvalue(), b"text-card")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["visual_source"], "text_card")
+        self.assertEqual(meta["fallback_stage"], "text")
+        self.assertEqual(meta["final_reason"], "object_fallback_rejected")
+        self.assertEqual(meta["text_fallback_used"], "True")
+        self.assertEqual(meta["object_scene_category"], OBJECT_TEXT_SAFE_RETRY_CATEGORY)
+
+    def test_object_contains_text_stays_fail_closed(self):
+        """Regression 8: the QA enforcement itself is untouched."""
+
+        normalized = _enforce_object_visual_qa(
+            {
+                "status": "pass",
+                "pass": True,
+                "reason": "ok",
+                "people_count": 0,
+                "adult_count": 0,
+                "child_count": 0,
+                "ppe_detected": False,
+                "text_detected": True,
+                "illustration_style_match": True,
+            }
+        )
+
+        self.assertEqual(normalized["status"], "fail")
+        self.assertFalse(normalized["pass"])
+        self.assertEqual(normalized["reason"], OBJECT_TEXT_FAILURE_REASON)
+
+    def test_non_text_object_failure_keeps_the_derived_category(self):
+        """Regression 9: unrelated QA reasons keep today's behavior."""
+
+        self.assertEqual(
+            _text_safe_object_retry_category(
+                OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY, OBJECT_TEXT_FAILURE_REASON
+            ),
+            OBJECT_TEXT_SAFE_RETRY_CATEGORY,
+        )
+        for reason in ("object_style_mismatch", "object_contains_person", "object_topic_mismatch", "", None):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    _text_safe_object_retry_category(
+                        OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY, reason
+                    ),
+                    "",
+                )
+
+        _buffer, meta, prompts = self._run_ladder(
+            [_object_non_text_fail(), _object_non_text_fail()]
+        )
+
+        self.assertEqual(
+            self._marker_categories(prompts[2:]), ["reading_prep", "reading_prep"]
+        )
+        self.assertEqual(meta["object_scene_category"], "reading_prep")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["mode"], "text_fallback")
+
+    def test_object_contains_text_on_a_non_reading_category_keeps_that_category(self):
+        """Scope: only `reading_prep` may redirect, never another category."""
+
+        # The helper refuses every category but reading_prep, text reason or not.
+        for category in (
+            _NON_READING_CATEGORY,
+            "articulation_speech",
+            "household_routines",
+            "default",
+            "",
+            None,
+        ):
+            with self.subTest(category=category):
+                self.assertEqual(
+                    _text_safe_object_retry_category(category, OBJECT_TEXT_FAILURE_REASON),
+                    "",
+                )
+
+        _buffer, meta, prompts = self._run_ladder(
+            [_object_text_fail(), _object_text_fail()],
+            title=_NON_READING_TITLE,
+            image_prompt=_NON_READING_PROMPT,
+        )
+
+        object_prompts = prompts[2:]
+        # First attempt is the originally derived non-reading category ...
+        self.assertEqual(
+            self._marker_categories(object_prompts),
+            [_NON_READING_CATEGORY, _NON_READING_CATEGORY],
+        )
+        # ... and so is the second, despite `object_contains_text` on the first.
+        self.assertNotIn(
+            OBJECT_TEXT_SAFE_RETRY_CATEGORY, self._marker_categories(object_prompts)
+        )
+        self.assertEqual(meta["object_scene_category"], _NON_READING_CATEGORY)
+        self.assertEqual(meta["object_qa_reason"], OBJECT_TEXT_FAILURE_REASON)
+        # No extra object attempt was added.
+        self.assertEqual(len(object_prompts), 2)
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["mode"], "text_fallback")
+
+    # The artistic substrate the style block is allowed to name, and the global
+    # negatives sentence: neither depicts a printable object, so both are stripped
+    # before the provider prompt is scanned for depicted printable surfaces.
+    _ALLOWED_SUBSTRATE_PHRASE = "subtle watercolor paper texture"
+
+    @staticmethod
+    def _text_safe_variation_ids(count=256):
+        return ["%012x" % index for index in range(count)]
+
+    def test_text_safe_provider_composition_pool_excludes_printable_surfaces(self):
+        """No text-safe composition variant may depict a printable surface."""
+
+        # The unsafe shared variant exists, so this pool is a real narrowing.
+        self.assertIn(
+            "painted arrangement with generous blank paper space",
+            OBJECT_PROVIDER_COMPOSITIONS,
+        )
+        self.assertNotIn(
+            "painted arrangement with generous blank paper space",
+            OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS,
+        )
+        self.assertTrue(OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS)
+
+        for composition in OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS:
+            for token in OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS:
+                with self.subTest(composition=composition, token=token):
+                    self.assertNotIn(token, composition.lower())
+
+    def test_every_reachable_text_safe_composition_variant_is_text_safe(self):
+        """Exhaustive over the selection rule, not one chosen variation id."""
+
+        reached = set()
+        for variation_id in self._text_safe_variation_ids():
+            composition = _object_provider_composition(
+                OBJECT_TEXT_SAFE_RETRY_CATEGORY, variation_id
+            )
+            with self.subTest(variation_id=variation_id):
+                self.assertIn(composition, OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS)
+            reached.add(composition)
+
+        # Every safe variant is actually reachable, so the coverage above is total.
+        self.assertEqual(reached, set(OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS))
+
+    def test_text_safe_provider_prompts_never_depict_a_printable_surface(self):
+        """The assembled provider-facing prompt carries no printable surface."""
+
+        for variation_id in self._text_safe_variation_ids():
+            prompt = build_object_provider_prompt(
+                OBJECT_TEXT_SAFE_RETRY_CATEGORY, variation_id
+            ).lower()
+            with self.subTest(variation_id=variation_id):
+                self.assertNotIn("blank paper space", prompt)
+                # Strip the allowed artistic substrate and the global negatives,
+                # then nothing depicting a printable surface may remain.
+                scanned = prompt.replace(self._ALLOWED_SUBSTRATE_PHRASE, " ").replace(
+                    OBJECT_PROVIDER_NEGATIVES.lower(), " "
+                )
+                for token in OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS:
+                    self.assertNotIn(token, scanned, msg=f"token={token!r}")
+
+    def test_other_categories_keep_the_shared_composition_pool(self):
+        """The narrowing must not change any pre-existing category."""
+
+        for category in OBJECT_SCENE_CATEGORIES:
+            if category == OBJECT_TEXT_SAFE_RETRY_CATEGORY:
+                continue
+            for variation_id in self._text_safe_variation_ids(48):
+                digest = hashlib.sha256(
+                    f"{category}|{variation_id}".encode("utf-8")
+                ).hexdigest()
+                expected = OBJECT_PROVIDER_COMPOSITIONS[
+                    int(digest[:8], 16) % len(OBJECT_PROVIDER_COMPOSITIONS)
+                ]
+                with self.subTest(category=category, variation_id=variation_id):
+                    self.assertEqual(
+                        _object_provider_composition(category, variation_id), expected
+                    )
+
+    def test_generation_failure_on_first_attempt_does_not_trigger_the_switch(self):
+        """A missing QA result is not an `object_contains_text` rejection."""
+
+        qa_results = iter(
+            [
+                _human_fail("action_mismatch"),
+                _human_fail("object_contains_text"),
+                _object_pass(),
+            ]
+        )
+        prompts = []
+        calls = {"n": 0}
+
+        def download(*, prompt, token):
+            calls["n"] += 1
+            prompts.append(prompt)
+            if calls["n"] == 3:
+                raise visual_pipeline.PollinationsImageError("object generation failed")
+            return BytesIO(f"image-{calls['n']}".encode()), {"attempts_used": "1"}
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ):
+            _buffer, meta = build_post_visual(
+                title=_READING_PREP_TITLE,
+                day_key="2026-09-25",
+                image_prompt=_READING_PREP_PROMPT,
+                rubric_id="age_norms",
+                audience="parents",
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+
+        self.assertEqual(self._marker_categories(prompts[2:]), ["reading_prep", "reading_prep"])
+        self.assertEqual(meta["object_scene_category"], "reading_prep")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+
+    def test_visual_pipeline_holds_no_telegram_or_publication_side_effects(self):
+        """Regression 10: the patched module cannot touch delivery or state."""
+
+        source = Path(visual_pipeline.__file__).read_text(encoding="utf-8")
+        for token in (
+            "api.telegram.org",
+            "sendPhoto",
+            "sendMessage",
+            "mark_published",
+            "save_state",
+            "update_state",
+        ):
+            with self.subTest(token=token):
+                self.assertNotIn(token, source)
 
 
 

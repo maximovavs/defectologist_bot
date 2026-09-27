@@ -2136,6 +2136,13 @@ OBJECT_SCENE_CATEGORIES = {
     "bilingual_languages": "two differently colored children’s books, small globe, two empty speech-bubble shapes without text",
     "reading_prep": "picture cards, blank wooden letter-like blocks without readable letters, children’s book, pencil and blank paper",
     "household_routines": "folded T-shirt, small laundry basket, simple cup and plate, kitchen towel, small home storage basket",
+    # Reserved for the bounded object retry after an `object_contains_text`
+    # rejection: no book, no cards, no letter-like blocks and no pencil/paper,
+    # so the scene carries no surface that invites readable or glyph-like text.
+    "text_safe_objects": (
+        "small wooden and fabric miniatures of everyday objects: a ball, a cup, a toy car, an apple, "
+        "a woven basket and a small potted plant"
+    ),
     "default": (
         "one fully closed children’s book with a completely plain unmarked cover, solid-color blank cards, "
         "simple wooden toys"
@@ -2150,10 +2157,74 @@ OBJECT_SCENE_GUARDS = {
         "Book closed, cards blank; miniatures depict everyday objects only. "
         "All surfaces unmarked, no printed words, no glyph-like marks."
     ),
+    # Deliberately affirmative: naming the risky props even as negations tends to
+    # summon them back into the render, which is exactly what this retry avoids.
+    "text_safe_objects": (
+        "Solid rounded three-dimensional objects only, no flat printable surfaces; "
+        "every surface plain and unmarked, no glyph-like marks."
+    ),
     "default": (
         "Book closed, cards blank; all surfaces unmarked, no printed words, no glyph-like marks."
     ),
 }
+
+# The single object-QA rejection reason that says the rendered scene itself
+# carried readable text, and the single derived category whose props (picture
+# cards, letter-like blocks, a book, pencil and blank paper) provoked it in
+# run #500. Only that pair may redirect the bounded object retry to a text-safe
+# scene; any other category or reason keeps the derived category.
+OBJECT_TEXT_FAILURE_REASON = "object_contains_text"
+OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY = "reading_prep"
+OBJECT_TEXT_SAFE_RETRY_CATEGORY = "text_safe_objects"
+
+
+def _text_safe_object_retry_category(
+    derived_category: object,
+    previous_object_reason: object,
+) -> str:
+    """Return the text-safe retry category for a reading_prep text rejection.
+
+    Requires BOTH the run #500 conditions: the publication was classified as
+    `reading_prep`, and the previous bounded object attempt was rejected with
+    `object_contains_text`. Returns "" otherwise (any other category, any other
+    reason, and a missing/empty reason after a generation failure), so the first
+    attempt and every unrelated path keep the derived category.
+    """
+    if str(derived_category or "").strip() != OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY:
+        return ""
+    if str(previous_object_reason or "").strip() != OBJECT_TEXT_FAILURE_REASON:
+        return ""
+    return OBJECT_TEXT_SAFE_RETRY_CATEGORY
+
+
+# Depicted printable surfaces that must never enter a text-safe provider prompt.
+# This targets objects drawn in the scene, not the artistic substrate: "subtle
+# watercolor paper texture" in OBJECT_PROVIDER_STYLE describes the painting
+# medium and is deliberately out of scope here.
+OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS = (
+    "paper",
+    "page",
+    "card",
+    "book",
+    "sign",
+    "label",
+    "screen",
+    "pencil",
+    "letter",
+)
+
+# The shared provider pool contains at least one variant that depicts a printable
+# surface ("generous blank paper space"), which contradicts the text-safe guard.
+# Derive the text-safe pool from the shared one so a later addition there cannot
+# silently reintroduce such wording; the literal keeps the pool non-empty.
+OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS = tuple(
+    composition
+    for composition in OBJECT_PROVIDER_COMPOSITIONS
+    if not any(
+        token in composition.lower() for token in OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS
+    )
+) or ("calm painted grouping on a plain pastel background",)
+
 
 OBJECT_SCENE_COMPOSITIONS = (
     "asymmetrical tabletop arrangement with one clear focal object and generous negative space",
@@ -2224,9 +2295,14 @@ def _object_scene_composition(category: str, variation_id: str) -> str:
 
 
 def _object_provider_composition(category: str, variation_id: str) -> str:
+    pool = (
+        OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS
+        if category == OBJECT_TEXT_SAFE_RETRY_CATEGORY
+        else OBJECT_PROVIDER_COMPOSITIONS
+    )
     digest = hashlib.sha256(f"{category}|{variation_id}".encode("utf-8")).hexdigest()
-    index = int(digest[:8], 16) % len(OBJECT_PROVIDER_COMPOSITIONS)
-    return OBJECT_PROVIDER_COMPOSITIONS[index]
+    index = int(digest[:8], 16) % len(pool)
+    return pool[index]
 
 
 def build_object_provider_prompt(category: str, variation_id: str = "") -> str:
@@ -2260,10 +2336,13 @@ def build_object_only_visual_prompt(
     original_prompt: str = "",
     variation_key: str = "",
     context_hint: str = "",
+    category_override: str = "",
 ) -> str:
     """Build a people-free fallback prompt with stable per-publication variation."""
     del original_prompt
     category = _object_scene_category(title, rubric_id, context_hint=context_hint)
+    if category_override and category_override in OBJECT_SCENE_CATEGORIES:
+        category = category_override
     objects = OBJECT_SCENE_CATEGORIES[category]
     variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
     composition = _object_scene_composition(category, variation_id)
@@ -2370,9 +2449,18 @@ def _build_object_visual_fallback(
     last_exception_type = ""
     last_variation_id = ""
     generation_attempts = 0
+    last_attempt_category = category
 
     for object_attempt in range(1, 3):
         generation_attempts = object_attempt
+        attempt_category = category
+        if object_attempt > 1:
+            retry_category = _text_safe_object_retry_category(
+                category, last_object_qa.get("reason", "")
+            )
+            if retry_category:
+                attempt_category = retry_category
+        last_attempt_category = attempt_category
         variation_key = f"{day_key}|{rubric_id}|{title}|{trigger}|object_attempt={object_attempt}"
         variation_id = _object_visual_variation_id(title, rubric_id, variation_key)
         last_variation_id = variation_id
@@ -2381,11 +2469,12 @@ def _build_object_visual_fallback(
             rubric_id,
             variation_key=variation_key,
             context_hint=context_hint,
+            category_override=attempt_category,
         )
         provider_prompt_len = len(_prepare_pollinations_prompt(object_prompt))
         print(
             f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} trigger={_short_log_message(trigger)} "
-            f"category={category} variation={variation_id} provider_prompt_len={provider_prompt_len}",
+            f"category={attempt_category} variation={variation_id} provider_prompt_len={provider_prompt_len}",
             flush=True,
         )
         try:
@@ -2407,7 +2496,7 @@ def _build_object_visual_fallback(
             qa_fn,
             buffer,
             audience=audience,
-            category=category,
+            category=attempt_category,
             visual_qa_api_key=visual_qa_api_key,
             _build_circuit=_build_circuit,
         )
@@ -2437,7 +2526,7 @@ def _build_object_visual_fallback(
                 "final_reason": "object_fallback_success",
                 "fallback_reason": trigger,
                 "object_prompt_used": "True",
-                "object_scene_category": category,
+                "object_scene_category": attempt_category,
                 "object_generation_status": "generated",
                 "object_generation_attempts": str(object_attempt),
                 "object_visual_variation": variation_id,
@@ -2474,7 +2563,7 @@ def _build_object_visual_fallback(
             }
 
     print(
-        f"[VISUAL][TEXT_FALLBACK] trigger=object_qa_exhausted category={category} "
+        f"[VISUAL][TEXT_FALLBACK] trigger=object_qa_exhausted category={last_attempt_category} "
         f"last_reason={_short_log_message(last_reason)}",
         flush=True,
     )
@@ -2490,7 +2579,7 @@ def _build_object_visual_fallback(
         "final_reason": "object_fallback_rejected",
         "fallback_reason": trigger,
         "object_prompt_used": "True",
-        "object_scene_category": category,
+        "object_scene_category": last_attempt_category,
         "object_generation_status": "rejected" if last_object_qa else "failed",
         "object_generation_attempts": str(generation_attempts),
         "object_visual_variation": last_variation_id,

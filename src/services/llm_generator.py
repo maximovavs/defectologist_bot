@@ -1093,6 +1093,70 @@ def question_week_allowed_age_instruction(evidence_text: str) -> str:
     )
 
 
+# Repair reasons whose whole point is that the age VALUE is wrong. For these the
+# value must not be pinned: only the field itself is mandatory.
+QUESTION_WEEK_AGE_VALUE_REPAIR_REASONS = frozenset({
+    "parent_age_not_grounded",
+    "parent_age_range_too_broad",
+})
+
+
+def _question_week_age_field_repair_instruction(previous_output: str, reason: str) -> str:
+    """Carry the required age field across a question_week repair.
+
+    Run 36144439258 lost the field twice in one run: an initial
+    `question_week_over_max_chars` at 1178 chars came back as
+    `parent_age_field_missing` at 89, and an initial `parent_age_not_grounded`
+    at 1156 came back as `parent_age_field_missing` at 1036. The structural
+    validator was right both times -- `question_week` requires the field -- but
+    the repair prompt never asked for it to survive, so the single retry was
+    free to drop it.
+
+    This reads `previous_output` and nothing else. When that output has no
+    `👶 Возраст:` line, or the line is empty, the instruction is empty: no age is
+    ever invented here, and the validator stays authoritative over whatever the
+    provider returns. Nothing is reinserted after the provider answers.
+
+    Two shapes, chosen by `reason`:
+
+    * a reason that does not concern the age value pins the existing line
+      verbatim, so the repair cannot quietly drop or rewrite it;
+    * `parent_age_not_grounded` and `parent_age_range_too_broad` are about the
+      value itself, so the value is deliberately not pinned -- only the presence
+      and non-emptiness of the field is required, and the existing
+      evidence-grounded age rules decide the new value.
+    """
+
+    match = re.search(
+        r"(?im)^[ \t]*👶\s*Возраст\s*[:：](?P<value>[^\r\n]*)$",
+        previous_output or "",
+    )
+    if not match:
+        return ""
+    # The stripped value only decides whether the field counts as non-empty; the
+    # line that gets pinned is the matched source line itself, so a valid but
+    # noncanonical spelling -- other indentation, doubled spaces, the fullwidth
+    # colon the validator also accepts -- is carried over exactly as written
+    # instead of being silently normalised into a canonical form.
+    if not (match.group("value") or "").strip():
+        return ""
+    line = match.group(0)
+
+    if reason in QUESTION_WEEK_AGE_VALUE_REPAIR_REASONS:
+        return (
+            "\nСтрока «👶 Возраст:» обязательна и должна остаться непустой. "
+            "Исправить нужно именно её значение по правилам выше: подставь возраст, "
+            "подтверждённый EVIDENCE. Не удаляй эту строку, не оставляй её пустой "
+            "и не переноси возраст в другое место поста."
+        )
+
+    return (
+        "\nСтроку «👶 Возраст:» не меняй: перенеси её дословно, ровно в таком виде:\n"
+        f"{line}\n"
+        "Не удаляй эту строку, не оставляй её пустой и не заменяй значение возраста."
+    )
+
+
 def _validate_parent_age_evidence_output(text: str, evidence_text: str) -> Tuple[bool, str]:
     parsed = _parse_parent_age_range(text)
     if not parsed or parsed.min_months is None or parsed.max_months is None:
@@ -4423,6 +4487,12 @@ async def generate_post_plain_from_evidence_async(
                         "строки «Источник:» и «🔗» без изменений."
                     )
 
+        # The age-field instruction is deliberately NOT added here. It is
+        # provider-local: the later Gemini question_week branch may reuse this
+        # very prompt object as its base, and a Groq-derived age line must never
+        # become Gemini's preservation context. Each provider call site appends
+        # exactly one instruction built from its own postprocessed output.
+
         if dk == "SU" or rf == "age_norms":
             repair += (
                 "Для Sunday обязательно: только возрастные ориентиры и milestones, "
@@ -4470,9 +4540,18 @@ async def generate_post_plain_from_evidence_async(
                 )
             else:
                 repair_prompt = build_generic_repair_prompt(reason, previous_output=out)
+            # Groq's instruction is built from Groq's own postprocessed output and
+            # sent only to Groq. `repair_prompt` itself is left untouched: the
+            # later Gemini question_week branch may reuse that same object as its
+            # base, and mutating it here would hand Gemini Groq's age line.
+            groq_repair_prompt = repair_prompt
+            if repair_prompt and rf == "question_week":
+                groq_repair_prompt = repair_prompt + _question_week_age_field_repair_instruction(
+                    out, reason
+                )
             if repair_prompt:
                 out2, repaired_age_removed = postprocess_repaired(
-                    await _text_provider_call("groq", repair_prompt, groq_key, repair=True)
+                    await _text_provider_call("groq", groq_repair_prompt, groq_key, repair=True)
                 )
                 ok2, reason2 = validate(out2)
                 log_runtime_validation("groq", "retry", reason2, len(out2))
@@ -4579,6 +4658,14 @@ async def generate_post_plain_from_evidence_async(
 
             elif reason in {"parent_risky_oral_manipulation", "parent_ambiguous_latin_phoneme"} | PARENT_CONTENT_REPAIR_REASONS:
                 gemini_repair_prompt = build_generic_repair_prompt(reason)
+                if gemini_repair_prompt and rf == "question_week":
+                    # `out` was rebound by Gemini's own initial call above, so the
+                    # age field pinned here is Gemini's, never Groq's. Only the
+                    # narrow field instruction is appended: this branch still
+                    # passes no previous output to build_generic_repair_prompt, so
+                    # no full "ПРЕДЫДУЩИЙ ВАРИАНТ" block appears where it did not
+                    # appear before.
+                    gemini_repair_prompt += _question_week_age_field_repair_instruction(out, reason)
                 if gemini_repair_prompt:
                     out2, _ = postprocess_repaired(
                         await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True)
@@ -4598,6 +4685,10 @@ async def generate_post_plain_from_evidence_async(
                 # so this one reason is rebuilt from Gemini's postprocessed
                 # output. Every other question_week reason keeps the existing
                 # reuse and the existing fallback semantics unchanged.
+                # `repair_prompt` is Groq's prompt and no longer carries any
+                # age-field instruction, so reusing it cannot hand Gemini Groq's
+                # age line. The single provider-local instruction is appended
+                # below, from Gemini's own postprocessed output.
                 gemini_repair_prompt = (
                     build_generic_repair_prompt(reason, previous_output=out)
                     if reason == "question_week_over_max_chars"
@@ -4617,6 +4708,8 @@ async def generate_post_plain_from_evidence_async(
                     + "этого достаточно для question_week — не возвращай НЕТ_ДАННЫХ. "
                     + "Итоговый текст: примерно 350–800 символов."
                 )
+                if rf == "question_week":
+                    gemini_repair_prompt += _question_week_age_field_repair_instruction(out, reason)
                 out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))
                 ok2, reason2 = validate(out2)
                 log_runtime_validation("gemini", "retry", reason2, len(out2))

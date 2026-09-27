@@ -492,5 +492,536 @@ class QuestionWeekRuntimeValidationDiagnosticsTest(unittest.IsolatedAsyncioTestC
         self.assertLessEqual(len(text), 1000)
 
 
+# --- fixtures for the age-field preservation contract ----------------------
+
+# Adds a second, deliberately broad grounded anchor so that a broad age line is
+# evidence-grounded and therefore reaches the range-width validator instead of
+# failing earlier as ungrounded.
+EVIDENCE_WITH_BROAD_ANCHOR = EVIDENCE + (
+    " Источник отдельно отмечает, что совместное чтение подходит детям от 1 до 6 лет."
+)
+
+# A second narrow grounded anchor, so Gemini can carry an age line that is both
+# evidence-grounded and textually distinct from Groq's.
+EVIDENCE_WITH_SECOND_ANCHOR = EVIDENCE + (
+    " Источник отдельно отмечает совместное рассматривание книг с детьми 3–4 лет."
+)
+
+AGE_LINE = "👶 Возраст: 2–3 года"
+PINNED_AGE_INSTRUCTION = "Строку «👶 Возраст:» не меняй"
+MANDATORY_AGE_INSTRUCTION = "Строка «👶 Возраст:» обязательна и должна остаться непустой"
+
+QUESTION_WEEK_WITHOUT_AGE = COMPLETE_QUESTION_WEEK.replace(AGE_LINE + "\n", "")
+QUESTION_WEEK_BLANK_AGE = COMPLETE_QUESTION_WEEK.replace(AGE_LINE, "👶 Возраст:")
+QUESTION_WEEK_UNGROUNDED_AGE = COMPLETE_QUESTION_WEEK.replace(AGE_LINE, "👶 Возраст: 4–5 лет")
+QUESTION_WEEK_BROAD_AGE = COMPLETE_QUESTION_WEEK.replace(AGE_LINE, "👶 Возраст: 1-6 лет")
+
+# A non-age failure: the benefit block states no observable child reaction.
+NONOBSERVABLE_BENEFIT_LINE = (
+    "💡 Что это дает: Это укрепляет нейронные связи и ускоряет созревание речевых зон мозга."
+)
+QUESTION_WEEK_NONOBSERVABLE = COMPLETE_QUESTION_WEEK.replace(
+    "💡 Что это дает: Взрослый может наблюдать, как ребёнок смотрит на предмет, показывает его "
+    "или отвечает жестом, звуком или словом во время спокойной игры.",
+    NONOBSERVABLE_BENEFIT_LINE,
+)
+
+# Gemini gets its own distinct age line so provenance is observable.
+GEMINI_AGE_LINE = "👶 Возраст: 3–4 года"
+GEMINI_NONOBSERVABLE = QUESTION_WEEK_NONOBSERVABLE.replace(AGE_LINE, GEMINI_AGE_LINE)
+GEMINI_UNGROUNDED_AGE = QUESTION_WEEK_UNGROUNDED_AGE.replace(
+    "👶 Возраст: 4–5 лет", "👶 Возраст: 6–7 лет"
+)
+GEMINI_COMPLETE = COMPLETE_QUESTION_WEEK.replace(AGE_LINE, GEMINI_AGE_LINE)
+
+# A structurally valid but deliberately noncanonical age line: other indentation,
+# a doubled space and the fullwidth colon the validator also accepts.
+NONCANONICAL_AGE_LINE = " \t👶  Возраст： 2–3 года"
+QUESTION_WEEK_NONCANONICAL_AGE = COMPLETE_QUESTION_WEEK.replace(AGE_LINE, NONCANONICAL_AGE_LINE)
+# The same noncanonical line inside a post that actually fails a non-age check,
+# so an integrated run reaches the repair at all.
+QUESTION_WEEK_NONCANONICAL_AGE_INVALID = QUESTION_WEEK_NONOBSERVABLE.replace(
+    AGE_LINE, NONCANONICAL_AGE_LINE
+)
+
+# Dropping the 🧩 block fails with question_week_missing_action, a fallback-eligible
+# `question_week_*` reason that reaches the later Gemini question_week branch.
+def _without_action(post: str) -> str:
+    return "\n".join(line for line in post.split("\n") if not line.startswith("🧩"))
+
+
+QUESTION_WEEK_NO_ACTION = _without_action(COMPLETE_QUESTION_WEEK)
+GEMINI_NO_ACTION = _without_action(GEMINI_COMPLETE)
+
+# Short enough to fail with too_short while still carrying a valid age line.
+# too_short is checked after question_week_empty_action (action >= 35 chars) and
+# question_week_empty_benefit (benefit >= 20 chars), and postprocess appends the
+# "Источник:" and "🔗" lines before the 200-character floor is applied. The window
+# is therefore only a few characters wide: the action and benefit sit just above
+# their own minimums, and the test uses a short source so the appended lines do
+# not push the post back over the floor.
+QUESTION_WEEK_TOO_SHORT = (
+    "Игра\n"
+    f"{AGE_LINE}\n"
+    "❓ Вопрос недели: Как?\n"
+    "🧩 Что попробовать сегодня: Назовите предмет и подождите отклик.\n"
+    "💡 Что это дает: Ребёнок смотрит и ждёт."
+)
+SHORT_SOURCE_DOMAIN = "a.io"
+SHORT_SOURCE_URL = "https://a.io/s"
+GEMINI_TOO_SHORT = QUESTION_WEEK_TOO_SHORT.replace(AGE_LINE, GEMINI_AGE_LINE)
+
+
+class QuestionWeekAgeFieldPreservationTest(unittest.IsolatedAsyncioTestCase):
+    """The single repair must not be free to drop the required age field.
+
+    Run 36144439258 lost it twice: an initial question_week_over_max_chars at
+    1178 chars returned parent_age_field_missing at 89, and an initial
+    parent_age_not_grounded at 1156 returned parent_age_field_missing at 1036.
+    """
+
+    async def _generate(
+        self,
+        outputs,
+        provider_name="groq",
+        gemini_key="",
+        evidence=EVIDENCE,
+        rubric_format="question_week",
+        day_key="FR",
+        source_domain="example.org",
+        source_url="https://example.org/source",
+    ):
+        provider = AsyncMock(side_effect=outputs)
+        with patch.object(llm, "_text_provider_call", provider):
+            result = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Вопрос недели",
+                rubric_format=rubric_format,
+                audience="parents",
+                title_suffix="",
+                source_domain=source_domain,
+                source_url=source_url,
+                evidence_text=evidence,
+                disclaimer="",
+                hashtags=[],
+                provider=provider_name,
+                groq_key="offline-key",
+                gemini_key=gemini_key,
+                max_chars=1000,
+                day_key=day_key,
+            )
+        return result, provider
+
+    @staticmethod
+    def _calls(provider):
+        return [(c.args[0], c.args[1]) for c in provider.await_args_list]
+
+    # --- helper contract in isolation --------------------------------------
+
+    def test_helper_pins_the_exact_line_for_a_non_age_reason(self):
+        instruction = llm._question_week_age_field_repair_instruction(
+            COMPLETE_QUESTION_WEEK, "parent_nonobservable_benefit"
+        )
+        self.assertIn(PINNED_AGE_INSTRUCTION, instruction)
+        self.assertIn(AGE_LINE, instruction)
+
+    def test_helper_requires_the_field_without_pinning_the_value(self):
+        for reason in ("parent_age_not_grounded", "parent_age_range_too_broad"):
+            instruction = llm._question_week_age_field_repair_instruction(
+                QUESTION_WEEK_UNGROUNDED_AGE, reason
+            )
+            self.assertIn(MANDATORY_AGE_INSTRUCTION, instruction, reason)
+            self.assertNotIn(PINNED_AGE_INSTRUCTION, instruction, reason)
+            self.assertNotIn("👶 Возраст: 4–5 лет", instruction, reason)
+
+    def test_helper_invents_nothing_when_the_field_is_absent_or_blank(self):
+        for previous in (QUESTION_WEEK_WITHOUT_AGE, QUESTION_WEEK_BLANK_AGE, ""):
+            for reason in ("parent_nonobservable_benefit", "parent_age_not_grounded"):
+                self.assertEqual(
+                    llm._question_week_age_field_repair_instruction(previous, reason),
+                    "",
+                )
+
+    def test_helper_reads_only_the_previous_output(self):
+        signature = inspect.signature(llm._question_week_age_field_repair_instruction)
+        self.assertEqual(list(signature.parameters), ["previous_output", "reason"])
+
+    # --- 1. Groq over-max: full previous output AND the pinned age line -----
+
+    async def test_groq_over_max_prompt_carries_both_previous_output_and_pinned_age(self):
+        seen = []
+        original_validate = llm._validate_output
+
+        def observe(text, *args, **kwargs):
+            seen.append(text)
+            return original_validate(text, *args, **kwargs)
+
+        with patch.object(llm, "_validate_output", side_effect=observe):
+            (_text, ok, note), provider = await self._generate(
+                [OVER_LIMIT_QUESTION_WEEK, OVER_LIMIT_QUESTION_WEEK]
+            )
+
+        self.assertEqual(provider.await_count, 2)
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertIn("question_week_over_max_chars", repair_prompt)
+        # Existing length provenance is unchanged: the measured text verbatim.
+        self.assertIn(seen[0].strip(), repair_prompt)
+        self.assertGreater(len(seen[0]), 1000)
+        # And the new field-preservation instruction, pinning the exact line.
+        self.assertIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertIn(AGE_LINE, repair_prompt)
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_groq_retry:question_week_over_max_chars")
+
+    # --- 2. Groq over-max repair drops the age: fail closed, no synthesis ---
+
+    async def test_groq_over_max_repair_that_drops_the_age_fails_closed(self):
+        (text, ok, note), provider = await self._generate(
+            [OVER_LIMIT_QUESTION_WEEK, QUESTION_WEEK_WITHOUT_AGE]
+        )
+
+        self.assertEqual(provider.await_count, 2, "exactly one repair")
+        self.assertFalse(ok)
+        # Exactly the shape run 36144439258 logged for this failure.
+        self.assertEqual(
+            note,
+            "p2d_fail_closed:parent_age_field_missing:invalid_groq_retry:parent_age_field_missing",
+        )
+        self.assertEqual(text, "", "no age is synthesized after the provider answered")
+
+    # --- 3. Groq non-age repair pins the original line verbatim ------------
+
+    async def test_groq_non_age_repair_pins_the_original_age_line(self):
+        (_text, ok, note), provider = await self._generate(
+            [QUESTION_WEEK_NONOBSERVABLE, QUESTION_WEEK_NONOBSERVABLE]
+        )
+
+        self.assertEqual(provider.await_count, 2)
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertIn("parent_nonobservable_benefit", repair_prompt)
+        self.assertIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertIn(AGE_LINE, repair_prompt)
+        self.assertNotIn(MANDATORY_AGE_INSTRUCTION, repair_prompt)
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_groq_retry:parent_nonobservable_benefit")
+
+    # --- 4. Groq parent_age_not_grounded: field mandatory, value free ------
+
+    async def test_groq_age_not_grounded_requires_the_field_and_frees_the_value(self):
+        (text, ok, note), provider = await self._generate(
+            [QUESTION_WEEK_UNGROUNDED_AGE, COMPLETE_QUESTION_WEEK]
+        )
+
+        self.assertEqual(provider.await_count, 2)
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertIn("parent_age_not_grounded", repair_prompt)
+        self.assertIn(MANDATORY_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn("👶 Возраст: 4–5 лет", repair_prompt)
+        # The existing deterministic allowed-age hint is still there.
+        self.assertIn("EVIDENCE допускает ровно такие варианты возраста", repair_prompt)
+        # An under-limit age repair must not suddenly receive the full previous output.
+        self.assertNotIn("ПРЕДЫДУЩИЙ ВАРИАНТ", repair_prompt)
+        # A grounded replacement succeeds inside the same single repair.
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertIn(AGE_LINE, text)
+
+    # --- 5. Same path, repair drops the field ------------------------------
+
+    async def test_groq_age_not_grounded_repair_that_drops_the_field_fails_closed(self):
+        (text, ok, note), provider = await self._generate(
+            [QUESTION_WEEK_UNGROUNDED_AGE, QUESTION_WEEK_WITHOUT_AGE]
+        )
+
+        self.assertEqual(provider.await_count, 2, "exactly one repair")
+        self.assertFalse(ok)
+        self.assertEqual(
+            note,
+            "p2d_fail_closed:parent_age_field_missing:invalid_groq_retry:parent_age_field_missing",
+        )
+        self.assertEqual(text, "")
+
+    # --- 6. parent_age_range_too_broad ------------------------------------
+
+    async def test_groq_range_too_broad_requires_the_field_and_allows_narrowing(self):
+        (text, ok, note), provider = await self._generate(
+            [QUESTION_WEEK_BROAD_AGE, COMPLETE_QUESTION_WEEK],
+            evidence=EVIDENCE_WITH_BROAD_ANCHOR,
+        )
+
+        self.assertEqual(provider.await_count, 2)
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertIn("parent_age_range_too_broad", repair_prompt)
+        self.assertIn(MANDATORY_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn("👶 Возраст: 1-6 лет", repair_prompt)
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertIn(AGE_LINE, text)
+
+    # --- 7. Direct Gemini uses Gemini's own age line -----------------------
+
+    async def test_direct_gemini_repair_pins_gemini_own_age_line(self):
+        (_text, ok, note), provider = await self._generate(
+            [GEMINI_NONOBSERVABLE, GEMINI_NONOBSERVABLE],
+            provider_name="gemini",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["gemini", "gemini"])
+        repair_prompt = calls[1][1]
+        self.assertIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertIn(GEMINI_AGE_LINE, repair_prompt)
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_gemini_retry:parent_nonobservable_benefit")
+
+    # --- 8. auto Groq -> Gemini: Groq's age line must not leak -------------
+
+    async def test_auto_fallback_never_uses_groq_age_line_as_gemini_context(self):
+        (_text, ok, _note), provider = await self._generate(
+            [
+                QUESTION_WEEK_NONOBSERVABLE,   # groq initial   -> 2–3 года
+                QUESTION_WEEK_NONOBSERVABLE,   # groq retry     -> still invalid
+                GEMINI_NONOBSERVABLE,          # gemini initial -> 3 года
+                GEMINI_NONOBSERVABLE,          # gemini retry   -> still invalid
+            ],
+            provider_name="auto",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["groq", "groq", "gemini", "gemini"])
+
+        groq_repair, gemini_repair = calls[1][1], calls[3][1]
+        self.assertIn(AGE_LINE, groq_repair)
+        self.assertIn(PINNED_AGE_INSTRUCTION, gemini_repair)
+        self.assertIn(GEMINI_AGE_LINE, gemini_repair)
+        self.assertNotIn(
+            AGE_LINE,
+            gemini_repair,
+            "Groq's age line must never become Gemini's preservation context",
+        )
+        self.assertFalse(ok)
+
+    # --- 9. Gemini parent_age_not_grounded --------------------------------
+
+    async def test_gemini_age_not_grounded_requires_the_field_and_frees_the_value(self):
+        (_text, ok, note), provider = await self._generate(
+            [GEMINI_UNGROUNDED_AGE, GEMINI_UNGROUNDED_AGE],
+            provider_name="gemini",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["gemini", "gemini"])
+        repair_prompt = calls[1][1]
+        self.assertIn("parent_age_not_grounded", repair_prompt)
+        self.assertIn(MANDATORY_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn("👶 Возраст: 6–7 лет", repair_prompt)
+        self.assertIn("EVIDENCE допускает ровно такие варианты возраста", repair_prompt)
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_gemini_retry:parent_age_not_grounded")
+
+    # --- 10. an initial output without the field synthesizes nothing -------
+
+    async def test_initial_output_without_the_age_line_adds_no_instruction(self):
+        (text, ok, note), provider = await self._generate(
+            [QUESTION_WEEK_WITHOUT_AGE, QUESTION_WEEK_WITHOUT_AGE]
+        )
+
+        self.assertEqual(provider.await_count, 2)
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertNotIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn(MANDATORY_AGE_INSTRUCTION, repair_prompt)
+        self.assertFalse(ok)
+        self.assertEqual(
+            note,
+            "p2d_fail_closed:parent_age_field_missing:invalid_groq_retry:parent_age_field_missing",
+        )
+        self.assertEqual(text, "")
+
+    # --- 11. no other rubric gains the instruction -------------------------
+
+    async def test_non_question_week_rubric_gets_no_preservation_instruction(self):
+        (_text, ok, _note), provider = await self._generate(
+            [QUESTION_WEEK_NONOBSERVABLE, QUESTION_WEEK_NONOBSERVABLE],
+            rubric_format="tip_of_day",
+            day_key="MO",
+        )
+
+        self.assertGreaterEqual(provider.await_count, 2)
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertNotIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertNotIn(MANDATORY_AGE_INSTRUCTION, repair_prompt)
+        self.assertFalse(ok)
+
+    # --- 12/13. neighbouring contracts stay as they are -------------------
+
+    def test_age_question_context_guard_is_untouched(self):
+        self.assertEqual(llm.QUESTION_WEEK_MIN_SCHOOL_ATTENDANCE_MONTHS, 36)
+        self.assertIsNotNone(
+            llm.QUESTION_WEEK_TARGET_CHILD_AT_SCHOOL_RE.search(
+                "если ребенок учится в школе на другом"
+            )
+        )
+        self.assertEqual(
+            llm._validate_question_week_age_question_context(COMPLETE_QUESTION_WEEK),
+            (True, "ok"),
+        )
+
+    # --- blocker 1: the pinned line is the source line, byte for byte -----
+
+    def test_helper_pins_a_noncanonical_line_byte_for_byte(self):
+        """A valid but noncanonical line must not be normalised on the way out."""
+
+        self.assertEqual(
+            llm._validate_parent_structural_field_completeness(
+                QUESTION_WEEK_NONCANONICAL_AGE, "question_week"
+            ),
+            (True, "ok"),
+            "the fixture must be structurally valid for the test to mean anything",
+        )
+        instruction = llm._question_week_age_field_repair_instruction(
+            QUESTION_WEEK_NONCANONICAL_AGE, "parent_nonobservable_benefit"
+        )
+        self.assertIn(NONCANONICAL_AGE_LINE, instruction)
+        self.assertNotIn(
+            AGE_LINE,
+            instruction,
+            "the canonical rebuild must not be substituted for the source line",
+        )
+
+    async def test_groq_repair_pins_the_noncanonical_line_verbatim(self):
+        (_text, ok, _note), provider = await self._generate(
+            [QUESTION_WEEK_NONCANONICAL_AGE_INVALID, QUESTION_WEEK_NONCANONICAL_AGE_INVALID]
+        )
+
+        self.assertEqual(provider.await_count, 2)
+
+        repair_prompt = self._calls(provider)[1][1]
+        self.assertIn(NONCANONICAL_AGE_LINE, repair_prompt)
+        self.assertNotIn(AGE_LINE, repair_prompt)
+        self.assertEqual(repair_prompt.count(PINNED_AGE_INSTRUCTION), 1, "exactly one")
+        self.assertFalse(ok)
+
+    # --- blocker 2: every Gemini repair uses Gemini's own age line ---------
+
+    async def test_direct_gemini_question_week_reason_uses_gemini_age_line(self):
+        """The later question_week branch, reached by a question_week_* reason."""
+
+        (text, ok, note), provider = await self._generate(
+            [GEMINI_NO_ACTION, GEMINI_NO_ACTION],
+            provider_name="gemini",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["gemini", "gemini"])
+        repair_prompt = calls[1][1]
+        self.assertIn("question_week_missing_action", repair_prompt)
+        self.assertIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertIn(GEMINI_AGE_LINE, repair_prompt)
+        self.assertEqual(repair_prompt.count(PINNED_AGE_INSTRUCTION), 1, "exactly one")
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_gemini_retry:question_week_missing_action")
+        self.assertEqual(text, "", "nothing is synthesized after the provider answered")
+
+    async def test_auto_fallback_question_week_reason_uses_gemini_age_line(self):
+        """Groq's age line must not survive into Gemini's reused repair prompt."""
+
+        (_text, ok, _note), provider = await self._generate(
+            [
+                QUESTION_WEEK_NO_ACTION,  # groq initial   -> age line A
+                QUESTION_WEEK_NO_ACTION,  # groq retry     -> still invalid
+                GEMINI_NO_ACTION,         # gemini initial -> age line B
+                GEMINI_NO_ACTION,         # gemini retry   -> still invalid
+            ],
+            provider_name="auto",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["groq", "groq", "gemini", "gemini"])
+
+        groq_repair, gemini_repair = calls[1][1], calls[3][1]
+        self.assertIn(AGE_LINE, groq_repair)
+        self.assertIn(GEMINI_AGE_LINE, gemini_repair)
+        self.assertNotIn(
+            AGE_LINE,
+            gemini_repair,
+            "Groq's age line must never reach Gemini's preservation instruction",
+        )
+        self.assertEqual(gemini_repair.count(PINNED_AGE_INSTRUCTION), 1, "exactly one")
+        # No Groq previous-output context leaks either.
+        self.assertNotIn("ПРЕДЫДУЩИЙ ВАРИАНТ", gemini_repair)
+        self.assertFalse(ok)
+
+    async def test_direct_gemini_too_short_gets_gemini_local_age_preservation(self):
+        """The same later branch, reached by too_short rather than question_week_*."""
+
+        (_text, ok, note), provider = await self._generate(
+            [GEMINI_TOO_SHORT, GEMINI_TOO_SHORT],
+            provider_name="gemini",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+            source_domain=SHORT_SOURCE_DOMAIN,
+            source_url=SHORT_SOURCE_URL,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["gemini", "gemini"])
+        repair_prompt = calls[1][1]
+        self.assertIn("too_short", repair_prompt)
+        self.assertIn(PINNED_AGE_INSTRUCTION, repair_prompt)
+        self.assertIn(GEMINI_AGE_LINE, repair_prompt)
+        self.assertEqual(repair_prompt.count(PINNED_AGE_INSTRUCTION), 1, "exactly one")
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_gemini_retry:too_short")
+
+    async def test_gemini_over_max_keeps_own_provenance_without_duplication(self):
+        """Existing over-max provenance, plus exactly one age instruction."""
+
+        gemini_over_limit = OVER_LIMIT_QUESTION_WEEK.replace(AGE_LINE, GEMINI_AGE_LINE)
+        (_text, ok, _note), provider = await self._generate(
+            [
+                OVER_LIMIT_QUESTION_WEEK,  # groq initial -> over max
+                OVER_LIMIT_QUESTION_WEEK,  # groq retry   -> still over max
+                gemini_over_limit,         # gemini initial -> over max, own age line
+                gemini_over_limit,         # gemini retry   -> still over max
+            ],
+            provider_name="auto",
+            gemini_key="offline-gemini-key",
+            evidence=EVIDENCE_WITH_SECOND_ANCHOR,
+        )
+
+        calls = self._calls(provider)
+        self.assertEqual([name for name, _ in calls], ["groq", "groq", "gemini", "gemini"])
+        gemini_repair = calls[3][1]
+        # Rebuilt from Gemini's own output: its age line, not Groq's.
+        self.assertIn(GEMINI_AGE_LINE, gemini_repair)
+        self.assertNotIn(AGE_LINE, gemini_repair)
+        # The full previous output is still handed over, exactly as before.
+        self.assertIn("ПРЕДЫДУЩИЙ ВАРИАНТ", gemini_repair)
+        self.assertEqual(gemini_repair.count(PINNED_AGE_INSTRUCTION), 1, "not duplicated")
+        self.assertFalse(ok)
+
+    def test_structural_validator_stays_fail_closed(self):
+        self.assertIn("question_week", llm.PARENT_REQUIRED_AGE_FORMATS)
+        self.assertEqual(
+            llm._validate_parent_structural_field_completeness(
+                QUESTION_WEEK_WITHOUT_AGE, "question_week"
+            ),
+            (False, "parent_age_field_missing"),
+        )
+        self.assertIn("parent_age_field_missing", llm.PARENT_STRUCTURAL_FIELD_REASONS)
+
+
 if __name__ == "__main__":
     unittest.main()

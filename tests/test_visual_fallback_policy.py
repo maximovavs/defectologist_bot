@@ -1907,9 +1907,8 @@ _READING_PREP_PROMPT = _compiled_context(
 )
 
 # A different derived category that also carries picture cards, so it is
-# text-prone in the same way. The switch must NOT reach it: only `reading_prep`
-# was authorized. (`_object_scene_category` resolves articulation before
-# reading_prep, so this classification survives the compiled brief.)
+# text-prone in the same way. The switch must not reach it: articulation is
+# outside the two approved categories. (It takes precedence over reading_prep.)
 _NON_READING_TITLE = "Как поставить артикуляцию звука С"
 _NON_READING_PROMPT = "the parent and child practice the sound in front of a small mirror"
 _NON_READING_CATEGORY = "articulation_speech"
@@ -1962,11 +1961,7 @@ def _object_non_text_fail():
 
 
 class ObjectContainsTextSafeRetryTest(unittest.TestCase):
-    """The bounded object retry after `object_contains_text` for real reading_prep.
-
-    Run #500 prompted this behavior but is not one of these cases: its clean
-    semantic category is `books_vocab_phrases_stories`.
-    """
+    """The bounded object retry after `object_contains_text` for reading prep."""
 
     def _run_ladder(self, object_qa_results, title=None, image_prompt=None):
         """Drive the full ladder: human fail, human retry fail, then objects."""
@@ -2169,9 +2164,9 @@ class ObjectContainsTextSafeRetryTest(unittest.TestCase):
         self.assertEqual(meta["mode"], "text_fallback")
 
     def test_object_contains_text_on_a_non_reading_category_keeps_that_category(self):
-        """Scope: only `reading_prep` may redirect, never another category."""
+        """Categories outside reading prep and books retain their route."""
 
-        # The helper refuses every category but reading_prep, text reason or not.
+        # The helper refuses unrelated categories, text reason or not.
         for category in (
             _NON_READING_CATEGORY,
             "articulation_speech",
@@ -2464,7 +2459,7 @@ class ObjectSceneCompiledContextContaminationTest(unittest.TestCase):
             with self.subTest(category=expected):
                 self.assertEqual(self._category(title, action, props), expected)
 
-    def test_run_500_like_ladder_uses_books_vocab_and_never_switches(self):
+    def test_run_500_like_ladder_uses_books_vocab_then_text_safe(self):
         """Regression 6: the full offline ladder for the production brief."""
 
         qa_results = iter(
@@ -2505,13 +2500,11 @@ class ObjectSceneCompiledContextContaminationTest(unittest.TestCase):
         self.assertEqual(meta["visual_qa_attempts"], "2")
         # First object category is the clean semantic one ...
         self.assertEqual(categories[0], "books_vocab_phrases_stories")
-        # ... and the text-safe switch does NOT fire for it, even though the old
-        # contaminated behavior called this publication reading_prep.
+        # ... and the text rejection switches only the last object attempt.
         self.assertEqual(
-            categories, ["books_vocab_phrases_stories", "books_vocab_phrases_stories"]
+            categories, ["books_vocab_phrases_stories", OBJECT_TEXT_SAFE_RETRY_CATEGORY]
         )
-        self.assertNotIn(OBJECT_TEXT_SAFE_RETRY_CATEGORY, categories)
-        self.assertEqual(meta["object_scene_category"], "books_vocab_phrases_stories")
+        self.assertEqual(meta["object_scene_category"], OBJECT_TEXT_SAFE_RETRY_CATEGORY)
         # Object budget and terminal fallback unchanged.
         self.assertEqual(len(object_prompts), 2)
         self.assertEqual(meta["object_generation_attempts"], "2")
@@ -2561,6 +2554,119 @@ class ObjectSceneCompiledContextContaminationTest(unittest.TestCase):
         self.assertEqual(len(object_prompts), 2)
         self.assertEqual(meta["object_generation_attempts"], "2")
         self.assertEqual(meta["visual_qa_attempts"], "2")
+
+
+class Run501BooksTextSafeRetryTest(unittest.TestCase):
+    """The Monday book/picture brief retains its category and bounded budget."""
+
+    _TITLE = "Покажите картинку в книге и попросите назвать"
+    _PROMPT = _compile_visual_prompt(
+        VisualBrief(
+            rubric_id="tip_of_day",
+            role_rule="Exactly one adult parent and exactly one toddler, visibly different in age and height, no other people.",
+            age_descriptor="toddler",
+            setting="simple uncluttered home play area",
+            action='Open the book to a page and point at the picture while asking “What is this?”',
+            props=("book", "picture"),
+        )
+    )
+
+    def _run(self, first_object_qa, second_object_qa):
+        qa_results = iter([
+            _human_fail("missing_required_child"),
+            _human_fail("wrong_character_roles"),
+            first_object_qa,
+            second_object_qa,
+        ])
+        prompts = []
+        qa_calls = []
+
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        def qa(*args, **kwargs):
+            qa_calls.append((args, kwargs))
+            return next(qa_results)
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download,
+        ), patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"text-card"),
+        ):
+            buffer, meta = build_post_visual(
+                title=self._TITLE,
+                day_key="2026-09-28",
+                image_prompt=self._PROMPT,
+                rubric_id="tip_of_day",
+                audience="parents",
+                visual_qa_fn=qa,
+            )
+        return buffer, meta, prompts, qa_calls
+
+    def test_text_rejection_switches_only_final_attempt_and_passes_qa(self):
+        self.assertEqual(
+            _object_scene_category(self._TITLE, "tip_of_day", context_hint=self._PROMPT),
+            "books_vocab_phrases_stories",
+        )
+        buffer, meta, prompts, qa_calls = self._run(_object_text_fail(), _object_pass())
+        object_prompts = prompts[2:]
+        self.assertEqual(len(prompts[:2]), 2)
+        self.assertEqual(len(object_prompts), 2)
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(object_prompts),
+            ["books_vocab_phrases_stories", OBJECT_TEXT_SAFE_RETRY_CATEGORY],
+        )
+        self.assertEqual(len(qa_calls), 4)
+        first_match = OBJECT_SCENE_MARKER_RE.search(object_prompts[0])
+        self.assertEqual(
+            _prepare_pollinations_prompt(object_prompts[0]),
+            build_object_provider_prompt("books_vocab_phrases_stories", first_match.group(2)),
+        )
+        retry = _prepare_pollinations_prompt(object_prompts[1]).lower()
+        scanned = retry.replace("subtle watercolor paper texture", " ").replace(
+            OBJECT_PROVIDER_NEGATIVES.lower(), " "
+        )
+        self.assertIn(OBJECT_SCENE_CATEGORIES[OBJECT_TEXT_SAFE_RETRY_CATEGORY].lower(), retry)
+        for token in OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS:
+            with self.subTest(token=token):
+                self.assertNotIn(token, scanned)
+        self.assertEqual(buffer.getvalue(), b"image-4")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+        self.assertEqual(meta["object_scene_category"], OBJECT_TEXT_SAFE_RETRY_CATEGORY)
+        self.assertEqual(meta["object_qa_status"], "pass")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_attempts"], "2")
+        self.assertEqual(meta["human_qa_retry_reason"], "wrong_character_roles")
+
+    def test_repeat_text_rejection_uses_text_card_after_two_objects(self):
+        buffer, meta, prompts, qa_calls = self._run(_object_text_fail(), _object_text_fail())
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(len(qa_calls), 4)
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(prompts[2:]),
+            ["books_vocab_phrases_stories", OBJECT_TEXT_SAFE_RETRY_CATEGORY],
+        )
+        self.assertEqual(buffer.getvalue(), b"text-card")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_qa_reason"], OBJECT_TEXT_FAILURE_REASON)
+        self.assertEqual(meta["final_reason"], "object_fallback_rejected")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_attempts"], "2")
+
+    def test_other_book_qa_failure_keeps_book_category(self):
+        self.assertEqual(_text_safe_object_retry_category("books_vocab_phrases_stories", ""), "")
+        _buffer, meta, prompts, qa_calls = self._run(_object_non_text_fail(), _object_pass())
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(len(qa_calls), 4)
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(prompts[2:]),
+            ["books_vocab_phrases_stories"] * 2,
+        )
+        self.assertEqual(meta["object_scene_category"], "books_vocab_phrases_stories")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
 
 
 

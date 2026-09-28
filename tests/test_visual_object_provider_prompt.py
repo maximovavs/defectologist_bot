@@ -9,6 +9,7 @@ from src.services.visual_pipeline import (
     PollinationsImageError,
     VISUAL_STYLE_TAIL,
     _enforce_object_visual_qa,
+    _is_retryable_status,
     _object_scene_category,
     _pollinations_request_once,
     _prepare_pollinations_prompt,
@@ -62,6 +63,57 @@ def _object_pass():
 
 def _variation_ids(count=48):
     return [f"{index:012x}" for index in range(count)]
+
+
+class PollinationsTransportContractTest(unittest.TestCase):
+    def _invalid_image_response(self):
+        response = Mock(status_code=200, content=b"not-an-image")
+        response.headers = {"Content-Type": "image/png"}
+        return response
+
+    def test_authenticated_request_uses_gen_endpoint_and_bearer_header(self):
+        with patch(
+            "src.services.visual_pipeline.requests.get",
+            return_value=self._invalid_image_response(),
+        ) as request:
+            with self.assertRaises(PollinationsImageError):
+                _pollinations_request_once("simple painted speech activity", token="test-token")
+
+        url = request.call_args.args[0]
+        params = request.call_args.kwargs["params"]
+        headers = request.call_args.kwargs["headers"]
+
+        self.assertTrue(url.startswith("https://gen.pollinations.ai/image/"))
+        self.assertNotIn("test-token", url)
+        self.assertEqual(headers.get("Authorization"), "Bearer test-token")
+        self.assertNotIn("key", params)
+        for name in ("model", "width", "height", "seed"):
+            with self.subTest(name=name):
+                self.assertIn(name, params)
+
+    def test_empty_token_uses_gen_endpoint_without_authorization_header(self):
+        with patch(
+            "src.services.visual_pipeline.requests.get",
+            return_value=self._invalid_image_response(),
+        ) as request:
+            with self.assertRaises(PollinationsImageError):
+                _pollinations_request_once("simple painted speech activity", token="")
+
+        url = request.call_args.args[0]
+        params = request.call_args.kwargs["params"]
+        headers = request.call_args.kwargs["headers"]
+
+        self.assertTrue(url.startswith("https://gen.pollinations.ai/image/"))
+        self.assertNotIn("Authorization", headers)
+        self.assertNotIn("key", params)
+
+    def test_http_retryability_contract_is_preserved(self):
+        self.assertFalse(_is_retryable_status(401, "{}"))
+        self.assertFalse(_is_retryable_status(402, "{}"))
+        self.assertTrue(_is_retryable_status(402, "Queue full for IP"))
+        self.assertTrue(_is_retryable_status(429, "{}"))
+        self.assertTrue(_is_retryable_status(500, "{}"))
+        self.assertTrue(_is_retryable_status(503, "{}"))
 
 
 class ObjectProviderPromptTest(unittest.TestCase):

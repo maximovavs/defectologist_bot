@@ -2169,20 +2169,19 @@ OBJECT_SCENE_GUARDS = {
 }
 
 # The single object-QA rejection reason that says the rendered scene itself
-# carried readable text, and the single derived category whose props (picture
-# cards, letter-like blocks, a book, pencil and blank paper) are most likely to
-# provoke it. Only that pair may redirect the bounded object retry to a
-# text-safe scene; any other category or reason keeps the derived category.
+# carried readable text. Reading prep and book/vocabulary scenes both carry
+# printable surfaces that can provoke it. Only these categories with that
+# rejection may redirect the bounded object retry to a text-safe scene.
 #
 # Run #500 was the production observation that led here, but it is not itself a
 # reading_prep publication: its brief was a book/picture scene, and once the
 # classifier stopped reading the compiled style tail (see
 # `_object_scene_context_semantics`) its clean semantic category is
-# `books_vocab_phrases_stories`. The switch below stays deliberately scoped to
-# genuinely reading_prep publications whose FIRST bounded object attempt is
-# rejected with `object_contains_text`.
+# `books_vocab_phrases_stories`. Run #501 showed that its correctly classified
+# book scene can still fail object QA twice with `object_contains_text`.
 OBJECT_TEXT_FAILURE_REASON = "object_contains_text"
 OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY = "reading_prep"
+OBJECT_TEXT_SAFE_RETRY_BOOK_CATEGORY = "books_vocab_phrases_stories"
 OBJECT_TEXT_SAFE_RETRY_CATEGORY = "text_safe_objects"
 
 
@@ -2190,19 +2189,18 @@ def _text_safe_object_retry_category(
     derived_category: object,
     previous_object_reason: object,
 ) -> str:
-    """Return the text-safe retry category for a reading_prep text rejection.
+    """Return the text-safe retry category for a text-prone scene rejection.
 
-    Requires BOTH conditions: the publication was classified as `reading_prep`,
-    and the previous bounded object attempt was rejected with
+    Requires BOTH conditions: the publication was classified as `reading_prep`
+    or `books_vocab_phrases_stories`, and the previous object QA rejected with
     `object_contains_text`. Returns "" otherwise (any other category, any other
     reason, and a missing/empty reason after a generation failure), so the first
     attempt and every unrelated path keep the derived category.
-
-    Run #500 prompted this switch but does not satisfy the first condition: its
-    clean semantic category is `books_vocab_phrases_stories`, so it keeps that
-    scene on both attempts.
     """
-    if str(derived_category or "").strip() != OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY:
+    if str(derived_category or "").strip() not in (
+        OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY,
+        OBJECT_TEXT_SAFE_RETRY_BOOK_CATEGORY,
+    ):
         return ""
     if str(previous_object_reason or "").strip() != OBJECT_TEXT_FAILURE_REASON:
         return ""

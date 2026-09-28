@@ -397,7 +397,7 @@ def _pollinations_request_once(
         raise PollinationsImageError("empty_image_prompt", retryable=False)
 
     encoded_prompt = quote(cleaned_prompt, safe="")
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    url = f"https://gen.pollinations.ai/image/{encoded_prompt}"
     # The seed is derived from the internal prompt, which still carries the
     # technical variation marker. That keeps retries visually different without
     # leaking the marker into the provider prompt above.
@@ -413,14 +413,15 @@ def _pollinations_request_once(
         "enhance": "false",
         "seed": str(stable_seed),
     }
+    request_headers = dict(HEADERS)
     if token:
-        params["key"] = token
+        request_headers["Authorization"] = f"Bearer {token}"
 
     try:
         response = requests.get(
             url,
             params=params,
-            headers=HEADERS,
+            headers=request_headers,
             timeout=timeout_seconds,
         )
     except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:

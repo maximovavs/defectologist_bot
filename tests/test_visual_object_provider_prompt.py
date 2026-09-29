@@ -1,13 +1,19 @@
 from io import BytesIO
+import inspect
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from src.services.visual_pipeline import (
     OBJECT_PROVIDER_PROMPT_MAX_CHARS,
+    REJECTED_IMAGE_DIAGNOSTIC_MAX,
     OBJECT_SCENE_CATEGORIES,
     OBJECT_SCENE_MARKER_TEMPLATE,
     PollinationsImageError,
     VISUAL_STYLE_TAIL,
+    _capture_rejected_image_diagnostic,
     _enforce_object_visual_qa,
     _is_retryable_status,
     _object_scene_category,
@@ -18,6 +24,8 @@ from src.services.visual_pipeline import (
     build_post_visual,
     evaluate_visual_quality,
 )
+from src.services.image_builder import _is_probable_placeholder_image
+from src.publisher.run_publisher import _write_dry_run_rejected_visuals
 
 
 PROVIDER_PROMPT_MIN_CHARS = 450
@@ -452,6 +460,152 @@ class ObjectSemanticFallbackRegressionTest(unittest.TestCase):
         self.assertEqual(enforced["status"], "fail")
         self.assertFalse(enforced["pass"])
         self.assertEqual(enforced["reason"], "object_topic_mismatch")
+
+
+
+class RejectedImageDiagnosticContractTest(unittest.TestCase):
+    def test_invalid_image_preserves_rejected_bytes_without_extra_provider_call(self):
+        response = Mock(status_code=200, content=b"jpeg-payload")
+        response.headers = {"Content-Type": "image/jpeg"}
+
+        with patch(
+            "src.services.visual_pipeline.requests.get",
+            return_value=response,
+        ) as request, patch(
+            "src.services.visual_pipeline.validate_generated_image_bytes",
+            return_value=(False, "probable_placeholder"),
+        ):
+            with self.assertRaises(PollinationsImageError) as caught:
+                _pollinations_request_once("simple painted speech activity", token="test-token")
+
+        self.assertEqual(request.call_count, 1)
+        self.assertIn("invalid_pollinations_image:probable_placeholder", caught.exception.reason)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.validation_reason, "probable_placeholder")
+        self.assertEqual(caught.exception.rejected_bytes, b"jpeg-payload")
+
+    def test_rejected_diagnostic_capture_is_bounded_and_prompt_free(self):
+        base_meta = {"_rejected_image_diagnostics": []}
+        error = PollinationsImageError(
+            "invalid_pollinations_image:probable_placeholder",
+            content_type="image/jpeg",
+            body_hint="SECRET full provider prompt must not persist",
+            validation_reason="probable_placeholder",
+            rejected_bytes=b"jpeg",
+        )
+
+        for attempt in range(1, REJECTED_IMAGE_DIAGNOSTIC_MAX + 3):
+            _capture_rejected_image_diagnostic(
+                base_meta,
+                error,
+                stage="object",
+                attempt=attempt,
+            )
+
+        diagnostics = base_meta["_rejected_image_diagnostics"]
+        self.assertEqual(len(diagnostics), REJECTED_IMAGE_DIAGNOSTIC_MAX)
+        for item in diagnostics:
+            self.assertEqual(
+                set(item),
+                {"stage", "attempt", "validation_reason", "content_type", "image_bytes"},
+            )
+            self.assertNotIn("SECRET", repr(item))
+            self.assertNotIn("prompt", repr(item).lower())
+
+    def test_successful_visual_creates_no_rejected_diagnostic(self):
+        qa_pass = {
+            "status": "pass",
+            "pass": True,
+            "reason": "ok",
+            "people_count": 2,
+            "adult_count": 1,
+            "child_count": 1,
+            "ppe_detected": False,
+        }
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            return_value=(BytesIO(b"human"), {"attempts_used": "1"}),
+        ) as download:
+            _, meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                visual_qa_fn=lambda *_args, **_kwargs: qa_pass,
+                capture_rejected_images=True,
+            )
+
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(meta.get("_rejected_image_diagnostics"), [])
+
+    def test_dry_run_writer_persists_bounded_safe_diagnostics(self):
+        diagnostics = [
+            {
+                "stage": "object",
+                "attempt": 1,
+                "validation_reason": "probable_placeholder",
+                "content_type": "image/jpeg",
+                "image_bytes": b"jpeg-one",
+                "prompt": "SECRET FULL PROMPT",
+                "token": "SECRET_TOKEN",
+            },
+            {
+                "stage": "human_retry",
+                "attempt": 2,
+                "validation_reason": "invalid_image",
+                "content_type": "image/png",
+                "image_bytes": b"png-two",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            written = _write_dry_run_rejected_visuals(
+                out,
+                "01_parents_tip_of_day",
+                {"_rejected_image_diagnostics": diagnostics},
+                enabled=True,
+            )
+            names = sorted(path.name for path in written)
+            self.assertEqual(
+                names,
+                [
+                    "01_parents_tip_of_day.rejected.json",
+                    "01_parents_tip_of_day.rejected_01_object_1.jpg",
+                    "01_parents_tip_of_day.rejected_02_human_retry_2.png",
+                ],
+            )
+            manifest = (out / "01_parents_tip_of_day.rejected.json").read_text(encoding="utf-8")
+            self.assertNotIn("SECRET", manifest)
+            self.assertNotIn("FULL PROMPT", manifest)
+            payload = json.loads(manifest)
+            self.assertEqual(payload[0]["reason"], "probable_placeholder")
+            self.assertEqual(payload[1]["reason"], "invalid_image")
+
+    def test_rejected_diagnostics_are_not_written_when_disabled(self):
+        diagnostics = [
+            {
+                "stage": "object",
+                "attempt": 1,
+                "validation_reason": "probable_placeholder",
+                "content_type": "image/jpeg",
+                "image_bytes": b"jpeg",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            written = _write_dry_run_rejected_visuals(
+                out,
+                "01_parents_tip_of_day",
+                {"_rejected_image_diagnostics": diagnostics},
+                enabled=False,
+            )
+            self.assertEqual(written, [])
+            self.assertEqual(list(out.iterdir()), [])
+
+    def test_placeholder_threshold_contract_is_unchanged(self):
+        source = inspect.getsource(_is_probable_placeholder_image)
+        self.assertIn("near_white_ratio > 0.72", source)
+        self.assertIn("sat_mean < 0.08", source)
+        self.assertIn("gray_std > 20.0", source)
 
 
 if __name__ == "__main__":

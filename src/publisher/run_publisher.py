@@ -2182,6 +2182,75 @@ def _write_dry_run_visual(
         )
 
 
+REJECTED_VISUAL_DIAGNOSTIC_MAX = 4
+_REJECTED_VISUAL_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
+def _write_dry_run_rejected_visuals(
+    out_dir: Path,
+    stem: str,
+    visual_meta: dict[str, object],
+    *,
+    enabled: bool,
+) -> list[Path]:
+    if not enabled:
+        return []
+
+    diagnostics = visual_meta.get("_rejected_image_diagnostics")
+    if not isinstance(diagnostics, list):
+        return []
+
+    written: list[Path] = []
+    manifest: list[dict[str, object]] = []
+    for index, item in enumerate(diagnostics[:REJECTED_VISUAL_DIAGNOSTIC_MAX], start=1):
+        if not isinstance(item, dict):
+            continue
+        image_bytes = item.get("image_bytes")
+        content_type = str(item.get("content_type", "")).split(";", 1)[0].strip().lower()
+        extension = _REJECTED_VISUAL_EXTENSIONS.get(content_type)
+        if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes or extension is None:
+            continue
+
+        stage = str(item.get("stage", "unknown"))
+        if stage not in {"human", "human_retry", "object"}:
+            stage = "unknown"
+        try:
+            attempt = int(item.get("attempt", 1))
+        except (TypeError, ValueError):
+            attempt = 1
+        attempt = 1 if attempt <= 1 else 2
+        reason = str(item.get("validation_reason", "")).strip()
+        if not reason:
+            reason = "validation_rejected"
+
+        filename = f"{stem}.rejected_{index:02d}_{stage}_{attempt}{extension}"
+        path = out_dir / filename
+        path.write_bytes(bytes(image_bytes))
+        written.append(path)
+        manifest.append(
+            {
+                "file": filename,
+                "stage": stage,
+                "attempt": attempt,
+                "reason": reason,
+                "content_type": content_type,
+            }
+        )
+
+    if manifest:
+        manifest_path = out_dir / f"{stem}.rejected.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        written.append(manifest_path)
+    return written
+
+
 def _handle_post_engagement(
     *,
     spec: EngagementSpec,
@@ -3190,6 +3259,7 @@ async def amain() -> None:
                         rubric_id=rubric_id,
                         audience=aud,
                         visual_qa_api_key=GEMINI_VISUAL_QA_API_KEY,
+                        capture_rejected_images=DRY_RUN and state_scope == "test",
                     )
                 except Exception as e:
                     kind = note("visual_build_failed", f"{canon} ({e})")
@@ -3332,6 +3402,12 @@ async def amain() -> None:
                         effective_topic_title,
                     )
                     _write_dry_run_visual(out, dry_run_stem, visual_meta)
+                    _write_dry_run_rejected_visuals(
+                        out,
+                        dry_run_stem,
+                        visual_meta,
+                        enabled=DRY_RUN and state_scope == "test",
+                    )
                 else:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:

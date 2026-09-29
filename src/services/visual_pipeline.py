@@ -181,6 +181,9 @@ class VisualBrief:
     props: tuple[str, ...]
 
 
+REJECTED_IMAGE_DIAGNOSTIC_MAX = 4
+
+
 class PollinationsImageError(RuntimeError):
     def __init__(
         self,
@@ -191,6 +194,8 @@ class PollinationsImageError(RuntimeError):
         body_hint: str = "",
         retryable: bool = False,
         exception_type: str = "",
+        validation_reason: str = "",
+        rejected_bytes: bytes = b"",
     ) -> None:
         super().__init__(reason)
         self.reason = reason
@@ -199,6 +204,62 @@ class PollinationsImageError(RuntimeError):
         self.body_hint = body_hint
         self.retryable = retryable
         self.exception_type = exception_type or self.__class__.__name__
+        self.validation_reason = validation_reason
+        self.rejected_bytes = rejected_bytes
+
+
+def _sanitize_rejected_image_diagnostic_bytes(image_bytes: bytes) -> bytes:
+    if not image_bytes:
+        return b""
+    try:
+        with Image.open(BytesIO(image_bytes)) as img:
+            img.load()
+            rendered = img.convert("RGBA") if "A" in img.getbands() else img.convert("RGB")
+            # Rebuild from pixel bytes rather than copying the Pillow image object:
+            # this deliberately drops EXIF, comments, text chunks, ICC/provider
+            # metadata and any embedded prompt before diagnostic persistence.
+            clean = Image.frombytes(rendered.mode, rendered.size, rendered.tobytes())
+            output = BytesIO()
+            clean.save(output, format="PNG", optimize=True)
+            return output.getvalue()
+    except Exception:
+        return b""
+
+
+def _capture_rejected_image_diagnostic(
+    base_meta: Dict[str, object],
+    exc: Exception,
+    *,
+    stage: str,
+    attempt: int,
+) -> None:
+    diagnostics = base_meta.get("_rejected_image_diagnostics")
+    if not isinstance(diagnostics, list) or len(diagnostics) >= REJECTED_IMAGE_DIAGNOSTIC_MAX:
+        return
+    if not isinstance(exc, PollinationsImageError):
+        return
+
+    image_bytes = exc.rejected_bytes
+    content_type = (exc.content_type or "").split(";", 1)[0].strip().lower()
+    validation_reason = (exc.validation_reason or "").strip()
+    if not image_bytes or content_type not in {"image/jpeg", "image/png", "image/webp"} or not validation_reason:
+        return
+
+    sanitized_bytes = _sanitize_rejected_image_diagnostic_bytes(image_bytes)
+    if not sanitized_bytes:
+        return
+
+    safe_stage = stage if stage in {"human", "human_retry", "object"} else "unknown"
+    safe_attempt = 1 if int(attempt) <= 1 else 2
+    diagnostics.append(
+        {
+            "stage": safe_stage,
+            "attempt": safe_attempt,
+            "validation_reason": validation_reason,
+            "content_type": "image/png",
+            "image_bytes": sanitized_bytes,
+        }
+    )
 
 
 def _short_log_message(value: object, max_len: int = 180) -> str:
@@ -456,13 +517,18 @@ def _pollinations_request_once(
         content_type,
     )
     if not ok:
+        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        rejected_bytes = response.content if normalized_content_type.startswith("image/") else b""
+        validation_reason = (reason or "").split(":", 1)[0].strip() or "validation_rejected"
         raise PollinationsImageError(
-            f"invalid_pollinations_image:{reason}:content_type={content_type}:body={body_hint}",
+            f"invalid_pollinations_image:{validation_reason}:content_type={normalized_content_type or 'unknown'}",
             status_code=response.status_code,
-            content_type=content_type,
+            content_type=normalized_content_type,
             body_hint=body_hint,
             retryable=False,
             exception_type="InvalidImage",
+            validation_reason=validation_reason,
+            rejected_bytes=rejected_bytes,
         )
 
     return _normalize_pollinations_image(response.content)
@@ -523,17 +589,29 @@ def download_pollinations_image_with_meta(
         status = str(last_error.status_code or "")
         retryable_str = str(bool(last_error.retryable))
         exception_type = last_error.exception_type
+        content_type = last_error.content_type
+        body_hint = last_error.body_hint
+        validation_reason = last_error.validation_reason
+        rejected_bytes = last_error.rejected_bytes
     else:
         reason = _short_log_message(last_error or "unknown_pollinations_error")
         status = ""
         retryable_str = str(_is_retryable_exception(last_error))
         exception_type = (last_error.__class__.__name__ if last_error else "UnknownError")
+        content_type = ""
+        body_hint = ""
+        validation_reason = ""
+        rejected_bytes = b""
 
     raise PollinationsImageError(
         f"{reason}:attempts={attempts}",
         status_code=int(status) if status.isdigit() else 0,
+        content_type=content_type,
+        body_hint=body_hint,
         retryable=retryable_str == "True",
         exception_type=exception_type,
+        validation_reason=validation_reason,
+        rejected_bytes=rejected_bytes,
     )
 
 
@@ -2519,6 +2597,12 @@ def _build_object_visual_fallback(
                 token=pollinations_token,
             )
         except Exception as exc:
+            _capture_rejected_image_diagnostic(
+                base_meta,
+                exc,
+                stage="object",
+                attempt=object_attempt,
+            )
             last_exception_type = exc.__class__.__name__
             last_reason = _short_log_message(getattr(exc, "reason", exc), max_len=220) or "object_generation_failed"
             print(
@@ -2707,6 +2791,7 @@ def build_post_visual(
     audience: str = "",
     visual_qa_fn: Callable[..., Dict[str, object]] | None = None,
     visual_qa_api_key: str = "",
+    capture_rejected_images: bool = False,
 ) -> Tuple[BytesIO, Dict[str, str]]:
     original_prompt = (image_prompt or "").strip()
     qa_fn = visual_qa_fn or evaluate_visual_quality
@@ -2810,6 +2895,8 @@ def build_post_visual(
         "provider_prompt_len": str(len(_prepare_pollinations_prompt(prompt))) if prompt else "0",
         "visual_retry_target_reason": "",
     }
+    if capture_rejected_images:
+        base_meta["_rejected_image_diagnostics"] = []
 
     if prompt:
         print(
@@ -3012,6 +3099,12 @@ def build_post_visual(
                     return retry_buffer, retry_meta
                 first_qa = retry_qa
             except Exception as retry_error:
+                _capture_rejected_image_diagnostic(
+                    base_meta,
+                    retry_error,
+                    stage="human_retry",
+                    attempt=2,
+                )
                 first_qa = {
                     "status": "fail",
                     "pass": False,
@@ -3041,6 +3134,12 @@ def build_post_visual(
             retryable = str(_is_retryable_exception(e))
             reason = _short_log_message(e, max_len=220)
             if isinstance(e, PollinationsImageError):
+                _capture_rejected_image_diagnostic(
+                    base_meta,
+                    e,
+                    stage="human",
+                    attempt=1,
+                )
                 exception_type = e.exception_type
                 retryable = str(bool(e.retryable))
                 reason = _short_log_message(e.reason, max_len=220)

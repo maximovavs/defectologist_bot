@@ -208,6 +208,24 @@ class PollinationsImageError(RuntimeError):
         self.rejected_bytes = rejected_bytes
 
 
+def _sanitize_rejected_image_diagnostic_bytes(image_bytes: bytes) -> bytes:
+    if not image_bytes:
+        return b""
+    try:
+        with Image.open(BytesIO(image_bytes)) as img:
+            img.load()
+            rendered = img.convert("RGBA") if "A" in img.getbands() else img.convert("RGB")
+            # Rebuild from pixel bytes rather than copying the Pillow image object:
+            # this deliberately drops EXIF, comments, text chunks, ICC/provider
+            # metadata and any embedded prompt before diagnostic persistence.
+            clean = Image.frombytes(rendered.mode, rendered.size, rendered.tobytes())
+            output = BytesIO()
+            clean.save(output, format="PNG", optimize=True)
+            return output.getvalue()
+    except Exception:
+        return b""
+
+
 def _capture_rejected_image_diagnostic(
     base_meta: Dict[str, object],
     exc: Exception,
@@ -227,6 +245,10 @@ def _capture_rejected_image_diagnostic(
     if not image_bytes or content_type not in {"image/jpeg", "image/png", "image/webp"} or not validation_reason:
         return
 
+    sanitized_bytes = _sanitize_rejected_image_diagnostic_bytes(image_bytes)
+    if not sanitized_bytes:
+        return
+
     safe_stage = stage if stage in {"human", "human_retry", "object"} else "unknown"
     safe_attempt = 1 if int(attempt) <= 1 else 2
     diagnostics.append(
@@ -234,8 +256,8 @@ def _capture_rejected_image_diagnostic(
             "stage": safe_stage,
             "attempt": safe_attempt,
             "validation_reason": validation_reason,
-            "content_type": content_type,
-            "image_bytes": bytes(image_bytes),
+            "content_type": "image/png",
+            "image_bytes": sanitized_bytes,
         }
     )
 

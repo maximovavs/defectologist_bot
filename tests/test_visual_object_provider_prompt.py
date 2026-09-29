@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 from src.services.visual_pipeline import (
     OBJECT_PROVIDER_PROMPT_MAX_CHARS,
     REJECTED_IMAGE_DIAGNOSTIC_MAX,
@@ -464,8 +466,28 @@ class ObjectSemanticFallbackRegressionTest(unittest.TestCase):
 
 
 class RejectedImageDiagnosticContractTest(unittest.TestCase):
-    def test_invalid_image_preserves_rejected_bytes_without_extra_provider_call(self):
-        response = Mock(status_code=200, content=b"jpeg-payload")
+    @staticmethod
+    def _jpeg_with_exif_sentinel(sentinel: str) -> bytes:
+        image = Image.new("RGB", (32, 24), (245, 240, 235))
+        exif = Image.Exif()
+        exif[0x010E] = sentinel
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", exif=exif)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _png_bytes() -> bytes:
+        image = Image.new("RGB", (16, 12), (240, 235, 230))
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def test_rejected_image_diagnostic_strips_exif_prompt_without_extra_provider_call(self):
+        sentinel = "SECRET_FULL_PROMPT_DO_NOT_PERSIST"
+        provider_bytes = self._jpeg_with_exif_sentinel(sentinel)
+        self.assertIn(sentinel.encode(), provider_bytes)
+
+        response = Mock(status_code=200, content=provider_bytes)
         response.headers = {"Content-Type": "image/jpeg"}
 
         with patch(
@@ -482,16 +504,47 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
         self.assertIn("invalid_pollinations_image:probable_placeholder", caught.exception.reason)
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(caught.exception.validation_reason, "probable_placeholder")
-        self.assertEqual(caught.exception.rejected_bytes, b"jpeg-payload")
+        self.assertIn(sentinel.encode(), caught.exception.rejected_bytes)
+
+        meta = {"_rejected_image_diagnostics": []}
+        _capture_rejected_image_diagnostic(meta, caught.exception, stage="object", attempt=1)
+        diagnostics = meta["_rejected_image_diagnostics"]
+        self.assertEqual(len(diagnostics), 1)
+        diagnostic = diagnostics[0]
+        self.assertEqual(diagnostic["content_type"], "image/png")
+        self.assertNotIn(sentinel.encode(), diagnostic["image_bytes"])
+
+        with Image.open(BytesIO(diagnostic["image_bytes"])) as clean_image:
+            clean_image.load()
+            self.assertEqual(clean_image.format, "PNG")
+            self.assertEqual(len(clean_image.getexif()), 0)
+            self.assertNotIn(sentinel, repr(clean_image.info))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            written = _write_dry_run_rejected_visuals(
+                out,
+                "01_parents_tip_of_day",
+                meta,
+                enabled=True,
+            )
+            image_paths = [path for path in written if path.suffix == ".png"]
+            self.assertEqual(len(image_paths), 1)
+            self.assertNotIn(sentinel, image_paths[0].name)
+            self.assertNotIn(sentinel.encode(), image_paths[0].read_bytes())
+            manifest = (out / "01_parents_tip_of_day.rejected.json").read_text(encoding="utf-8")
+            self.assertNotIn(sentinel, manifest)
 
     def test_rejected_diagnostic_capture_is_bounded_and_prompt_free(self):
+        sentinel = "SECRET_FULL_PROMPT_DO_NOT_PERSIST"
+        provider_bytes = self._jpeg_with_exif_sentinel(sentinel)
         base_meta = {"_rejected_image_diagnostics": []}
         error = PollinationsImageError(
             "invalid_pollinations_image:probable_placeholder",
             content_type="image/jpeg",
-            body_hint="SECRET full provider prompt must not persist",
+            body_hint=f"{sentinel} provider metadata must not persist",
             validation_reason="probable_placeholder",
-            rejected_bytes=b"jpeg",
+            rejected_bytes=provider_bytes,
         )
 
         for attempt in range(1, REJECTED_IMAGE_DIAGNOSTIC_MAX + 3):
@@ -509,8 +562,20 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
                 set(item),
                 {"stage", "attempt", "validation_reason", "content_type", "image_bytes"},
             )
-            self.assertNotIn("SECRET", repr(item))
+            self.assertEqual(item["content_type"], "image/png")
+            self.assertNotIn(sentinel.encode(), item["image_bytes"])
             self.assertNotIn("prompt", repr(item).lower())
+
+    def test_undecodable_rejected_bytes_are_not_captured(self):
+        base_meta = {"_rejected_image_diagnostics": []}
+        error = PollinationsImageError(
+            "invalid_pollinations_image:invalid_image",
+            content_type="image/jpeg",
+            validation_reason="invalid_image",
+            rejected_bytes=b"not-a-decodable-image",
+        )
+        _capture_rejected_image_diagnostic(base_meta, error, stage="object", attempt=1)
+        self.assertEqual(base_meta["_rejected_image_diagnostics"], [])
 
     def test_successful_visual_creates_no_rejected_diagnostic(self):
         qa_pass = {
@@ -538,13 +603,14 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
         self.assertEqual(meta.get("_rejected_image_diagnostics"), [])
 
     def test_dry_run_writer_persists_bounded_safe_diagnostics(self):
+        png_bytes = self._png_bytes()
         diagnostics = [
             {
                 "stage": "object",
                 "attempt": 1,
                 "validation_reason": "probable_placeholder",
-                "content_type": "image/jpeg",
-                "image_bytes": b"jpeg-one",
+                "content_type": "image/png",
+                "image_bytes": png_bytes,
                 "prompt": "SECRET FULL PROMPT",
                 "token": "SECRET_TOKEN",
             },
@@ -553,7 +619,7 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
                 "attempt": 2,
                 "validation_reason": "invalid_image",
                 "content_type": "image/png",
-                "image_bytes": b"png-two",
+                "image_bytes": png_bytes,
             },
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,7 +635,7 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
                 names,
                 [
                     "01_parents_tip_of_day.rejected.json",
-                    "01_parents_tip_of_day.rejected_01_object_1.jpg",
+                    "01_parents_tip_of_day.rejected_01_object_1.png",
                     "01_parents_tip_of_day.rejected_02_human_retry_2.png",
                 ],
             )

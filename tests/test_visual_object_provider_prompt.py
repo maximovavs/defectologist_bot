@@ -21,13 +21,14 @@ from src.services.visual_pipeline import (
     _object_scene_category,
     _pollinations_request_once,
     _prepare_pollinations_prompt,
+    download_pollinations_image_with_meta,
     build_object_only_visual_prompt,
     build_object_provider_prompt,
     build_post_visual,
     evaluate_visual_quality,
 )
 from src.services.image_builder import _is_probable_placeholder_image
-from src.publisher.run_publisher import _write_dry_run_rejected_visuals
+from src.publisher.run_publisher import _write_dry_run_rejected_visuals, _write_dry_run_visual
 
 
 PROVIDER_PROMPT_MIN_CHARS = 450
@@ -484,11 +485,21 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
 
     def test_rejected_image_diagnostic_strips_exif_prompt_without_extra_provider_call(self):
         sentinel = "SECRET_FULL_PROMPT_DO_NOT_PERSIST"
-        provider_bytes = self._jpeg_with_exif_sentinel(sentinel)
-        self.assertIn(sentinel.encode(), provider_bytes)
+        embedded_metadata = (
+            f'{sentinel} Exif black-forest-labs/flux.1-schnell '
+            '{"prompt":"secret-provider-prompt"}'
+        )
+        provider_bytes = self._jpeg_with_exif_sentinel(embedded_metadata)
+        for marker in (
+            sentinel.encode(),
+            b"Exif",
+            b"black-forest-labs",
+            b'"prompt"',
+        ):
+            self.assertIn(marker, provider_bytes)
 
         response = Mock(status_code=200, content=provider_bytes)
-        response.headers = {"Content-Type": "image/jpeg"}
+        response.headers = {"Content-Type": "image/jpeg; charset=binary"}
 
         with patch(
             "src.services.visual_pipeline.requests.get",
@@ -498,42 +509,90 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
             return_value=(False, "probable_placeholder"),
         ):
             with self.assertRaises(PollinationsImageError) as caught:
-                _pollinations_request_once("simple painted speech activity", token="test-token")
+                download_pollinations_image_with_meta(
+                    "simple painted speech activity",
+                    token="test-token",
+                )
 
         self.assertEqual(request.call_count, 1)
-        self.assertIn("invalid_pollinations_image:probable_placeholder", caught.exception.reason)
-        self.assertFalse(caught.exception.retryable)
+        safe_reason = caught.exception.reason
+        self.assertEqual(
+            safe_reason,
+            "invalid_pollinations_image:probable_placeholder:content_type=image/jpeg:attempts=1",
+        )
         self.assertEqual(caught.exception.validation_reason, "probable_placeholder")
+        self.assertEqual(caught.exception.content_type, "image/jpeg")
         self.assertIn(sentinel.encode(), caught.exception.rejected_bytes)
+        for forbidden in (
+            sentinel,
+            "body=",
+            "Exif",
+            "black-forest-labs",
+            '"prompt"',
+        ):
+            self.assertNotIn(forbidden, safe_reason)
 
-        meta = {"_rejected_image_diagnostics": []}
-        _capture_rejected_image_diagnostic(meta, caught.exception, stage="object", attempt=1)
-        diagnostics = meta["_rejected_image_diagnostics"]
-        self.assertEqual(len(diagnostics), 1)
-        diagnostic = diagnostics[0]
-        self.assertEqual(diagnostic["content_type"], "image/png")
-        self.assertNotIn(sentinel.encode(), diagnostic["image_bytes"])
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=caught.exception,
+        ):
+            _, visual_meta = build_post_visual(
+                title="Speech activity",
+                day_key="MO",
+                image_prompt="adult and child practice speech",
+                capture_rejected_images=True,
+            )
 
-        with Image.open(BytesIO(diagnostic["image_bytes"])) as clean_image:
-            clean_image.load()
-            self.assertEqual(clean_image.format, "PNG")
-            self.assertEqual(len(clean_image.getexif()), 0)
-            self.assertNotIn(sentinel, repr(clean_image.info))
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(visual_meta["reason"], safe_reason)
+        diagnostics = visual_meta["_rejected_image_diagnostics"]
+        self.assertGreaterEqual(len(diagnostics), 1)
+        self.assertLessEqual(len(diagnostics), REJECTED_IMAGE_DIAGNOSTIC_MAX)
+        for diagnostic in diagnostics:
+            self.assertEqual(diagnostic["content_type"], "image/png")
+            for marker in (
+                sentinel.encode(),
+                b"Exif",
+                b"black-forest-labs",
+                b'"prompt"',
+            ):
+                self.assertNotIn(marker, diagnostic["image_bytes"])
+            with Image.open(BytesIO(diagnostic["image_bytes"])) as clean_image:
+                clean_image.load()
+                self.assertEqual(clean_image.format, "PNG")
+                self.assertEqual(len(clean_image.getexif()), 0)
+                self.assertNotIn(sentinel, repr(clean_image.info))
 
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
+            _write_dry_run_visual(out, "01_parents_tip_of_day", visual_meta)
+            visual_json = (out / "01_parents_tip_of_day.visual.json").read_text(
+                encoding="utf-8"
+            )
             written = _write_dry_run_rejected_visuals(
                 out,
                 "01_parents_tip_of_day",
-                meta,
+                visual_meta,
                 enabled=True,
             )
+            manifest = (out / "01_parents_tip_of_day.rejected.json").read_text(
+                encoding="utf-8"
+            )
             image_paths = [path for path in written if path.suffix == ".png"]
-            self.assertEqual(len(image_paths), 1)
-            self.assertNotIn(sentinel, image_paths[0].name)
-            self.assertNotIn(sentinel.encode(), image_paths[0].read_bytes())
-            manifest = (out / "01_parents_tip_of_day.rejected.json").read_text(encoding="utf-8")
-            self.assertNotIn(sentinel, manifest)
+            self.assertGreaterEqual(len(image_paths), 1)
+
+            for forbidden in (
+                sentinel,
+                "body=",
+                "Exif",
+                "black-forest-labs",
+                '"prompt"',
+            ):
+                self.assertNotIn(forbidden, visual_json)
+                self.assertNotIn(forbidden, manifest)
+                for image_path in image_paths:
+                    self.assertNotIn(forbidden, image_path.name)
+                    self.assertNotIn(forbidden.encode(), image_path.read_bytes())
 
     def test_rejected_diagnostic_capture_is_bounded_and_prompt_free(self):
         sentinel = "SECRET_FULL_PROMPT_DO_NOT_PERSIST"

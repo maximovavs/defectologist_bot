@@ -517,12 +517,13 @@ def _pollinations_request_once(
         content_type,
     )
     if not ok:
-        rejected_bytes = response.content if (content_type or "").lower().startswith("image/") else b""
-        validation_reason = (reason or "").split(":", 1)[0].strip()
+        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        rejected_bytes = response.content if normalized_content_type.startswith("image/") else b""
+        validation_reason = (reason or "").split(":", 1)[0].strip() or "validation_rejected"
         raise PollinationsImageError(
-            f"invalid_pollinations_image:{reason}:content_type={content_type}:body={body_hint}",
+            f"invalid_pollinations_image:{validation_reason}:content_type={normalized_content_type or 'unknown'}",
             status_code=response.status_code,
-            content_type=content_type,
+            content_type=normalized_content_type,
             body_hint=body_hint,
             retryable=False,
             exception_type="InvalidImage",

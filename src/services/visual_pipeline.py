@@ -313,7 +313,11 @@ def _clean_cover_title(raw_title: str, fallback: str) -> str:
     # Remove numbering and bullet prefixes that can leak from generated headings.
     title = re.sub(r"^\s*[•\-–—*]\s+", "", title)
     title = re.sub(r"^\s*\d+[\.)]\s*", "", title)
-    title = title.strip(" \t\n\r\"'«»")
+    title = title.strip(" \t\n\r")
+    for opening, closing in (("«", "»"), ('"', '"'), ("'", "'")):
+        if len(title) >= 2 and title.startswith(opening) and title.endswith(closing):
+            title = title[1:-1].strip()
+            break
 
     # If the heading is a long explanatory construction, keep the strong title part.
     for sep in (" — ", " – ", " - ", ": "):

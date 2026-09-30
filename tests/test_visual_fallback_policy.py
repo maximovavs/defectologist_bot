@@ -27,6 +27,7 @@ from src.services.visual_pipeline import (
     VISUAL_QA_HARD_REASONS,
     VISUAL_STYLE_TAIL,
     VisualBrief,
+    _clean_cover_title,
     _compile_visual_prompt,
     _enforce_object_visual_qa,
     _object_scene_category,
@@ -71,6 +72,84 @@ def _object_pass():
 
 
 class VisualFallbackPolicyTest(unittest.TestCase):
+    def test_clean_cover_title_unwraps_only_matching_outer_quotes(self):
+        cases = (
+            ("Игра «Найди медведя»", "Игра «Найди медведя»"),
+            ("«Найди медведя»", "Найди медведя"),
+            ("Найди медведя", "Найди медведя"),
+            ("Игра «Найди медведя", "Игра «Найди медведя"),
+            ("«Найди медведя» дома", "«Найди медведя» дома"),
+            ("Игра «Найди медведя» дома", "Игра «Найди медведя» дома"),
+            ('Игра "Найди медведя"', 'Игра "Найди медведя"'),
+            ('"Найди медведя"', "Найди медведя"),
+            ("Игра 'Найди медведя'", "Игра 'Найди медведя'"),
+            ("'Найди медведя'", "Найди медведя"),
+            ("Игра “Найди медведя”", "Игра “Найди медведя”"),
+            ("“Найди медведя”", "“Найди медведя”"),
+        )
+
+        for raw_title, expected in cases:
+            with self.subTest(raw_title=raw_title):
+                self.assertEqual(
+                    _clean_cover_title(raw_title, fallback="Fallback"),
+                    expected,
+                )
+
+    def test_text_fallback_preserves_balanced_embedded_cover_quotes(self):
+        title = "Игра «Найди медведя»"
+        qa_results = iter(
+            [
+                {
+                    "status": "fail",
+                    "pass": False,
+                    "reason": "object_contains_text",
+                    "people_count": 0,
+                    "adult_count": 0,
+                    "child_count": 0,
+                    "ppe_detected": False,
+                    "text_detected": True,
+                    "illustration_style_match": True,
+                },
+                {
+                    "status": "fail",
+                    "pass": False,
+                    "reason": "object_contains_text",
+                    "people_count": 0,
+                    "adult_count": 0,
+                    "child_count": 0,
+                    "ppe_detected": False,
+                    "text_detected": True,
+                    "illustration_style_match": True,
+                },
+            ]
+        )
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"object-1"), {}),
+                (BytesIO(b"object-2"), {}),
+            ],
+        ) as download, patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"text-fallback"),
+        ) as fallback:
+            buffer, meta = build_post_visual(
+                title=title,
+                day_key="MO",
+                image_prompt="",
+                rubric_id="play_and_speak",
+                visual_qa_fn=lambda *_args, **_kwargs: next(qa_results),
+            )
+
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(buffer.getvalue(), b"text-fallback")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["title"], title)
+        self.assertEqual(meta["visual_title"], title)
+        fallback.assert_called_once()
+        self.assertEqual(fallback.call_args.kwargs["title"], title)
+
     def test_gemini_37_visual_qa_payload_omits_legacy_sampling_controls(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
             "src.services.visual_pipeline.requests.post", return_value=_qa_response(200)

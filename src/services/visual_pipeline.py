@@ -2252,9 +2252,13 @@ OBJECT_SCENE_GUARDS = {
 }
 
 # The single object-QA rejection reason that says the rendered scene itself
-# carried readable text. Reading prep and book/vocabulary scenes both carry
-# printable surfaces that can provoke it. Only these categories with that
-# rejection may redirect the bounded object retry to a text-safe scene.
+# carried readable text. Exactly three text-prone source categories are
+# explicitly supported: `reading_prep`, `books_vocab_phrases_stories` and
+# `games_everyday_communication`. Only for one of those categories, and only
+# after this exact previous object QA reason, may the second (final) object
+# attempt be redirected to the text-safe scene. No other category, no other
+# rejection reason and no other attempt is affected, and the object attempt
+# budget is unchanged.
 #
 # Run #500 was the production observation that led here, but it is not itself a
 # reading_prep publication: its brief was a book/picture scene, and once the

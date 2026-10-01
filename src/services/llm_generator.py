@@ -1600,7 +1600,9 @@ def _validate_parent_russian_phoneme_notation_output(text: str) -> tuple[bool, s
 # vocabulary rather than a Russian wording of the same fact.
 #
 # The boundary below is a conjunction, and that is what keeps it narrow:
-#   1. the EVIDENCE really uses that English outcome label as a standalone word;
+#   1. the EVIDENCE really uses that English outcome label AS a result/status
+#      label, in one of the explicit constructions below (not merely as an
+#      ordinary verb: «pass the ball», «refer to the article», «failed to…»);
 #   2. the H1 really carries that label's Cyrillic transliteration as a
 #      standalone token.
 # Neither half fires on its own, so ordinary Russian vocabulary, abbreviations,
@@ -1631,6 +1633,59 @@ PARENT_TITLE_STATUS_LABEL_ENDINGS: Tuple[str, ...] = (
     "", "а", "у", "ом", "е", "ы", "ов", "ам", "ами", "ах",
 )
 
+# The evidence side must prove the English token is used AS a result/status
+# label, not merely that it occurs. A bare word-boundary match was too broad:
+# «Ask the child to pass the ball to a partner.» is an ordinary verb, and the
+# Russian noun «пас» in such a post is legitimate.
+#
+# Nouns that mark an outcome slot in English source prose.
+PARENT_STATUS_LABEL_CONTEXT_NOUN = r"(?:result|results|outcome|outcomes|status)"
+
+# Verbs that report an outcome. They only count next to a context noun, so
+# «refer to the article» and «failed to respond» never qualify.
+PARENT_STATUS_LABEL_REPORTING_VERB = (
+    r"(?:reports?|reported|returns?|returned|records?|recorded"
+    r"|receives?|received|gives?|gave|shows?|showed)"
+)
+
+# A label may be listed alongside its siblings: "a result of Pass or Refer".
+# Only known labels may fill that slot, so "a result of a screening or refer to
+# a specialist" does not qualify.
+PARENT_STATUS_LABEL_SIBLINGS = (
+    r"(?:(?:pass|passed|fail|failed|refer|referred|referral)\s*(?:/|,|\bor\b)\s*)*"
+)
+
+
+def _status_label_context_patterns(label: str) -> Tuple[str, ...]:
+    """The small explicit family of English status/result constructions."""
+    token = re.escape(label)
+    noun = PARENT_STATUS_LABEL_CONTEXT_NOUN
+    verb = PARENT_STATUS_LABEL_REPORTING_VERB
+    siblings = PARENT_STATUS_LABEL_SIBLINGS
+    return (
+        # result of Pass / result is Pass / status was Refer
+        rf"\b{noun}\s+(?:of|is|was|were|are)\s+{siblings}{token}\b",
+        # result: Pass / status = Fail
+        rf"\b{noun}\s*[:=]\s*{siblings}{token}\b",
+        # Pass result / Refer outcome / Fail status
+        rf"\b{token}\s+{noun}\b",
+        # reported a Pass result / returned a Fail status
+        rf"\b{verb}\s+(?:a|an|the)?\s*{token}\s+{noun}\b",
+        # reports a result of Pass / received a status of Refer
+        rf"\b{verb}\s+(?:a|an|the)?\s*{noun}\s+of\s+{siblings}{token}\b",
+    )
+
+
+def _evidence_uses_status_label(evidence_text: str, label: str) -> bool:
+    """True only when the evidence uses `label` as an outcome/result/status."""
+    evidence = evidence_text or ""
+    if not evidence:
+        return False
+    return any(
+        re.search(pattern, evidence, flags=re.IGNORECASE)
+        for pattern in _status_label_context_patterns(label)
+    )
+
 
 def _parent_title_line(text: str) -> str:
     """The first user-facing headline line, by the same convention as the
@@ -1647,7 +1702,7 @@ def _validate_parent_title_status_label_output(text: str, evidence_text: str = "
     taken from the EVIDENCE instead of stating the fact in Russian.
 
     Checks the headline line only, never the body, and stays silent unless the
-    evidence actually uses the label.
+    evidence actually uses the label AS a result/status label.
     """
     title = _parent_title_line(text)
     evidence = evidence_text or ""
@@ -1662,7 +1717,7 @@ def _validate_parent_title_status_label_output(text: str, evidence_text: str = "
         return True, "ok"
 
     for label, stems in PARENT_TITLE_STATUS_LABEL_TRANSLITERATIONS.items():
-        if not re.search(rf"\b{re.escape(label)}\b", evidence, flags=re.IGNORECASE):
+        if not _evidence_uses_status_label(evidence, label):
             continue
         for stem in stems:
             if any(stem + ending in title_tokens for ending in PARENT_TITLE_STATUS_LABEL_ENDINGS):

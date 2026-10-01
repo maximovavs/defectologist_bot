@@ -262,6 +262,17 @@ SCREENING_EVIDENCE_WITHOUT_LABEL = (
 
 RUN_508_TITLE = "\u041f\u0430\u0441 \u0432 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0435 \u2260 \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0441\u043b\u0443\u0445"
 
+# Ordinary English verb uses. None of these is a result/status label, so none may
+# establish status context — «pass the ball» must not make the Russian noun «пас»
+# a defect.
+ORDINARY_PASS_EVIDENCE = "Ask the child to pass the ball to a partner."
+ORDINARY_REFER_EVIDENCE = "Refer to the picture while you talk with the child."
+ORDINARY_FAILED_EVIDENCE = "Some children failed to respond to the quiet sound at first."
+
+# A legitimate Russian headline whose standalone token would match the
+# transliteration map if the evidence side were not context-aware.
+LEGITIMATE_PASS_TITLE = "\u041f\u0430\u0441 \u0434\u0440\u0443\u0433 \u0434\u0440\u0443\u0433\u0443: \u0438\u0433\u0440\u0430 \u0441\u043e \u0441\u043b\u043e\u0432\u0430\u043c\u0438"
+
 
 def _titled(title: str) -> str:
     """A post whose first line is the headline under test."""
@@ -354,6 +365,58 @@ class ParentTitleStatusLabelContractTest(unittest.TestCase):
                     (True, "ok"),
                 )
 
+    def test_ordinary_pass_verb_does_not_flag_legitimate_russian_noun(self):
+        """«pass the ball» is a verb; «Пас друг другу» is legitimate Russian."""
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(
+                _titled(LEGITIMATE_PASS_TITLE), ORDINARY_PASS_EVIDENCE
+            ),
+            (True, "ok"),
+        )
+        self.assertFalse(llm._evidence_uses_status_label(ORDINARY_PASS_EVIDENCE, "pass"))
+
+    def test_ordinary_refer_construction_does_not_establish_status_context(self):
+        """`рефер` is no Russian word, so the evidence-side helper is tested."""
+        self.assertFalse(llm._evidence_uses_status_label(ORDINARY_REFER_EVIDENCE, "refer"))
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "Refer to the article for more examples of early words.", "refer"
+            )
+        )
+        # Referring a child onward is an action, not a reported status label.
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "You can refer the child for further testing if you are worried.", "refer"
+            )
+        )
+
+    def test_ordinary_failed_use_does_not_establish_status_context(self):
+        self.assertFalse(llm._evidence_uses_status_label(ORDINARY_FAILED_EVIDENCE, "failed"))
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "If the child fails to answer, wait and try again later.", "fail"
+            )
+        )
+
+    def test_status_context_requires_an_outcome_construction(self):
+        """Only the explicit status/result constructions count."""
+        for evidence, label in (
+            ("Newborn hearing screening reports a result of Pass or Refer.", "pass"),
+            ("Newborn hearing screening reports a result of Pass or Refer.", "refer"),
+            ("A Pass result means the screening found no concern that day.", "pass"),
+            ("The screening result was Fail, so testing continued.", "fail"),
+            ("Screening status: Refer. The family was contacted.", "refer"),
+            ("The hospital returned a Pass status for the newborn.", "pass"),
+        ):
+            with self.subTest(evidence=evidence, label=label):
+                self.assertTrue(llm._evidence_uses_status_label(evidence, label))
+        # A sibling slot accepts only known labels, never arbitrary words.
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "A result of a screening or refer to a specialist when unsure.", "refer"
+            )
+        )
+
     def test_boundary_generalizes_beyond_the_incident_label(self):
         """Not a one-off `Пас` rule: other outcome labels and inflections too."""
         cases = (
@@ -362,7 +425,8 @@ class ParentTitleStatusLabelContractTest(unittest.TestCase):
                 "\u0420\u0435\u0444\u0435\u0440 \u0432 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0435: \u0447\u0442\u043e \u0434\u0435\u043b\u0430\u0442\u044c \u0440\u043e\u0434\u0438\u0442\u0435\u043b\u044f\u043c",
             ),
             (
-                "Infants who fail the screening are referred for a diagnostic assessment.",
+                # A genuine status label, not the ordinary verb "fail".
+                "The screening result was Fail, and a full diagnostic assessment was scheduled.",
                 "\u0424\u0435\u0439\u043b \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0430 \u043f\u0443\u0433\u0430\u0435\u0442 \u0440\u043e\u0434\u0438\u0442\u0435\u043b\u0435\u0439",
             ),
             (

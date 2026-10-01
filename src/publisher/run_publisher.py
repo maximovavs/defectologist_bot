@@ -368,6 +368,7 @@ VALIDATION_SKIP_REASONS = {
     "parent_nonobservable_benefit",
     "parent_cross_language_sound_norm",
     "parent_too_many_numbered_steps",
+    "parent_title_untranslated_status_label",
     "pro_insufficient_evidence",
     "pro_empty",
     "pro_title_too_long",

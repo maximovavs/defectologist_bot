@@ -2252,9 +2252,13 @@ OBJECT_SCENE_GUARDS = {
 }
 
 # The single object-QA rejection reason that says the rendered scene itself
-# carried readable text. Reading prep and book/vocabulary scenes both carry
-# printable surfaces that can provoke it. Only these categories with that
-# rejection may redirect the bounded object retry to a text-safe scene.
+# carried readable text. Exactly three text-prone source categories are
+# explicitly supported: `reading_prep`, `books_vocab_phrases_stories` and
+# `games_everyday_communication`. Only for one of those categories, and only
+# after this exact previous object QA reason, may the second (final) object
+# attempt be redirected to the text-safe scene. No other category, no other
+# rejection reason and no other attempt is affected, and the object attempt
+# budget is unchanged.
 #
 # Run #500 was the production observation that led here, but it is not itself a
 # reading_prep publication: its brief was a book/picture scene, and once the
@@ -2265,6 +2269,14 @@ OBJECT_SCENE_GUARDS = {
 OBJECT_TEXT_FAILURE_REASON = "object_contains_text"
 OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY = "reading_prep"
 OBJECT_TEXT_SAFE_RETRY_BOOK_CATEGORY = "books_vocab_phrases_stories"
+# Runs #507 (36586159679) and #509 (36884996239) both reached
+# `games_everyday_communication`, whose props carry `picture cards`, and both
+# failed object QA with `object_contains_text` (text_detected=True). In #509 the
+# second attempt stayed on the same category, so it changed only variation and
+# composition while keeping that text-prone prop, and the publication had to fall
+# through to the text card. The games category is therefore a third eligible
+# source for the SAME exact text failure; nothing else about it changes.
+OBJECT_TEXT_SAFE_RETRY_GAMES_CATEGORY = "games_everyday_communication"
 OBJECT_TEXT_SAFE_RETRY_CATEGORY = "text_safe_objects"
 
 
@@ -2274,15 +2286,17 @@ def _text_safe_object_retry_category(
 ) -> str:
     """Return the text-safe retry category for a text-prone scene rejection.
 
-    Requires BOTH conditions: the publication was classified as `reading_prep`
-    or `books_vocab_phrases_stories`, and the previous object QA rejected with
-    `object_contains_text`. Returns "" otherwise (any other category, any other
-    reason, and a missing/empty reason after a generation failure), so the first
-    attempt and every unrelated path keep the derived category.
+    Requires BOTH conditions: the publication was classified as `reading_prep`,
+    `books_vocab_phrases_stories` or `games_everyday_communication`, and the
+    previous object QA rejected with `object_contains_text`. Returns "" otherwise
+    (any other category, any other reason, and a missing/empty reason after a
+    generation failure), so the first attempt and every unrelated path keep the
+    derived category.
     """
     if str(derived_category or "").strip() not in (
         OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY,
         OBJECT_TEXT_SAFE_RETRY_BOOK_CATEGORY,
+        OBJECT_TEXT_SAFE_RETRY_GAMES_CATEGORY,
     ):
         return ""
     if str(previous_object_reason or "").strip() != OBJECT_TEXT_FAILURE_REASON:

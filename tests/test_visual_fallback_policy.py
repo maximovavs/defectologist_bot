@@ -22,6 +22,7 @@ from src.services.visual_pipeline import (
     OBJECT_TEXT_SAFE_PROVIDER_COMPOSITIONS,
     OBJECT_SCENE_CONTEXT_STYLE_MARKER,
     OBJECT_TEXT_SAFE_RETRY_CATEGORY,
+    OBJECT_TEXT_SAFE_RETRY_GAMES_CATEGORY,
     OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY,
     _VisualQABuildCircuit,
     VISUAL_QA_HARD_REASONS,
@@ -2746,6 +2747,225 @@ class Run501BooksTextSafeRetryTest(unittest.TestCase):
         )
         self.assertEqual(meta["object_scene_category"], "books_vocab_phrases_stories")
         self.assertEqual(meta["mode"], "ai_object_fallback")
+
+# --- runs #507 / #509: games_everyday_communication + object_contains_text ------
+#
+# Run #507 (36586159679): object attempt 1 generation failed as
+# `probable_placeholder` (no text verdict on attempt 1); attempt 2 reached QA and
+# failed `object_contains_text` with text_detected=True; the publication
+# recovered through `text_fallback`.
+#
+# Run #509 (36884996239): object attempt 1 failed QA `object_contains_text`
+# (text_detected=True); attempt 2 stayed on `games_everyday_communication`, so it
+# changed variation/composition only and kept the same text-prone props,
+# including `picture cards`; attempt 2 failed `object_contains_text` again;
+# terminal mode `text_fallback`; publication succeeded.
+#
+# Neither failure is attributed to a Gemini 503: both are object QA verdicts.
+# The games props carry a recurring printable surface, so the category becomes a
+# third eligible source for the SAME exact text failure.
+
+
+class GamesEverydayTextSafeRetryTest(unittest.TestCase):
+    """Games communication joins the existing text-safe retry eligibility."""
+
+    _TITLE = "\u0412\u0435\u0441\u0435\u043b\u0430\u044f \u0438\u0433\u0440\u0430 \u0441 \u043c\u044f\u0447\u043e\u043c \u0438 \u043e\u0431\u0449\u0435\u043d\u0438\u0435"
+    _PROMPT = _compile_visual_prompt(
+        VisualBrief(
+            rubric_id="tip_of_day",
+            role_rule="Exactly one adult parent and exactly one toddler, visibly different in age and height, no other people.",
+            age_descriptor="toddler",
+            setting="simple uncluttered home play area",
+            action="Roll the ball to the child and name it during the game",
+            props=("ball", "basket"),
+        )
+    )
+
+    def _run(self, *object_qa_results, download=None):
+        qa_results = iter(
+            [_human_fail("missing_required_child"), _human_fail("wrong_character_roles")]
+            + list(object_qa_results)
+        )
+        prompts = []
+        qa_calls = []
+
+        def default_download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(f"image-{len(prompts)}".encode()), {"attempts_used": "1"}
+
+        def qa(*args, **kwargs):
+            qa_calls.append((args, kwargs))
+            return next(qa_results)
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=download or default_download,
+        ), patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"text-card"),
+        ):
+            buffer, meta = build_post_visual(
+                title=self._TITLE,
+                day_key="2026-09-30",
+                image_prompt=self._PROMPT,
+                rubric_id="tip_of_day",
+                audience="parents",
+                visual_qa_fn=qa,
+            )
+        return buffer, meta, prompts, qa_calls
+
+    def test_helper_treats_games_as_eligible_for_the_text_failure(self):
+        """Regression 1: helper eligibility."""
+        self.assertEqual(
+            _text_safe_object_retry_category(
+                "games_everyday_communication", OBJECT_TEXT_FAILURE_REASON
+            ),
+            OBJECT_TEXT_SAFE_RETRY_CATEGORY,
+        )
+        self.assertEqual(
+            OBJECT_TEXT_SAFE_RETRY_GAMES_CATEGORY, "games_everyday_communication"
+        )
+
+    def test_games_brief_derives_the_games_category(self):
+        self.assertEqual(
+            _object_scene_category(self._TITLE, "tip_of_day", context_hint=self._PROMPT),
+            "games_everyday_communication",
+        )
+
+    def test_text_rejection_switches_only_the_final_attempt(self):
+        """Regression 2: attempt 1 games, attempt 2 text-safe."""
+        buffer, meta, prompts, qa_calls = self._run(_object_text_fail(), _object_pass())
+
+        object_prompts = prompts[2:]
+        self.assertEqual(len(prompts[:2]), 2)
+        self.assertEqual(len(object_prompts), 2)
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(object_prompts),
+            ["games_everyday_communication", OBJECT_TEXT_SAFE_RETRY_CATEGORY],
+        )
+        self.assertEqual(len(qa_calls), 4)
+        # Attempt 1 is byte-identical to the untouched games provider prompt.
+        first_match = OBJECT_SCENE_MARKER_RE.search(object_prompts[0])
+        self.assertEqual(
+            _prepare_pollinations_prompt(object_prompts[0]),
+            build_object_provider_prompt("games_everyday_communication", first_match.group(2)),
+        )
+        self.assertEqual(buffer.getvalue(), b"image-4")
+        self.assertEqual(meta["mode"], "ai_object_fallback")
+        self.assertEqual(meta["object_scene_category"], OBJECT_TEXT_SAFE_RETRY_CATEGORY)
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_attempts"], "2")
+
+    def test_retry_prompt_drops_picture_cards_and_printable_surfaces(self):
+        """Regression 3: the attempt-2 provider prompt carries no text surface."""
+        _buffer, _meta, prompts, _qa = self._run(_object_text_fail(), _object_pass())
+
+        first = _prepare_pollinations_prompt(prompts[2]).lower()
+        retry = _prepare_pollinations_prompt(prompts[3]).lower()
+
+        # The games props really do carry the recurring printable surface.
+        self.assertIn("picture cards", OBJECT_SCENE_CATEGORIES["games_everyday_communication"])
+        self.assertIn("picture cards", first)
+        self.assertNotIn("picture cards", retry)
+        self.assertIn(OBJECT_SCENE_CATEGORIES[OBJECT_TEXT_SAFE_RETRY_CATEGORY].lower(), retry)
+
+        scanned = retry.replace("subtle watercolor paper texture", " ").replace(
+            OBJECT_PROVIDER_NEGATIVES.lower(), " "
+        )
+        for token in OBJECT_TEXT_SAFE_COMPOSITION_BANNED_TOKENS:
+            with self.subTest(token=token):
+                self.assertNotIn(token, scanned)
+
+    def test_non_text_qa_failure_keeps_the_games_category(self):
+        """Regression 4: only the exact text reason redirects."""
+        for reason in ("object_style_mismatch", "object_contains_person"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    _text_safe_object_retry_category("games_everyday_communication", reason),
+                    "",
+                )
+
+        _buffer, meta, prompts, qa_calls = self._run(
+            _object_non_text_fail(), _object_pass()
+        )
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(len(qa_calls), 4)
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(prompts[2:]),
+            ["games_everyday_communication"] * 2,
+        )
+        self.assertEqual(meta["object_scene_category"], "games_everyday_communication")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+
+    def test_generation_failure_without_a_text_verdict_does_not_switch(self):
+        """Regression 5: run #507's attempt 1 had no QA verdict at all."""
+        prompts = []
+        calls = {"n": 0}
+
+        def download(*, prompt, token):
+            calls["n"] += 1
+            prompts.append(prompt)
+            if calls["n"] == 3:
+                raise visual_pipeline.PollinationsImageError(
+                    "invalid_pollinations_image:probable_placeholder"
+                )
+            return BytesIO(f"image-{calls['n']}".encode()), {"attempts_used": "1"}
+
+        _buffer, meta, _prompts, _qa = self._run(_object_pass(), download=download)
+
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(prompts[2:]),
+            ["games_everyday_communication"] * 2,
+        )
+        self.assertEqual(meta["object_scene_category"], "games_everyday_communication")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+
+    def test_repeat_text_rejection_keeps_two_attempts_then_text_card(self):
+        """Regression 6: run #509's shape, with the corrected attempt-2 scene."""
+        buffer, meta, prompts, qa_calls = self._run(
+            _object_text_fail(), _object_text_fail()
+        )
+
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(len(qa_calls), 4)
+        self.assertEqual(
+            ObjectContainsTextSafeRetryTest._marker_categories(prompts[2:]),
+            ["games_everyday_communication", OBJECT_TEXT_SAFE_RETRY_CATEGORY],
+        )
+        self.assertEqual(buffer.getvalue(), b"text-card")
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_qa_reason"], OBJECT_TEXT_FAILURE_REASON)
+        self.assertEqual(meta["final_reason"], "object_fallback_rejected")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_attempts"], "2")
+
+    def test_unrelated_categories_are_not_broadened(self):
+        """Regression 7 companion: eligibility gained exactly one category."""
+        for category in (
+            "articulation_speech",
+            "household_routines",
+            "hearing_sounds_music",
+            "bilingual_languages",
+            "default",
+            "",
+            None,
+        ):
+            with self.subTest(category=category):
+                self.assertEqual(
+                    _text_safe_object_retry_category(category, OBJECT_TEXT_FAILURE_REASON),
+                    "",
+                )
+        # The three eligible sources, and only those three.
+        for category in (
+            OBJECT_TEXT_SAFE_RETRY_SOURCE_CATEGORY,
+            "books_vocab_phrases_stories",
+            OBJECT_TEXT_SAFE_RETRY_GAMES_CATEGORY,
+        ):
+            with self.subTest(category=category):
+                self.assertEqual(
+                    _text_safe_object_retry_category(category, OBJECT_TEXT_FAILURE_REASON),
+                    OBJECT_TEXT_SAFE_RETRY_CATEGORY,
+                )
 
 
 

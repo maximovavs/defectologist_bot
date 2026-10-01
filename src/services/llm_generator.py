@@ -1592,6 +1592,140 @@ def _validate_parent_russian_phoneme_notation_output(text: str) -> tuple[bool, s
     return True, "ok"
 
 
+# Run #508 published the parent H1 «Пас в скрининге ≠ гарантированный слух» over
+# an English newborn-hearing-screening source whose result label is `Pass`. The
+# editorial prompt already asks for a natural Russian headline, but nothing
+# deterministically stopped an English result/status label from being carried into
+# the Russian H1 as a transliteration, i.e. as ordinary Russian headline
+# vocabulary rather than a Russian wording of the same fact.
+#
+# The boundary below is a conjunction, and that is what keeps it narrow:
+#   1. the EVIDENCE really uses that English outcome label AS a result/status
+#      label, in one of the explicit constructions below (not merely as an
+#      ordinary verb: «pass the ball», «refer to the article», «failed to…»);
+#   2. the H1 really carries that label's Cyrillic transliteration as a
+#      standalone token.
+# Neither half fires on its own, so ordinary Russian vocabulary, abbreviations,
+# proper names, accepted loan terminology and visible Latin citations of the
+# label are all untouched.
+#
+# Only outcome labels whose transliteration is NOT itself legitimate Russian
+# clinical vocabulary belong here. positive / negative / normal are deliberately
+# absent: «позитивный», «негативный», «нормальный» are the correct Russian terms,
+# so transliteration and translation coincide and there is nothing to flag. This
+# is a transliteration map, not a translation dictionary: it stores no Russian
+# meaning for any label and prescribes no replacement wording.
+PARENT_TITLE_STATUS_LABEL_TRANSLITERATIONS: Dict[str, Tuple[str, ...]] = {
+    "pass": ("пас", "пасс"),
+    "passed": ("пас", "пасс"),
+    "fail": ("фейл", "фэйл"),
+    "failed": ("фейл", "фэйл"),
+    "refer": ("рефер",),
+    "referred": ("рефер",),
+    "referral": ("рефер", "реферал"),
+}
+
+# Russian case endings appended to a transliterated stem. Matching is whole-token
+# only, which keeps these away from unrelated words that merely begin with the
+# same letters (паста, пасха, паспорт, реферат, референт). The ending "и" is
+# excluded on purpose: it would collide with «паси» and «рефери».
+PARENT_TITLE_STATUS_LABEL_ENDINGS: Tuple[str, ...] = (
+    "", "а", "у", "ом", "е", "ы", "ов", "ам", "ами", "ах",
+)
+
+# The evidence side must prove the English token is used AS a result/status
+# label, not merely that it occurs. A bare word-boundary match was too broad:
+# «Ask the child to pass the ball to a partner.» is an ordinary verb, and the
+# Russian noun «пас» in such a post is legitimate.
+#
+# Nouns that mark an outcome slot in English source prose.
+PARENT_STATUS_LABEL_CONTEXT_NOUN = r"(?:result|results|outcome|outcomes|status)"
+
+# Verbs that report an outcome. They only count next to a context noun, so
+# «refer to the article» and «failed to respond» never qualify.
+PARENT_STATUS_LABEL_REPORTING_VERB = (
+    r"(?:reports?|reported|returns?|returned|records?|recorded"
+    r"|receives?|received|gives?|gave|shows?|showed)"
+)
+
+# A label may be listed alongside its siblings: "a result of Pass or Refer".
+# Only known labels may fill that slot, so "a result of a screening or refer to
+# a specialist" does not qualify.
+PARENT_STATUS_LABEL_SIBLINGS = (
+    r"(?:(?:pass|passed|fail|failed|refer|referred|referral)\s*(?:/|,|\bor\b)\s*)*"
+)
+
+
+def _status_label_context_patterns(label: str) -> Tuple[str, ...]:
+    """The small explicit family of English status/result constructions."""
+    token = re.escape(label)
+    noun = PARENT_STATUS_LABEL_CONTEXT_NOUN
+    verb = PARENT_STATUS_LABEL_REPORTING_VERB
+    siblings = PARENT_STATUS_LABEL_SIBLINGS
+    return (
+        # result of Pass / result is Pass / status was Refer
+        rf"\b{noun}\s+(?:of|is|was|were|are)\s+{siblings}{token}\b",
+        # result: Pass / status = Fail
+        rf"\b{noun}\s*[:=]\s*{siblings}{token}\b",
+        # Pass result / Refer outcome / Fail status
+        rf"\b{token}\s+{noun}\b",
+        # reported a Pass result / returned a Fail status
+        rf"\b{verb}\s+(?:a|an|the)?\s*{token}\s+{noun}\b",
+        # reports a result of Pass / received a status of Refer
+        rf"\b{verb}\s+(?:a|an|the)?\s*{noun}\s+of\s+{siblings}{token}\b",
+    )
+
+
+def _evidence_uses_status_label(evidence_text: str, label: str) -> bool:
+    """True only when the evidence uses `label` as an outcome/result/status."""
+    evidence = evidence_text or ""
+    if not evidence:
+        return False
+    return any(
+        re.search(pattern, evidence, flags=re.IGNORECASE)
+        for pattern in _status_label_context_patterns(label)
+    )
+
+
+def _parent_title_line(text: str) -> str:
+    """The first user-facing headline line, by the same convention as the
+    politeness-title guard. Links are dropped so a URL can never be scanned."""
+    lines = _extract_nonempty_lines(text)
+    if not lines:
+        return ""
+    title = re.sub(r"https?://\S+|www\.\S+", " ", lines[0], flags=re.IGNORECASE)
+    return title.strip()
+
+
+def _validate_parent_title_status_label_output(text: str, evidence_text: str = "") -> Tuple[bool, str]:
+    """Reject a parent H1 that transliterates an English result/status label
+    taken from the EVIDENCE instead of stating the fact in Russian.
+
+    Checks the headline line only, never the body, and stays silent unless the
+    evidence actually uses the label AS a result/status label.
+    """
+    title = _parent_title_line(text)
+    evidence = evidence_text or ""
+    if not title or not evidence:
+        return True, "ok"
+
+    title_tokens = {
+        token.lower().replace("ё", "е")
+        for token in re.findall(r"[А-Яа-яЁё]+", title)
+    }
+    if not title_tokens:
+        return True, "ok"
+
+    for label, stems in PARENT_TITLE_STATUS_LABEL_TRANSLITERATIONS.items():
+        if not _evidence_uses_status_label(evidence, label):
+            continue
+        for stem in stems:
+            if any(stem + ending in title_tokens for ending in PARENT_TITLE_STATUS_LABEL_ENDINGS):
+                return False, "parent_title_untranslated_status_label"
+
+    return True, "ok"
+
+
 def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
     blob = _normalize_scan_text(text)
     blanket = _contains_any_fragment(blob, BLANKET_REASSURANCE)
@@ -2503,6 +2637,7 @@ def _validate_output(
             _validate_parent_hearing_inference_output,
             _validate_parent_diagnostic_role_output,
             lambda value: _validate_cross_language_sound_output(value, evidence_text),
+            lambda value: _validate_parent_title_status_label_output(value, evidence_text),
             _validate_parent_numbered_steps,
         ):
             ok, reason = validator(out)
@@ -4041,6 +4176,7 @@ PARENT_CONTENT_REPAIR_REASONS = {
     "parent_false_hearing_inference",
     "parent_cross_language_sound_norm",
     "parent_too_many_numbered_steps",
+    "parent_title_untranslated_status_label",
 }
 
 PARENT_CONTENT_REPAIR_INSTRUCTION = (
@@ -4070,11 +4206,22 @@ PARENT_DIAGNOSTIC_ROLE_REPAIR_INSTRUCTION = (
 )
 
 
+PARENT_TITLE_STATUS_LABEL_REPAIR_INSTRUCTION = (
+    "Перепиши только заголовок (первую строку). В нём английская метка результата или статуса из EVIDENCE "
+    "(например Pass, Fail, Refer) перенесена в русский текст транслитерацией и читается как чужое слово. "
+    "Передай тот же смысл естественной русской формулировкой: назови результат словами, принятыми в русском языке. "
+    "Не меняй сам факт, не усиливай и не ослабляй вывод источника, не добавляй новых фактов, чисел, возрастов и диагнозов. "
+    "Заголовок оставь коротким, законченным и согласованным. Остальной текст не меняй."
+)
+
+
 def _parent_content_repair_instruction(reason: str) -> str:
     if reason == "parent_modality_not_grounded":
         return PARENT_MODALITY_REPAIR_INSTRUCTION
     if reason == "parent_diagnostic_role_violation":
         return PARENT_DIAGNOSTIC_ROLE_REPAIR_INSTRUCTION
+    if reason == "parent_title_untranslated_status_label":
+        return PARENT_TITLE_STATUS_LABEL_REPAIR_INSTRUCTION
     return PARENT_CONTENT_REPAIR_INSTRUCTION
 
 
@@ -4117,7 +4264,9 @@ PARENT_EDITORIAL_PROMPT_RULE = (
     "Сохраняй модальность EVIDENCE: «может», «часто», «обычно» и аналогичные мягкие формулировки не превращай в «должен», «обязан», «это норма» или другую категорическую возрастную норму. "
     "Домашнее наблюдение, игра, упражнение или ответ не являются основанием ставить, подтверждать или исключать диагноз; описывай наблюдение и при необходимости calibrated referral без индивидуального диагностического вывода. "
     "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
-    "с правильным согласованием, без длинной инструкции в H1."
+    "с правильным согласованием, без длинной инструкции в H1. "
+    "Английские метки результата или статуса из EVIDENCE (например Pass, Fail, Refer) не переноси в русский заголовок "
+    "транслитерацией или без перевода как обычное слово: передай тот же смысл естественной русской формулировкой, не меняя сам факт."
 )
 
 PARENT_ORAL_SAFETY_REPAIR_INSTRUCTION = (

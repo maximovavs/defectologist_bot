@@ -129,6 +129,29 @@ class PublisherValidationEnvelopeTest(unittest.TestCase):
             ("parent_diagnostic_role_violation", "llm_validation"),
         )
 
+    def test_parent_title_status_label_reason_is_recovered_exactly(self) -> None:
+        """Registered in VALIDATION_SKIP_REASONS, so the exact reason survives.
+
+        Without the registration both notes degraded to `llm_invalid_output`.
+        """
+        reason = "parent_title_untranslated_status_label"
+        self.assertIn(reason, publisher.VALIDATION_SKIP_REASONS)
+        for note in (
+            f"invalid_groq_retry:{reason}",
+            f"invalid_gemini_retry:{reason}",
+        ):
+            with self.subTest(note=note):
+                self.assertEqual(publisher._extract_validation_skip_reason(note), reason)
+                self.assertEqual(
+                    publisher._resolve_llm_skip(note), (reason, "llm_validation")
+                )
+
+    def test_parent_title_status_label_keeps_soft_classification(self) -> None:
+        """Hard/soft architecture is untouched: it stays a soft skip."""
+        reason = "parent_title_untranslated_status_label"
+        self.assertNotIn(reason, publisher.HARD_SKIP_REASONS)
+        self.assertEqual(publisher._skip_kind(reason), "soft")
+
     def test_unknown_unregistered_validation_text_stays_generic(self) -> None:
         note = "invalid_groq_retry:invented_policy_reason"
         self.assertEqual(publisher._extract_validation_skip_reason(note), "")

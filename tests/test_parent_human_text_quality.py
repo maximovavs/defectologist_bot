@@ -39,7 +39,11 @@ def _long_parent_text(fragment: str) -> str:
     )
 
 
-def _run_general_validation(text: str, rubric_format: str = "exercise_steps"):
+def _run_general_validation(
+    text: str,
+    rubric_format: str = "exercise_steps",
+    evidence_text: str = "",
+):
     always_ok = (
         "_validate_parent_structural_field_completeness",
         "_validate_myth_fact_output",
@@ -71,7 +75,7 @@ def _run_general_validation(text: str, rubric_format: str = "exercise_steps"):
             text,
             rubric_format=rubric_format,
             audience="parents",
-            evidence_text=SOFT_EVIDENCE,
+            evidence_text=evidence_text or SOFT_EVIDENCE,
             topic_id="bilingualism" if rubric_format == "myth_fact" else "",
         )
 
@@ -234,6 +238,269 @@ class ParentHumanTextQualityPriorityTest(unittest.TestCase):
                     self.assertEqual(_run_general_validation(text, rubric_format), (True, "ok"))
             groq.assert_not_called()
             gemini.assert_not_called()
+
+# --- run #508: English result/status label transliterated into the Russian H1 ---
+#
+# Production run 36733568825 (#508, myth_fact, nationwide_newborn_hearing_screening)
+# published the H1 «Пас в скрининге ≠ гарантированный слух» over an English source
+# whose screening result label is `Pass`. The prompt contract already asked for a
+# natural Russian headline; the deterministic boundary was missing.
+
+SCREENING_PASS_EVIDENCE = (
+    "Newborn hearing screening reports a result of Pass or Refer at the time of the test. "
+    "A Pass result means the screening did not detect a concern at that moment. "
+    "Hearing can change later in childhood, so a Pass result does not guarantee hearing for life. "
+    "Families can keep noticing how the child reacts to quiet and loud sounds during ordinary days."
+)
+
+# Same source meaning, no English result label anywhere in the evidence.
+SCREENING_EVIDENCE_WITHOUT_LABEL = (
+    "Newborn hearing screening describes the result only at the time of the test. "
+    "Hearing can change later in childhood, so an early screening result does not settle hearing for life. "
+    "Families can keep noticing how the child reacts to quiet and loud sounds during ordinary days."
+)
+
+RUN_508_TITLE = "\u041f\u0430\u0441 \u0432 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0435 \u2260 \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0441\u043b\u0443\u0445"
+
+# Ordinary English verb uses. None of these is a result/status label, so none may
+# establish status context — «pass the ball» must not make the Russian noun «пас»
+# a defect.
+ORDINARY_PASS_EVIDENCE = "Ask the child to pass the ball to a partner."
+ORDINARY_REFER_EVIDENCE = "Refer to the picture while you talk with the child."
+ORDINARY_FAILED_EVIDENCE = "Some children failed to respond to the quiet sound at first."
+
+# A legitimate Russian headline whose standalone token would match the
+# transliteration map if the evidence side were not context-aware.
+LEGITIMATE_PASS_TITLE = "\u041f\u0430\u0441 \u0434\u0440\u0443\u0433 \u0434\u0440\u0443\u0433\u0443: \u0438\u0433\u0440\u0430 \u0441\u043e \u0441\u043b\u043e\u0432\u0430\u043c\u0438"
+
+
+def _titled(title: str) -> str:
+    """A post whose first line is the headline under test."""
+    return (
+        title
+        + "\n\n\u0421\u043a\u0440\u0438\u043d\u0438\u043d\u0433 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438."
+    )
+
+
+class ParentTitleStatusLabelContractTest(unittest.TestCase):
+    """Deterministic H1 boundary for untranslated English result/status labels."""
+
+    def test_run_508_incident_title_rejects_with_exact_reason(self):
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(
+                _titled(RUN_508_TITLE), SCREENING_PASS_EVIDENCE
+            ),
+            (False, "parent_title_untranslated_status_label"),
+        )
+
+    def test_incident_reaches_parent_validation_path_with_exact_reason(self):
+        """The validator is wired into the parent `_validate_output()` chain."""
+        self.assertEqual(
+            _run_general_validation(
+                _long_parent_text("") .replace(
+                    "\u0421\u043f\u043e\u043a\u043e\u0439\u043d\u0430\u044f \u0438\u0433\u0440\u0430 \u0432\u043e \u0432\u0440\u0435\u043c\u044f \u043e\u0431\u044b\u0447\u043d\u043e\u0433\u043e \u0434\u043d\u044f",
+                    RUN_508_TITLE,
+                    1,
+                ),
+                evidence_text=SCREENING_PASS_EVIDENCE,
+            ),
+            (False, "parent_title_untranslated_status_label"),
+        )
+
+    def test_natural_russian_titles_pass(self):
+        """Any natural Russian wording is accepted; no specific phrase required."""
+        for title in (
+            "\u041f\u0440\u043e\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433 \u2260 \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0441\u043b\u0443\u0445",
+            "\u0421\u043a\u0440\u0438\u043d\u0438\u043d\u0433 \u043f\u0440\u043e\u0439\u0434\u0435\u043d, \u043d\u043e \u0441\u043b\u0443\u0445 \u0441\u0442\u043e\u0438\u0442 \u043d\u0430\u0431\u043b\u044e\u0434\u0430\u0442\u044c \u0438 \u0434\u0430\u043b\u044c\u0448\u0435",
+            "\u0423\u0441\u043f\u0435\u0448\u043d\u044b\u0439 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0430 \u043d\u0435 \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430",
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(
+                    llm._validate_parent_title_status_label_output(
+                        _titled(title), SCREENING_PASS_EVIDENCE
+                    ),
+                    (True, "ok"),
+                )
+
+    def test_visible_latin_citation_of_the_label_is_not_flagged(self):
+        """A quoted English label is a visible citation, not Russian vocabulary."""
+        title = "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u00abPass\u00bb \u043d\u0435 \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u0443\u0435\u0442 \u0441\u043b\u0443\u0445 \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430"
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(_titled(title), SCREENING_PASS_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_label_absent_from_evidence_does_not_flag(self):
+        """Both halves of the conjunction are required."""
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(
+                _titled(RUN_508_TITLE), SCREENING_EVIDENCE_WITHOUT_LABEL
+            ),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(_titled(RUN_508_TITLE), ""),
+            (True, "ok"),
+        )
+
+    def test_legitimate_titles_are_not_false_positives(self):
+        """Abbreviations, proper names, accepted terms and same-prefix words."""
+        for title in (
+            # abbreviations
+            "\u0412\u041e\u0417 \u0438 \u0414\u0426\u041f: \u0447\u0442\u043e \u0432\u0430\u0436\u043d\u043e \u0437\u043d\u0430\u0442\u044c \u0440\u043e\u0434\u0438\u0442\u0435\u043b\u044f\u043c",
+            # accepted technical term
+            "\u041e\u0442\u043e\u0430\u043a\u0443\u0441\u0442\u0438\u0447\u0435\u0441\u043a\u0430\u044f \u044d\u043c\u0438\u0441\u0441\u0438\u044f: \u0447\u0442\u043e \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433",
+            # ordinary words that merely begin with a transliterated stem
+            "\u041f\u0430\u0441\u043f\u043e\u0440\u0442 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f: \u0437\u0430\u0447\u0435\u043c \u043d\u0443\u0436\u0435\u043d \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433 \u0441\u043b\u0443\u0445\u0430",
+            "\u041f\u0430\u0441\u0445\u0430, \u0433\u043e\u0441\u0442\u0438 \u0438 \u0448\u0443\u043c: \u043a\u0430\u043a \u0441\u043b\u044b\u0448\u0438\u0442 \u043c\u0430\u043b\u044b\u0448",
+            "\u0420\u0435\u0444\u0435\u0440\u0430\u0442 \u0432\u0440\u0430\u0447\u0430: \u043a\u0430\u043a \u0447\u0438\u0442\u0430\u0442\u044c \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0430",
+            # proper name
+            "\u041f\u0430\u0441\u0442\u0435\u0440\u043d\u0430\u043a \u0438 \u043a\u043d\u0438\u0433\u0438: \u043a\u0430\u043a \u0441\u043b\u0443\u0448\u0430\u0435\u0442 \u043c\u0430\u043b\u044b\u0448",
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(
+                    llm._validate_parent_title_status_label_output(
+                        _titled(title), SCREENING_PASS_EVIDENCE
+                    ),
+                    (True, "ok"),
+                )
+
+    def test_ordinary_pass_verb_does_not_flag_legitimate_russian_noun(self):
+        """«pass the ball» is a verb; «Пас друг другу» is legitimate Russian."""
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(
+                _titled(LEGITIMATE_PASS_TITLE), ORDINARY_PASS_EVIDENCE
+            ),
+            (True, "ok"),
+        )
+        self.assertFalse(llm._evidence_uses_status_label(ORDINARY_PASS_EVIDENCE, "pass"))
+
+    def test_ordinary_refer_construction_does_not_establish_status_context(self):
+        """`рефер` is no Russian word, so the evidence-side helper is tested."""
+        self.assertFalse(llm._evidence_uses_status_label(ORDINARY_REFER_EVIDENCE, "refer"))
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "Refer to the article for more examples of early words.", "refer"
+            )
+        )
+        # Referring a child onward is an action, not a reported status label.
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "You can refer the child for further testing if you are worried.", "refer"
+            )
+        )
+
+    def test_ordinary_failed_use_does_not_establish_status_context(self):
+        self.assertFalse(llm._evidence_uses_status_label(ORDINARY_FAILED_EVIDENCE, "failed"))
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "If the child fails to answer, wait and try again later.", "fail"
+            )
+        )
+
+    def test_status_context_requires_an_outcome_construction(self):
+        """Only the explicit status/result constructions count."""
+        for evidence, label in (
+            ("Newborn hearing screening reports a result of Pass or Refer.", "pass"),
+            ("Newborn hearing screening reports a result of Pass or Refer.", "refer"),
+            ("A Pass result means the screening found no concern that day.", "pass"),
+            ("The screening result was Fail, so testing continued.", "fail"),
+            ("Screening status: Refer. The family was contacted.", "refer"),
+            ("The hospital returned a Pass status for the newborn.", "pass"),
+        ):
+            with self.subTest(evidence=evidence, label=label):
+                self.assertTrue(llm._evidence_uses_status_label(evidence, label))
+        # A sibling slot accepts only known labels, never arbitrary words.
+        self.assertFalse(
+            llm._evidence_uses_status_label(
+                "A result of a screening or refer to a specialist when unsure.", "refer"
+            )
+        )
+
+    def test_boundary_generalizes_beyond_the_incident_label(self):
+        """Not a one-off `Пас` rule: other outcome labels and inflections too."""
+        cases = (
+            (
+                "Some programmes report a Refer result that means further testing is needed.",
+                "\u0420\u0435\u0444\u0435\u0440 \u0432 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0435: \u0447\u0442\u043e \u0434\u0435\u043b\u0430\u0442\u044c \u0440\u043e\u0434\u0438\u0442\u0435\u043b\u044f\u043c",
+            ),
+            (
+                # A genuine status label, not the ordinary verb "fail".
+                "The screening result was Fail, and a full diagnostic assessment was scheduled.",
+                "\u0424\u0435\u0439\u043b \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0430 \u043f\u0443\u0433\u0430\u0435\u0442 \u0440\u043e\u0434\u0438\u0442\u0435\u043b\u0435\u0439",
+            ),
+            (
+                SCREENING_PASS_EVIDENCE,
+                "\u041f\u043e\u0441\u043b\u0435 \u043f\u0430\u0441\u0430 \u0432 \u0441\u043a\u0440\u0438\u043d\u0438\u043d\u0433\u0435 \u0441\u043b\u0443\u0445 \u043c\u043e\u0436\u0435\u0442 \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c\u0441\u044f",
+            ),
+        )
+        for evidence, title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(
+                    llm._validate_parent_title_status_label_output(_titled(title), evidence),
+                    (False, "parent_title_untranslated_status_label"),
+                )
+
+    def test_only_the_headline_line_is_scanned(self):
+        natural = "\u0421\u043a\u0440\u0438\u043d\u0438\u043d\u0433 \u043f\u0440\u043e\u0439\u0434\u0435\u043d, \u043d\u043e \u0441\u043b\u0443\u0445 \u0441\u0442\u043e\u0438\u0442 \u043d\u0430\u0431\u043b\u044e\u0434\u0430\u0442\u044c"
+        body_has_label = natural + "\n\n\u0412 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0435 \u044d\u0442\u043e\u0442 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u043d\u0430\u0437\u0432\u0430\u043d \u043f\u0430\u0441."
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(body_has_label, SCREENING_PASS_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_phoneme_notation_contract_is_unchanged(self):
+        """`parent_ambiguous_latin_phoneme` semantics stay exactly as before."""
+        latin_phoneme = (
+            "\u0418\u0433\u0440\u0430 \u0441\u043e \u0437\u0432\u0443\u043a\u0430\u043c\u0438\n"
+            "\u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0432\u0443\u043a /p/ \u0432\u043c\u0435\u0441\u0442\u0435 \u0441 \u0440\u0435\u0431\u0435\u043d\u043a\u043e\u043c."
+        )
+        self.assertEqual(
+            llm._validate_parent_russian_phoneme_notation_output(latin_phoneme),
+            (False, "parent_ambiguous_latin_phoneme"),
+        )
+        # The new H1 guard does not take over the phoneme contract.
+        self.assertEqual(
+            llm._validate_parent_title_status_label_output(latin_phoneme, SCREENING_PASS_EVIDENCE),
+            (True, "ok"),
+        )
+
+    def test_reason_uses_the_existing_single_repair_mechanism(self):
+        self.assertIn(
+            "parent_title_untranslated_status_label", llm.PARENT_CONTENT_REPAIR_REASONS
+        )
+        instruction = llm._parent_content_repair_instruction(
+            "parent_title_untranslated_status_label"
+        )
+        self.assertEqual(instruction, llm.PARENT_TITLE_STATUS_LABEL_REPAIR_INSTRUCTION)
+        self.assertNotEqual(instruction, llm.PARENT_CONTENT_REPAIR_INSTRUCTION)
+
+    def test_myth_fact_safeguards_are_not_weakened(self):
+        self.assertEqual(
+            set(llm.MYTH_FACT_REPAIR_REASONS),
+            {
+                "myth_missing_claim",
+                "myth_topic_mismatch",
+                "myth_unsupported_sensitive_claim",
+                "myth_unsupported_numeric_detail",
+                "myth_unsupported_phoneme_detail",
+                "myth_claim_not_grounded",
+            },
+        )
+        self.assertNotIn(
+            "parent_title_untranslated_status_label", llm.MYTH_FACT_REPAIR_REASONS
+        )
+        for name in (
+            "_validate_myth_fact_output",
+            "_validate_parent_hearing_inference_output",
+            "_validate_parent_age_evidence_output",
+            "_validate_parent_modality_fidelity_output",
+            "_validate_parent_structural_field_completeness",
+        ):
+            with self.subTest(validator=name):
+                self.assertTrue(callable(getattr(llm, name)))
+        self.assertIn("myth_fact", llm.PARENT_CONTENT_FORMATS)
+
 
 
 if __name__ == "__main__":

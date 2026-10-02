@@ -1410,5 +1410,214 @@ class QuestionWeekAgeHintScopeTest(unittest.TestCase):
         self.assertEqual(expected - present, set())
 
 
+# ---------------------------------------------------------------------------
+# Run #510 (37022604960, kidskey_speech_games, question_week) published
+# `#для_детей_25_лет`. That was never hashtag range collapse -- `2-5 лет` or
+# `2–5 лет` slugifies to `#для_детей_2_5_лет` -- and the bounded repair that
+# produced the post returned `reason=ok`. The age itself was already wrong: the
+# source's professional wording, «более 25 лет» of work with children, became
+# the evidence age anchor (300, 300), the repair hint offered it, and the
+# validator accepted «👶 Возраст: 25 лет» against it. The defect boundary is the
+# evidence-age extractor.
+# ---------------------------------------------------------------------------
+
+
+KIDSKEY_LIKE_EVIDENCE = (
+    "Логопед-дефектолог с опытом работы с детьми более 25 лет рассказывает о домашних играх. "
+    "Специалист работает с детьми более 25 лет и ведёт занятия по речевому развитию. "
+    "В игре взрослый показывает знакомый предмет, называет его и ждёт реакции ребёнка. "
+    "Дети 2-3 лет повторяют короткие слова во время такой игры. "
+) * 3
+
+PROFESSIONAL_DURATION_FORMS = (
+    "Опыт работы с детьми более 25 лет позволяет подобрать простые игры.",
+    "Опыт работы 25 лет.",
+    "Стаж — 25 лет.",
+    "Стаж работы с детьми более 25 лет.",
+    "Специалист работает с детьми более 25 лет.",
+    "Она работала 25 лет в детском саду.",
+    "A speech therapist with 25 years of experience shares home games.",
+    "She has worked with children for more than 25 years.",
+    "25 years working with children shaped these simple games.",
+    "25 лет работы с детьми научили её простым играм.",
+)
+
+
+def _kidskey_body(age: str) -> str:
+    return (
+        "Домашние игры для речи\n"
+        f"👶 Возраст: {age}\n"
+        "❓ Вопрос недели: в какие игры играть дома для развития речи?\n"
+        "Покажите ребёнку знакомый предмет и спокойно назовите его. "
+        "Сделайте паузу и дождитесь естественной реакции ребёнка. "
+        "Повторите короткое слово во время игры ещё раз.\n"
+        "🧩 Что попробовать сегодня: назовите один знакомый предмет и подождите реакции.\n"
+        "💡 Что это дает: ребёнок чаще повторяет знакомое слово в игре.\n"
+    )
+
+
+class ProfessionalDurationAgeAnchorTest(unittest.TestCase):
+    """Run #510: an adult's work duration must not become a child-age anchor."""
+
+    # --- A: the false anchor is gone ---------------------------------------
+
+    def test_professional_duration_is_not_an_age_anchor(self):
+        anchors = llm._extract_evidence_age_ranges(KIDSKEY_LIKE_EVIDENCE)
+        self.assertNotIn((300, 300), anchors)
+        # The real child age in the same evidence is still read.
+        self.assertEqual(anchors, {(24, 36)})
+
+    def test_every_required_duration_form_is_excluded(self):
+        for sentence in PROFESSIONAL_DURATION_FORMS:
+            with self.subTest(sentence=sentence[:48]):
+                self.assertNotIn(
+                    (300, 300), llm._extract_evidence_age_ranges(sentence), sentence
+                )
+
+    def test_duration_phrase_alone_anchors_nothing_at_all(self):
+        self.assertEqual(
+            llm._extract_evidence_age_ranges(
+                "Опыт работы с детьми более 25 лет."
+            ),
+            set(),
+        )
+
+    # --- B: the repair hint never offers the work duration ------------------
+
+    def test_hint_never_offers_the_professional_duration(self):
+        hint = llm.question_week_allowed_age_instruction(KIDSKEY_LIKE_EVIDENCE)
+        self.assertIn("2-3 года", hint)
+        for forbidden in ("25 лет", "25 года", "25"):
+            self.assertNotIn(forbidden, hint, forbidden)
+
+    # --- C: the published age line fails against this evidence --------------
+
+    def test_twenty_five_years_age_line_is_not_grounded(self):
+        self.assertEqual(
+            _validate_parent_age_evidence_output(
+                _kidskey_body("25 лет"), KIDSKEY_LIKE_EVIDENCE
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+        self.assertEqual(
+            _validate_output(
+                _kidskey_body("25 лет"),
+                rubric_format="question_week",
+                audience="parents",
+                evidence_text=KIDSKEY_LIKE_EVIDENCE,
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+
+    def test_the_real_child_age_still_validates(self):
+        self.assertEqual(
+            _validate_parent_age_evidence_output(
+                _kidskey_body("2-3 года"), KIDSKEY_LIKE_EVIDENCE
+            ),
+            (True, "ok"),
+        )
+
+    # --- D: real child-age evidence is preserved ---------------------------
+
+    def test_real_child_age_evidence_is_preserved(self):
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Children 2–3 years old build phrases."),
+            {(24, 36)},
+        )
+        self.assertEqual(
+            llm._extract_evidence_age_ranges(
+                "Reading aloud with your child by 5 years of age builds narrative skills."
+            ),
+            {(60, 60)},
+        )
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("By 18 months most toddlers use single words."),
+            {(18, 18)},
+        )
+        self.assertEqual(
+            llm._extract_evidence_age_ranges(HEALTHYCHILDREN_LIKE_EVIDENCE), {(60, 60)}
+        )
+        self.assertNotIn(
+            (48, 60), llm._extract_evidence_age_ranges(HEALTHYCHILDREN_LIKE_EVIDENCE)
+        )
+
+    def test_age_marked_numbers_are_never_treated_as_durations(self):
+        for evidence, expected in (
+            ("Children aged 5 years retell stories.", {(60, 60)}),
+            ("Дети в возрасте 25 месяцев соединяют слова.", {(25, 25)}),
+            ("Логопед работает с детьми 2-3 лет каждый день.", {(24, 36)}),
+            ("Опыт показывает, что дети 3 лет повторяют слова.", {(36, 36)}),
+        ):
+            with self.subTest(evidence=evidence[:40]):
+                self.assertEqual(llm._extract_evidence_age_ranges(evidence), expected)
+
+    def test_child_noun_directly_before_the_number_stays_an_age(self):
+        """The documented edge of the exclusion, resolved toward the age.
+
+        «с детьми 25 лет» and «с детьми 2-3 лет» are the same construction, and
+        the second one really is a child age, so a child noun standing directly
+        in front of the number keeps the number an age anchor. Only an explicit
+        duration marker in between -- «с детьми более 25 лет», the wording run
+        #510's source actually used -- makes it a work duration. This keeps the
+        grammar of real child-age evidence untouched, which is the direction
+        that stays fail-closed: an age that is not anchored is rejected.
+        """
+
+        self.assertIn(
+            (300, 300),
+            llm._extract_evidence_age_ranges("Стаж работы с детьми 25 лет."),
+        )
+        self.assertNotIn(
+            (300, 300),
+            llm._extract_evidence_age_ranges("Стаж работы с детьми более 25 лет."),
+        )
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Опыт работы с детьми 2-3 лет."),
+            {(24, 36)},
+        )
+
+    # --- E: the exclusion is contextual, not a ban on the number -----------
+
+    def test_the_number_itself_is_not_globally_banned(self):
+        # Same number, same unit, no professional-duration wording: the anchor
+        # stays exactly as it is today.
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Наблюдение продолжалось 25 лет в одном регионе."),
+            {(300, 300)},
+        )
+        self.assertIn(
+            (300, 300),
+            llm._extract_evidence_age_ranges("The follow-up lasted 25 years in one region."),
+        )
+        # And the very same sentence turns into a duration only when the work
+        # wording is present.
+        self.assertNotIn(
+            (300, 300),
+            llm._extract_evidence_age_ranges("Специалист работает с детьми более 25 лет."),
+        )
+
+    def test_month_units_are_never_excluded(self):
+        self.assertEqual(
+            llm._extract_evidence_age_ranges(
+                "Опыт работы 25 лет. Дети в 25 месяцев говорят первые слова."
+            ),
+            {(25, 25)},
+        )
+
+    def test_no_numeric_ceiling_was_introduced(self):
+        # The fix is semantic context exclusion, not clipping: an ungrounded
+        # large age is rejected by the evidence rule, not by its magnitude.
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Наблюдение продолжалось 25 лет."),
+            {(300, 300)},
+        )
+        self.assertEqual(
+            _validate_parent_age_evidence_output(
+                _kidskey_body("25 лет"), "Наблюдение продолжалось 25 лет."
+            ),
+            (True, "ok"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

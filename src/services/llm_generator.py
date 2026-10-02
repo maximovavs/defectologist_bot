@@ -1003,9 +1003,132 @@ def _parse_parent_age_range(text: str) -> ParsedAgeRange | None:
     return ParsedAgeRange(None, None, raw_value)
 
 
+# A number of years can also state how long an adult has worked, and a work
+# history is not a child age. Run #510 (37022604960, kidskey_speech_games,
+# question_week) published `#для_детей_25_лет`: the source's professional
+# wording -- «более 25 лет» of work with children -- became the evidence age
+# anchor (300, 300), question_week_allowed_age_instruction() then offered that
+# tuple as an allowed age, and _validate_parent_age_evidence_output() accepted
+# «👶 Возраст: 25 лет» against the same false anchor. The deterministic hashtag
+# only mirrored an age that was already wrong, so the boundary fixed here is
+# this extractor and nothing downstream of it.
+#
+# The exclusion is deliberately local: only the number and its year unit are
+# blanked, only inside an explicit work/professional-duration construction, and
+# only when that same number is not itself marked as a child age. No other
+# occurrence of `N лет` / `N years` is suppressed, month units are never
+# touched, no numeric ceiling is applied, and the grammar that accepts real
+# child-age evidence is unchanged.
+PARENT_DURATION_YEAR_UNIT = r"(?:лет|год(?:а|ов)?|years?|yrs?\.?)"
+PARENT_DURATION_APPROXIMATOR = (
+    r"(?:более|свыше|больше|почти|около|уже|примерно|"
+    r"more\s+than|over|nearly|almost|about)"
+)
+_PARENT_DURATION_YEARS = rf"(?P<dur>(?<![\d-])\d{{1,3}}\s*{PARENT_DURATION_YEAR_UNIT})"
+# Explicit work-role and workplace wording. «Она работала логопедом 25 лет» and
+# «работает в детском саду 25 лет» are plainly work durations even without an
+# approximator, while «работает с детьми 2-3 лет» and «работает с ребёнком
+# 3 лет» are child ages, so the work context -- and nothing else -- is what may
+# stand between the work verb and the duration.
+PARENT_WORK_ROLE = (
+    r"(?:логопед\w*|дефектолог\w*|воспитател\w*|учител\w*|педагог\w*|психолог\w*|"
+    r"специалист\w*|методист\w*|преподавател\w*|репетитор\w*|нян\w*|медсестр\w*)"
+)
+PARENT_WORK_PLACE = (
+    r"(?:во?\s+(?:(?:детском|частном|государственном|коррекционном|обычном|"
+    r"этом|нашем|том)\s+)?"
+    r"(?:саду|садике|сад|школе|гимназии|лицее|интернате|поликлинике|клинике|"
+    r"больнице|центре|кабинете|логопункте)\w*)"
+)
+PARENT_WORK_CONTEXT = rf"(?:{PARENT_WORK_ROLE}|{PARENT_WORK_PLACE})"
+PARENT_PROFESSIONAL_DURATION_PATTERNS = (
+    # «Опыт работы с детьми более 25 лет», «Стаж — 25 лет», «стаж 25 лет».
+    re.compile(
+        rf"(?:опыт\w*\s+работы|стаж\w*)(?:\s+[^\s.!?]+){{0,3}}?"
+        rf"\s*(?:[-:]\s*)?(?:{PARENT_DURATION_APPROXIMATOR}\s+)?"
+        rf"{_PARENT_DURATION_YEARS}",
+        re.IGNORECASE,
+    ),
+    # «Опыт 25 лет», «опыт более 25 лет» -- the bare noun only right beside it,
+    # so «Опыт показывает, что дети 3 лет ...» is not a duration phrase.
+    re.compile(
+        rf"опыт\w*\s*(?:[-:]\s*)?(?:{PARENT_DURATION_APPROXIMATOR}\s+)?"
+        rf"{_PARENT_DURATION_YEARS}",
+        re.IGNORECASE,
+    ),
+    # «работала 25 лет», «работает с детьми более 25 лет», «работала логопедом
+    # 25 лет», «работает в детском саду 25 лет». Words may stand between the
+    # verb and the number only when the element directly in front of the
+    # duration is an explicit duration marker or explicit work-role/workplace
+    # wording, so «работает с детьми 2-3 лет» and «работает с ребёнком 3 лет»
+    # -- where the number is the child's age -- stay child-age evidence.
+    re.compile(
+        rf"работа(?:ет|ют|ю|ем|л|ла|ли)"
+        rf"(?:(?:\s+[^\s.!?]+){{0,4}}?"
+        rf"\s+(?:{PARENT_DURATION_APPROXIMATOR}|{PARENT_WORK_CONTEXT}))?"
+        rf"\s+{_PARENT_DURATION_YEARS}",
+        re.IGNORECASE,
+    ),
+    # «25 лет работы», «25 years of experience», «25 years working with children».
+    re.compile(
+        rf"{_PARENT_DURATION_YEARS}\s+(?:of\s+)?"
+        rf"(?:опыта|стажа|работы|практики|experience|practice|"
+        rf"work(?:ing|ed)?\s+(?:with|in|as))",
+        re.IGNORECASE,
+    ),
+    # «has worked with children for more than 25 years».
+    re.compile(
+        rf"(?:experience|work(?:s|ed|ing)?|practic\w*|career|taught|teaching)"
+        rf"[^.!?\n]{{0,40}}?\bfor\s+(?:{PARENT_DURATION_APPROXIMATOR}\s+)?"
+        rf"{_PARENT_DURATION_YEARS}",
+        re.IGNORECASE,
+    ),
+)
+# The same number stays a child age when it is explicitly marked as one.
+PARENT_AGE_MARKED_BEFORE_RE = re.compile(
+    r"(?:aged|age\s+of|в\s+возрасте|возраст\w*)\s*(?:от\s*|до\s*)?$",
+    re.IGNORECASE,
+)
+PARENT_AGE_MARKED_AFTER_RE = re.compile(r"\s*(?:old\b|-\s*year)", re.IGNORECASE)
+PARENT_AGE_SUBJECT_BEFORE_RE = re.compile(
+    r"(?:детьми|детей|детям|ребенка|ребенком|ребенку|малыш\w*|"
+    r"children|kids|child|toddlers?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _mask_professional_duration_years(text: str) -> str:
+    """Blank only year counts that explicitly state a professional duration.
+
+    The number and its unit are replaced by spaces, so every other character
+    and every offset is preserved and the age grammar below reads exactly the
+    text it reads today. A match is left alone when the number is explicitly
+    marked as an age instead -- "aged 5 years", «в возрасте 25 месяцев»,
+    "5-year-old" -- or when a child noun stands directly in front of it, as in
+    «с детьми 2-3 лет».
+    """
+
+    masked = list(text)
+    for pattern in PARENT_PROFESSIONAL_DURATION_PATTERNS:
+        for match in pattern.finditer(text):
+            start, end = match.span("dur")
+            before = text[max(0, start - 24):start]
+            if PARENT_AGE_MARKED_BEFORE_RE.search(before):
+                continue
+            if PARENT_AGE_SUBJECT_BEFORE_RE.search(before):
+                continue
+            if PARENT_AGE_MARKED_AFTER_RE.match(text[end:end + 12]):
+                continue
+            for index in range(start, end):
+                masked[index] = " "
+    return "".join(masked)
+
+
 def _extract_evidence_age_ranges(evidence_text: str) -> set[tuple[int, int]]:
     normalized = (evidence_text or "").lower().replace("ё", "е")
     normalized = re.sub(r"[‐‑‒–—−]", "-", normalized)
+    # An adult's work duration is not a child age; only that phrase is blanked.
+    normalized = _mask_professional_duration_years(normalized)
     ranges: set[tuple[int, int]] = set()
     masked = list(normalized)
     range_pattern = re.compile(

@@ -1436,6 +1436,10 @@ PROFESSIONAL_DURATION_FORMS = (
     "Стаж работы с детьми более 25 лет.",
     "Специалист работает с детьми более 25 лет.",
     "Она работала 25 лет в детском саду.",
+    "Она работала в детском саду 25 лет.",
+    "Она работала логопедом 25 лет.",
+    "Специалист работает в детском саду 25 лет.",
+    "Она работает логопедом в детском саду 25 лет.",
     "A speech therapist with 25 years of experience shares home games.",
     "She has worked with children for more than 25 years.",
     "25 years working with children shaped these simple games.",
@@ -1574,6 +1578,47 @@ class ProfessionalDurationAgeAnchorTest(unittest.TestCase):
         self.assertEqual(
             llm._extract_evidence_age_ranges("Опыт работы с детьми 2-3 лет."),
             {(24, 36)},
+        )
+
+    def test_work_role_or_workplace_may_stand_before_the_duration(self):
+        """Review of PR #86 found this gap: an approximator was required.
+
+        The first version let words stand between «работала/работает» and the
+        duration only behind «более»/«свыше»/..., so plain professional wording
+        with a role or a workplace in between still produced the false anchor
+        (300, 300). The element directly in front of the duration may now be
+        explicit work-role or workplace wording instead.
+        """
+
+        for sentence in (
+            "Она работала в детском саду 25 лет.",
+            "Она работала логопедом 25 лет.",
+            "Специалист работает в детском саду 25 лет.",
+            "Она работает логопедом в детском саду 25 лет.",
+            "Дефектолог работает в поликлинике 25 лет.",
+            "Она работала в школе 25 лет.",
+        ):
+            with self.subTest(sentence=sentence):
+                anchors = llm._extract_evidence_age_ranges(sentence)
+                self.assertNotIn((300, 300), anchors, sentence)
+                self.assertEqual(anchors, set(), sentence)
+
+    def test_child_age_after_the_work_verb_is_still_child_age(self):
+        """The contrasts that keep this from being blanket verb masking."""
+
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Логопед работает с детьми 2-3 лет каждый день."),
+            {(24, 36)},
+        )
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Логопед работает с ребёнком 3 лет."),
+            {(36, 36)},
+        )
+        # The work context must stand directly in front of the duration, so a
+        # role followed by a child object leaves the number a child age.
+        self.assertEqual(
+            llm._extract_evidence_age_ranges("Логопед работает учителем с детьми 3 лет."),
+            {(36, 36)},
         )
 
     # --- E: the exclusion is contextual, not a ban on the number -----------

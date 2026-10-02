@@ -1025,6 +1025,22 @@ PARENT_DURATION_APPROXIMATOR = (
     r"more\s+than|over|nearly|almost|about)"
 )
 _PARENT_DURATION_YEARS = rf"(?P<dur>(?<![\d-])\d{{1,3}}\s*{PARENT_DURATION_YEAR_UNIT})"
+# Explicit work-role and workplace wording. «Она работала логопедом 25 лет» and
+# «работает в детском саду 25 лет» are plainly work durations even without an
+# approximator, while «работает с детьми 2-3 лет» and «работает с ребёнком
+# 3 лет» are child ages, so the work context -- and nothing else -- is what may
+# stand between the work verb and the duration.
+PARENT_WORK_ROLE = (
+    r"(?:логопед\w*|дефектолог\w*|воспитател\w*|учител\w*|педагог\w*|психолог\w*|"
+    r"специалист\w*|методист\w*|преподавател\w*|репетитор\w*|нян\w*|медсестр\w*)"
+)
+PARENT_WORK_PLACE = (
+    r"(?:во?\s+(?:(?:детском|частном|государственном|коррекционном|обычном|"
+    r"этом|нашем|том)\s+)?"
+    r"(?:саду|садике|сад|школе|гимназии|лицее|интернате|поликлинике|клинике|"
+    r"больнице|центре|кабинете|логопункте)\w*)"
+)
+PARENT_WORK_CONTEXT = rf"(?:{PARENT_WORK_ROLE}|{PARENT_WORK_PLACE})"
 PARENT_PROFESSIONAL_DURATION_PATTERNS = (
     # «Опыт работы с детьми более 25 лет», «Стаж — 25 лет», «стаж 25 лет».
     re.compile(
@@ -1040,12 +1056,16 @@ PARENT_PROFESSIONAL_DURATION_PATTERNS = (
         rf"{_PARENT_DURATION_YEARS}",
         re.IGNORECASE,
     ),
-    # «работала 25 лет», «работает с детьми более 25 лет». Words may stand
-    # between the verb and the number only behind an explicit duration marker,
-    # so «работает с детьми 2-3 лет» stays a child age.
+    # «работала 25 лет», «работает с детьми более 25 лет», «работала логопедом
+    # 25 лет», «работает в детском саду 25 лет». Words may stand between the
+    # verb and the number only when the element directly in front of the
+    # duration is an explicit duration marker or explicit work-role/workplace
+    # wording, so «работает с детьми 2-3 лет» and «работает с ребёнком 3 лет»
+    # -- where the number is the child's age -- stay child-age evidence.
     re.compile(
         rf"работа(?:ет|ют|ю|ем|л|ла|ли)"
-        rf"(?:(?:\s+[^\s.!?]+){{0,4}}?\s+{PARENT_DURATION_APPROXIMATOR})?"
+        rf"(?:(?:\s+[^\s.!?]+){{0,4}}?"
+        rf"\s+(?:{PARENT_DURATION_APPROXIMATOR}|{PARENT_WORK_CONTEXT}))?"
         rf"\s+{_PARENT_DURATION_YEARS}",
         re.IGNORECASE,
     ),

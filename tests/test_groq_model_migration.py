@@ -129,12 +129,16 @@ def test_gemini_primary_unavailable_attempts_fallback_without_legacy_sampling() 
         assert "top_k" not in payload
 
 
-def test_workflow_uses_gemini_37_with_25_fallback() -> None:
+def test_workflow_uses_gemini_37_text_primary_and_25_visual_qa_primary() -> None:
     workflow = (ROOT / ".github/workflows/post.yml").read_text(encoding="utf-8")
-    assert 'GEMINI_MODEL: "gemini-3.7-flash"' in workflow
-    assert 'GEMINI_FALLBACK_MODEL: "gemini-2.5-flash"' in workflow
-    assert 'GEMINI_MODELS: "gemini-3.7-flash,gemini-2.5-flash"' in workflow
-    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"' in workflow
+    # Text generation: gemini-3.7-flash primary with gemini-2.5-flash fallback.
+    assert f'GEMINI_MODEL: "{GEMINI_PRIMARY_MODEL}"' in workflow
+    assert f'GEMINI_FALLBACK_MODEL: "{GEMINI_FALLBACK_MODEL}"' in workflow
+    assert f'GEMINI_MODELS: "{GEMINI_PRIMARY_MODEL},{GEMINI_FALLBACK_MODEL}"' in workflow
+    # Visual QA: gemini-2.5-flash for both slots, independent of text routing.
+    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-2.5-flash"' in workflow
+    assert 'GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-2.5-flash"' in workflow
+    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"' not in workflow
 
 
 def test_primary_failure_attempts_fallback_model() -> None:
@@ -247,7 +251,7 @@ def main() -> None:
         test_default_groq_model_config,
         test_default_gemini_model_config,
         test_gemini_primary_unavailable_attempts_fallback_without_legacy_sampling,
-        test_workflow_uses_gemini_37_with_25_fallback,
+        test_workflow_uses_gemini_37_text_primary_and_25_visual_qa_primary,
         test_primary_failure_attempts_fallback_model,
         test_both_groq_models_fail_without_crashing_generation,
     ]

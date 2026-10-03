@@ -1,7 +1,10 @@
 from io import BytesIO
 from contextlib import redirect_stdout
 import hashlib
+import inspect
 import os
+import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 import unittest
@@ -70,6 +73,180 @@ def _object_pass():
         # watercolor/gouache illustration style.
         "illustration_style_match": True,
     }
+
+
+# A test-only visual-QA primary for the generic primary -> fallback machinery.
+# It is never the configured or default production visual-QA model.
+_EXPLICIT_TEST_PRIMARY_MODEL = "gemini-3.7-flash"
+
+
+def _use_explicit_test_primary_model(testcase, model=_EXPLICIT_TEST_PRIMARY_MODEL):
+    """Configure an explicit two-model visual-QA ladder for one test.
+
+    The production defaults are gemini-2.5-flash for both slots and dedupe to a
+    single model, which leaves the generic ladder and the per-build circuit with
+    nothing to fall back to. Those tests drive `build_post_visual`, whose call
+    sites rely on `evaluate_visual_quality`'s `model` default, so this sets that
+    default, the configured primary the circuit compares against, and the
+    fallback slot -- and restores all three when the test ends.
+    """
+
+    function = visual_pipeline.evaluate_visual_quality
+    names = list(inspect.signature(function).parameters)
+    original_defaults = function.__defaults__
+    defaults = list(original_defaults)
+    defaults[names.index("model") - (len(names) - len(defaults))] = model
+    function.__defaults__ = tuple(defaults)
+    testcase.addCleanup(setattr, function, "__defaults__", original_defaults)
+    for attribute, value in (
+        ("GEMINI_VISUAL_QA_MODEL", model),
+        ("GEMINI_VISUAL_QA_FALLBACK_MODEL", DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL),
+    ):
+        patcher = patch.object(visual_pipeline, attribute, value)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+
+
+class VisualQAPrimaryModelContractTest(unittest.TestCase):
+    """Visual QA runs on gemini-2.5-flash; text-generation Gemini is separate.
+
+    Natural schedule runs #497-#501 and #507-#511: the gemini-3.7-flash
+    visual-QA primary made 10 calls and returned 0 usable verdicts (8 x http_503,
+    2 x timeout); gemini-2.5-flash on the general-key path returned 25 usable
+    semantic verdicts from 32 HTTP attempts.
+    """
+
+    def _urls(self, request):
+        return [call.args[0] for call in request.call_args_list]
+
+    def _keys(self, request):
+        return [call.kwargs["headers"]["x-goog-api-key"] for call in request.call_args_list]
+
+    def test_default_primary_and_fallback_models_are_25(self):
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-2.5-flash")
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL, "gemini-2.5-flash")
+
+    def test_default_candidates_dedupe_to_a_single_25_model(self):
+        self.assertEqual(_visual_qa_model_candidates(), ("gemini-2.5-flash",))
+
+    def test_default_request_targets_25_with_structured_json_payload(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
+            "src.services.visual_pipeline.requests.post", return_value=_qa_response(200)
+        ) as request:
+            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(
+            self._urls(request),
+            ["https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"],
+        )
+        generation_config = request.call_args.kwargs["json"]["generationConfig"]
+        self.assertEqual(generation_config, {"responseMimeType": "application/json"})
+        for legacy in ("temperature", "topP", "topK"):
+            self.assertNotIn(legacy, generation_config)
+
+    def _resolve_in_fresh_process(self, extra_env):
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+            "ALL_PROXY": "http://127.0.0.1:9",
+            **extra_env,
+        }
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import src.services.visual_pipeline as vp; "
+                "print(vp.GEMINI_VISUAL_QA_MODEL); "
+                "print(','.join(vp._visual_qa_model_candidates()))",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return proc.stdout.strip().splitlines()[-2:]
+
+    def test_visual_primary_does_not_inherit_text_gemini_model(self):
+        # Production sets GEMINI_MODEL=gemini-3.7-flash for text generation; on
+        # its own that must not restore 3.7 as the visual-QA primary.
+        self.assertEqual(
+            self._resolve_in_fresh_process({"GEMINI_MODEL": "gemini-3.7-flash"}),
+            ["gemini-2.5-flash", "gemini-2.5-flash"],
+        )
+
+    def test_explicit_visual_primary_env_is_still_honoured(self):
+        self.assertEqual(
+            self._resolve_in_fresh_process(
+                {"GEMINI_MODEL": "gemini-2.5-flash", "GEMINI_VISUAL_QA_MODEL": "gemini-3.7-flash"}
+            ),
+            ["gemini-3.7-flash", "gemini-3.7-flash,gemini-2.5-flash"],
+        )
+
+    def test_single_model_timeout_uses_the_existing_next_key_fallback(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", gemini_api_key="VISUAL_SECRET"
+            )
+
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(self._urls(request), [url, url])
+        self.assertEqual(self._keys(request), ["GENERAL_SECRET", "VISUAL_SECRET"])
+        self.assertEqual(result["human_qa_key_attempts"], "2")
+        self.assertEqual(result["human_qa_key_fallback_used"], "True")
+        self.assertEqual(result["human_qa_key_fallback_trigger"], "timeout")
+
+    def test_single_model_503_uses_the_existing_next_key_fallback(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[_qa_response(503), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", gemini_api_key="VISUAL_SECRET"
+            )
+
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(self._urls(request), [url, url])
+        self.assertEqual(self._keys(request), ["GENERAL_SECRET", "VISUAL_SECRET"])
+        self.assertEqual(result["human_qa_key_fallback_trigger"], "http_503")
+
+    def test_single_model_failure_on_both_keys_stays_bounded_and_unaccepted(self):
+        with patch.dict(
+            os.environ,
+            {"GEMINI_VISUAL_QA_API_KEY": "VISUAL_SECRET", "GEMINI_API_KEY": "GENERAL_SECRET"},
+            clear=True,
+        ), patch(
+            "src.services.visual_pipeline.requests.post",
+            side_effect=[requests.Timeout(), requests.Timeout(), _qa_response(200)],
+        ) as request:
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", gemini_api_key="VISUAL_SECRET"
+            )
+
+        # Two requests at most, never a third, and no verdict is invented: the
+        # existing unavailable result is returned for the fail-closed ladder.
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "qa_timeout")
 
 
 class VisualFallbackPolicyTest(unittest.TestCase):
@@ -151,16 +328,17 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         fallback.assert_called_once()
         self.assertEqual(fallback.call_args.kwargs["title"], title)
 
-    def test_gemini_37_visual_qa_payload_omits_legacy_sampling_controls(self):
+    def test_default_visual_qa_targets_25_and_omits_legacy_sampling_controls(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
             "src.services.visual_pipeline.requests.post", return_value=_qa_response(200)
         ) as request:
             result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
 
-        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-3.7-flash")
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-2.5-flash")
         self.assertEqual(result["status"], "pass")
+        self.assertEqual(request.call_count, 1)
         self.assertIn(
-            "/models/gemini-3.7-flash:generateContent",
+            "/models/gemini-2.5-flash:generateContent",
             request.call_args.args[0],
         )
         generation_config = request.call_args.kwargs["json"]["generationConfig"]
@@ -169,7 +347,9 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertNotIn("topP", generation_config)
         self.assertNotIn("topK", generation_config)
 
-    def test_gemini_visual_qa_uses_25_fallback_when_primary_model_is_unavailable(self):
+    def test_generic_model_fallback_uses_25_when_an_explicit_37_primary_is_unavailable(self):
+        # 3.7 is an explicit test model here, not the configured visual-QA
+        # primary: this covers the generic primary -> fallback machinery only.
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
             "src.services.visual_pipeline.requests.post",
             side_effect=[
@@ -177,12 +357,13 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 _qa_response(200),
             ],
         ) as request:
-            result = evaluate_visual_quality(BytesIO(b"image"), rubric_id="tip_of_day")
+            result = evaluate_visual_quality(
+                BytesIO(b"image"), rubric_id="tip_of_day", model=_EXPLICIT_TEST_PRIMARY_MODEL
+            )
 
-        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-3.7-flash")
         self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL, "gemini-2.5-flash")
         self.assertEqual(
-            _visual_qa_model_candidates(),
+            _visual_qa_model_candidates(_EXPLICIT_TEST_PRIMARY_MODEL),
             ("gemini-3.7-flash", "gemini-2.5-flash"),
         )
         self.assertEqual(result["status"], "pass")
@@ -213,6 +394,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 BytesIO(b"image"),
                 rubric_id="tip_of_day",
                 gemini_api_key="VISUAL_SECRET",
+                model=_EXPLICIT_TEST_PRIMARY_MODEL,
             )
 
         self.assertEqual(result["status"], "pass")
@@ -244,6 +426,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 BytesIO(b"image"),
                 rubric_id="tip_of_day",
                 gemini_api_key="VISUAL_SECRET",
+                model=_EXPLICIT_TEST_PRIMARY_MODEL,
             )
 
         urls = [call.args[0] for call in request.call_args_list]
@@ -265,16 +448,19 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(keys, ["GENERAL_SECRET", "GENERAL_SECRET", "VISUAL_SECRET"])
         self.assertEqual(len(pairs), len(set(pairs)))
 
-    def test_gemini_visual_qa_workflow_pins_primary_and_fallback_models(self):
+    def test_gemini_visual_qa_workflow_pins_25_primary_and_fallback_models(self):
         workflow = (
             Path(__file__).resolve().parents[1] / ".github/workflows/post.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"', workflow)
+        self.assertIn('GEMINI_VISUAL_QA_MODEL: "gemini-2.5-flash"', workflow)
+        self.assertNotIn('GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"', workflow)
         self.assertIn(
             'GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-2.5-flash"',
             workflow,
         )
+        # Text generation keeps its own Gemini routing.
+        self.assertIn('GEMINI_MODEL: "gemini-3.7-flash"', workflow)
 
     def test_gemini_human_qa_prompt_requires_character_roles_match_and_exact_child_age(self):
         expected = (
@@ -676,6 +862,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 BytesIO(b"image"),
                 rubric_id="tip_of_day",
                 gemini_api_key="VISUAL_SECRET",
+                model=_EXPLICIT_TEST_PRIMARY_MODEL,
             )
 
         urls = [call.args[0] for call in request.call_args_list]
@@ -707,6 +894,7 @@ class VisualFallbackPolicyTest(unittest.TestCase):
                 BytesIO(b"image"),
                 rubric_id="tip_of_day",
                 gemini_api_key="VISUAL_SECRET",
+                model=_EXPLICIT_TEST_PRIMARY_MODEL,
             )
 
         urls = [call.args[0] for call in request.call_args_list]
@@ -1318,6 +1506,12 @@ class VisualFallbackLadderTest(unittest.TestCase):
 
 
 
+# Production visual QA runs on gemini-2.5-flash for both the primary and the
+# fallback slot, so the defaults dedupe to one model. The primary -> fallback
+# ladder and the per-build circuit are generic machinery and stay covered by
+# configuring gemini-3.7-flash EXPLICITLY as a test-only primary. That never
+# makes 3.7 the configured or default visual-QA model: see
+# VisualQAPrimaryModelContractTest for the production contract.
 _PRIMARY_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent"
 _FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
@@ -1348,7 +1542,14 @@ def _qa_fail_response(reason):
 
 
 class VisualQABuildCircuitTest(unittest.TestCase):
-    """Per-build circuit breaker for the primary visual QA model."""
+    """Per-build circuit breaker for the primary visual QA model.
+
+    Runs against an explicit two-model ladder (`_use_explicit_test_primary_model`)
+    because the production defaults now dedupe to a single 2.5 model.
+    """
+
+    def setUp(self):
+        _use_explicit_test_primary_model(self)
 
     def _urls(self, request):
         return [call.args[0] for call in request.call_args_list]
@@ -1681,8 +1882,10 @@ class VisualQABuildCircuitTest(unittest.TestCase):
         self.assertEqual(meta["object_generation_status"], "rejected")
 
     def test_model_ids_and_order_remain_unchanged(self):
-        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-3.7-flash")
+        # Production defaults: visual QA runs on 2.5 for both slots.
+        self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_MODEL, "gemini-2.5-flash")
         self.assertEqual(DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL, "gemini-2.5-flash")
+        # Generic ladder order under the explicit test primary is unchanged.
         self.assertEqual(
             _visual_qa_model_candidates(), ("gemini-3.7-flash", "gemini-2.5-flash")
         )
@@ -1770,6 +1973,9 @@ class VisualQABuildCircuitIntegrationTest(unittest.TestCase):
     `_build_circuit` argument at any call site shows up as a repeated
     primary-model request.
     """
+
+    def setUp(self):
+        _use_explicit_test_primary_model(self)
 
     def _urls(self, request):
         return [call.args[0] for call in request.call_args_list]

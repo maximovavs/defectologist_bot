@@ -51,17 +51,22 @@ POLLINATIONS_NEAR_ASPECT_TOLERANCE = 0.08
 # Visual QA routinely needs more than the old 12-second budget on GitHub-hosted runners.
 # Keep this independently overridable, but use a safer default for production.
 GEMINI_VISUAL_QA_TIMEOUT_SECONDS = _env_int("GEMINI_VISUAL_QA_TIMEOUT_SECONDS", 25)
-# Visual QA runs on gemini-2.5-flash. Across natural schedule runs #497-#501 and
-# #507-#511 the former gemini-3.7-flash primary made 10 visual-QA calls and
-# returned 0 usable verdicts (8 x http_503, 2 x timeout), while gemini-2.5-flash
-# on the same general-key path returned 25 usable semantic verdicts from 32 HTTP
-# attempts. The visual-QA primary is configured only by GEMINI_VISUAL_QA_MODEL
-# or this default: it deliberately does not inherit the text-generation
-# GEMINI_MODEL, which stays gemini-3.7-flash and would otherwise silently
-# restore the unusable primary for visual QA. The generic model-fallback
-# machinery below stays in place; with identical defaults it dedupes to one
-# model.
-DEFAULT_GEMINI_VISUAL_QA_MODEL = "gemini-2.5-flash"
+# Visual QA runs on gemini-3.8-flash with gemini-2.5-flash as the fallback.
+# Across natural schedule runs #497-#501 and #507-#511 the former
+# gemini-3.7-flash primary made 10 visual-QA calls and returned 0 usable
+# verdicts (8 x http_503, 2 x timeout), so visual QA moved to gemini-2.5-flash,
+# which returned 25 usable semantic verdicts from 32 HTTP attempts. An isolated
+# canary (run 37222929746) then sent exactly one request to gemini-3.8-flash
+# under this exact request contract -- inline image/png, generationConfig
+# {"responseMimeType": "application/json"} only, 25 s timeout, one general key
+# -- and got HTTP 200 in 4.3 s with a verdict the existing parser accepts. One
+# call proves contract compatibility, not production availability, so 2.5 stays
+# the fallback and the existing model-unavailable fallback and per-build circuit
+# still bound the cost of a 3.8 outage.
+# The visual-QA primary is configured only by GEMINI_VISUAL_QA_MODEL or this
+# default: it deliberately does not inherit the text-generation GEMINI_MODEL,
+# which stays gemini-3.7-flash.
+DEFAULT_GEMINI_VISUAL_QA_MODEL = "gemini-3.8-flash"
 DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL = "gemini-2.5-flash"
 GEMINI_VISUAL_QA_MODEL = (
     os.getenv("GEMINI_VISUAL_QA_MODEL", DEFAULT_GEMINI_VISUAL_QA_MODEL).strip()

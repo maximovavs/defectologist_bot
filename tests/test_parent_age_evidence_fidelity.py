@@ -1664,5 +1664,373 @@ class ProfessionalDurationAgeAnchorTest(unittest.TestCase):
         )
 
 
+
+# ---------------------------------------------------------------------------
+# Run #512 (37208362471, age_norms): «👶 Возраст: раннее детство», «повторяет
+# простые команды», and an H1 promising «простые фразы» over a body with no
+# phrase milestone. The Sunday prompt asked for an age range; the deterministic
+# contract did not enforce one, nor the command relation, nor title/body
+# alignment. These checks are age_norms-only.
+# ---------------------------------------------------------------------------
+
+
+AGE_NORMS_EVIDENCE = (
+    "By 2 years of age, many children put two words together, such as \"more milk\" or \"daddy go\". "
+    "At 2 years, children often point to things or pictures when they are named. "
+    "Many children at 2 years follow simple instructions, such as \"pick up the toy\". "
+    "Every child develops at their own pace, and parents can notice these skills during everyday play and reading. "
+) * 2
+
+AGE_NORMS_COHERENT_CARD = (
+    "Какие простые фразы часто появляются к 2 годам\n"
+    "👶 Возраст: 2 года\n"
+    "Ориентиры: соединяет два слова в короткую фразу; показывает знакомые картинки, когда их называют; "
+    "выполняет простую просьбу.\n"
+    "Ближе к 2 годам ребенок часто начинает соединять два слова, например «ещё молоко». "
+    "Ребенок может показать знакомую картинку, когда взрослый ее называет. "
+    "Каждый ребенок развивается индивидуально.\n"
+    "🏠 Что можно понаблюдать дома:\n"
+    "Во время чтения назовите знакомую картинку и посмотрите, покажет ли ее ребенок.\n"
+    "💡 Что это дает: родитель заметит, показывает ли ребенок знакомую картинку, когда ее называют.\n"
+    "Источник: cdc.gov\n"
+    "🔗 https://www.cdc.gov/milestones\n"
+)
+
+
+def _age_norms_card_without_phrase_milestone(card: str = AGE_NORMS_COHERENT_CARD) -> str:
+    return (
+        card.replace(
+            "Какие простые фразы часто появляются к 2 годам",
+            "Какие слова и простые фразы обычно появляются у малышей",
+        )
+        .replace("соединяет два слова в короткую фразу; ", "")
+        .replace(
+            "Ближе к 2 годам ребенок часто начинает соединять два слова, например «ещё молоко». ",
+            "",
+        )
+    )
+
+
+AGE_NORMS_DESCRIPTIVE_AGE_CARD = AGE_NORMS_COHERENT_CARD.replace(
+    "👶 Возраст: 2 года", "👶 Возраст: раннее детство"
+)
+AGE_NORMS_REPEAT_COMMANDS_CARD = AGE_NORMS_COHERENT_CARD.replace(
+    "выполняет простую просьбу", "повторяет простые команды"
+)
+AGE_NORMS_TITLE_BODY_MISMATCH_CARD = _age_norms_card_without_phrase_milestone()
+# All three #512 defects in one card, as published.
+RUN_512_SHAPED_CARD = (
+    _age_norms_card_without_phrase_milestone()
+    .replace("👶 Возраст: 2 года", "👶 Возраст: раннее детство")
+    .replace("выполняет простую просьбу", "повторяет простые команды")
+)
+
+
+def _validate_age_norms(text, evidence=AGE_NORMS_EVIDENCE):
+    return _validate_output(
+        text,
+        day_key="SU",
+        rubric_format="age_norms",
+        audience="parents",
+        evidence_text=evidence,
+    )
+
+
+class AgeNormsEditorialCoherenceTest(unittest.TestCase):
+    # --- A: numeric age, age_norms only -----------------------------------
+
+    def test_descriptive_age_early_childhood_is_rejected(self):
+        self.assertEqual(
+            _validate_age_norms(AGE_NORMS_DESCRIPTIVE_AGE_CARD),
+            (False, "sunday_age_not_numeric"),
+        )
+
+    def test_descriptive_age_preschool_is_rejected(self):
+        self.assertEqual(
+            _validate_age_norms(
+                AGE_NORMS_COHERENT_CARD.replace("👶 Возраст: 2 года", "👶 Возраст: дошкольный")
+            ),
+            (False, "sunday_age_not_numeric"),
+        )
+
+    def test_other_parent_rubrics_keep_descriptive_age_fail_open(self):
+        evidence = _long_evidence("2–3 years")
+        descriptive = VALID_OUTPUT.replace("2–3 года", "раннее детство")
+        # The generic age-evidence check is unchanged.
+        self.assertEqual(
+            _validate_parent_age_evidence_output(descriptive, evidence), (True, "ok")
+        )
+        for rubric_format in ("games_vocab", "exercise_steps"):
+            with self.subTest(rubric_format=rubric_format):
+                self.assertEqual(
+                    _validate_output(
+                        VALID_OUTPUT,
+                        rubric_format=rubric_format,
+                        audience="parents",
+                        evidence_text=evidence,
+                    ),
+                    (True, "ok"),
+                )
+                self.assertEqual(
+                    _validate_output(
+                        descriptive,
+                        rubric_format=rubric_format,
+                        audience="parents",
+                        evidence_text=evidence,
+                    ),
+                    (True, "ok"),
+                )
+
+    def test_numeric_age_present_in_evidence_passes_the_age_gates(self):
+        self.assertEqual(llm._validate_age_norms_numeric_age(AGE_NORMS_COHERENT_CARD), (True, "ok"))
+        self.assertEqual(
+            _validate_parent_age_evidence_output(AGE_NORMS_COHERENT_CARD, AGE_NORMS_EVIDENCE),
+            (True, "ok"),
+        )
+        self.assertIn((24, 24), llm._extract_evidence_age_ranges(AGE_NORMS_EVIDENCE))
+
+    def test_unsupported_numeric_age_keeps_the_existing_grounding_reason(self):
+        self.assertEqual(
+            _validate_age_norms(
+                AGE_NORMS_COHERENT_CARD.replace("👶 Возраст: 2 года", "👶 Возраст: 3 года")
+            ),
+            (False, "parent_age_not_grounded"),
+        )
+
+    # --- B: repeat-commands relation ---------------------------------------
+
+    def test_repeats_simple_commands_is_rejected(self):
+        self.assertEqual(
+            _validate_age_norms(AGE_NORMS_REPEAT_COMMANDS_CARD),
+            (False, "sunday_repeat_commands_semantic_error"),
+        )
+
+    def test_following_or_executing_instructions_is_not_rejected(self):
+        for wording in ("выполняет простые команды", "следует простым инструкциям"):
+            with self.subTest(wording=wording):
+                self.assertEqual(
+                    _validate_age_norms(
+                        AGE_NORMS_COHERENT_CARD.replace("выполняет простую просьбу", wording)
+                    ),
+                    (True, "ok"),
+                )
+
+    def test_adult_repeating_an_instruction_is_a_different_relation(self):
+        for sentence in (
+            "Мама повторяет простую команду ещё раз.",
+            "Повторите команду спокойно и коротко.",
+            "Повторите просьбу, если ребенок не выполнил команду.",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertEqual(
+                    llm._validate_age_norms_editorial_coherence("Заголовок\n" + sentence),
+                    (True, "ok"),
+                )
+
+    # --- C: title/body phrase alignment ------------------------------------
+
+    def test_phrase_title_without_body_phrase_milestone_is_rejected(self):
+        self.assertEqual(
+            _validate_age_norms(AGE_NORMS_TITLE_BODY_MISMATCH_CARD),
+            (False, "sunday_title_body_phrase_mismatch"),
+        )
+
+    def test_phrase_title_with_body_phrase_milestone_passes(self):
+        self.assertEqual(_validate_age_norms(AGE_NORMS_COHERENT_CARD), (True, "ok"))
+        for body in ("Ориентиры: соединяет два слова.", "Ориентиры: говорит короткие фразы."):
+            with self.subTest(body=body):
+                self.assertEqual(
+                    llm._validate_age_norms_editorial_coherence(
+                        "Какие простые фразы появляются к 2 годам\n" + body
+                    ),
+                    (True, "ok"),
+                )
+
+    def test_the_title_cannot_satisfy_its_own_phrase_claim(self):
+        self.assertEqual(
+            llm._validate_age_norms_editorial_coherence(
+                "Какие простые фразы появляются к 2 годам\nОриентиры: показывает картинки."
+            ),
+            (False, "sunday_title_body_phrase_mismatch"),
+        )
+
+    # --- complete validator ------------------------------------------------
+
+    def test_coherent_exact_age_sunday_card_passes_the_complete_validator(self):
+        self.assertEqual(_validate_age_norms(AGE_NORMS_COHERENT_CARD), (True, "ok"))
+
+    def test_run_512_shaped_card_is_rejected(self):
+        ok, reason = _validate_age_norms(RUN_512_SHAPED_CARD)
+        self.assertFalse(ok)
+        # The age line is checked first; each remaining defect is rejected on its own.
+        self.assertEqual(reason, "sunday_age_not_numeric")
+        fixed_age = RUN_512_SHAPED_CARD.replace("👶 Возраст: раннее детство", "👶 Возраст: 2 года")
+        self.assertEqual(
+            _validate_age_norms(fixed_age), (False, "sunday_repeat_commands_semantic_error")
+        )
+        self.assertEqual(
+            _validate_age_norms(
+                fixed_age.replace("повторяет простые команды", "выполняет простую просьбу")
+            ),
+            (False, "sunday_title_body_phrase_mismatch"),
+        )
+
+    # --- D: Sunday generation contract -------------------------------------
+
+    def _prompt(self, rubric_format, day_key):
+        return llm.build_generation_prompt(
+            day_key=day_key,
+            rubric_title="Возрастные ориентиры",
+            rubric_format=rubric_format,
+            audience="parents",
+            title_suffix="",
+            source_domain="cdc.gov",
+            source_url="https://www.cdc.gov/milestones",
+            evidence_text=AGE_NORMS_EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            max_chars=1800,
+        )
+
+    def test_sunday_prompt_carries_the_new_contract(self):
+        prompt = self._prompt("age_norms", "SU")
+        for fragment in (
+            "ОДИН точный числовой возраст",
+            "Не пиши описательный возраст",
+            "Не смешивай ориентиры из разных возрастов",
+            "понимает и выполняет простые просьбы",
+            "Никогда не пиши, что ребенок «повторяет команды»",
+            "Не создавай новый пример «причина → реакция»",
+            "Каждый пример должен сохранять ту связь",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, prompt)
+
+    def test_other_rubric_prompts_do_not_carry_the_sunday_contract(self):
+        prompt = self._prompt("games_vocab", "WE")
+        self.assertNotIn("повторяет команды", prompt)
+        self.assertNotIn("ОДИН точный числовой возраст", prompt)
+
+    # --- E: repair registration ------------------------------------------
+
+    def test_new_reasons_use_the_existing_parent_content_repair_only(self):
+        reasons = {
+            "sunday_age_not_numeric",
+            "sunday_repeat_commands_semantic_error",
+            "sunday_title_body_phrase_mismatch",
+        }
+        self.assertTrue(reasons <= llm.PARENT_CONTENT_REPAIR_REASONS)
+        # Other rubrics' exact repair sets are untouched.
+        self.assertFalse(reasons & llm.BILINGUAL_PARENTS_REPAIR_EXACT_REASONS)
+        self.assertFalse(reasons & llm.THEMATIC_PARENTS_REPAIR_EXACT_REASONS)
+        # Not added to the fail-closed sets: routing is unchanged.
+        self.assertFalse(reasons & llm.PARENT_STRUCTURAL_FIELD_REASONS)
+        for reason in reasons:
+            with self.subTest(reason=reason):
+                self.assertTrue(llm._parent_content_repair_instruction(reason))
+
+
+class AgeNormsEditorialRepairProviderTest(unittest.IsolatedAsyncioTestCase):
+    """One existing repair; validator stays authoritative; budgets unchanged."""
+
+    async def _run(self, groq_outputs, gemini_outputs=None, provider="groq", rubric_format="age_norms",
+                   day_key="SU", evidence=AGE_NORMS_EVIDENCE):
+        groq_mock = AsyncMock(side_effect=groq_outputs)
+        gemini_mock = (
+            AsyncMock(side_effect=gemini_outputs)
+            if gemini_outputs is not None
+            else AsyncMock(side_effect=AssertionError("gemini must not be called"))
+        )
+        with (
+            patch.object(llm, "groq_chat", groq_mock),
+            patch.object(llm, "gemini_generate", gemini_mock),
+        ):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Возрастные ориентиры",
+                rubric_format=rubric_format,
+                audience="parents",
+                title_suffix="",
+                source_domain="cdc.gov",
+                source_url="https://www.cdc.gov/milestones",
+                evidence_text=evidence,
+                disclaimer="",
+                hashtags=[],
+                provider=provider,
+                groq_key="test-groq",
+                gemini_key="test-gemini" if provider != "groq" else "",
+                max_chars=1800,
+                day_key=day_key,
+            )
+        return out, ok, note, groq_mock, gemini_mock
+
+    async def test_invalid_response_gets_exactly_one_repair_and_valid_retry_succeeds(self):
+        out, ok, note, groq_mock, gemini_mock = await self._run(
+            [RUN_512_SHAPED_CARD, AGE_NORMS_COHERENT_CARD]
+        )
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertIn("👶 Возраст: 2 года", out)
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+        repair_prompt = groq_mock.await_args_list[1].args[0]
+        self.assertIn("sunday_age_not_numeric", repair_prompt)
+        self.assertIn(
+            llm.AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS["sunday_age_not_numeric"], repair_prompt
+        )
+
+    async def test_each_reason_carries_its_own_repair_instruction(self):
+        for card, reason in (
+            (AGE_NORMS_DESCRIPTIVE_AGE_CARD, "sunday_age_not_numeric"),
+            (AGE_NORMS_REPEAT_COMMANDS_CARD, "sunday_repeat_commands_semantic_error"),
+            (AGE_NORMS_TITLE_BODY_MISMATCH_CARD, "sunday_title_body_phrase_mismatch"),
+        ):
+            with self.subTest(reason=reason):
+                _out, ok, _note, groq_mock, _gemini = await self._run([card, AGE_NORMS_COHERENT_CARD])
+                self.assertTrue(ok)
+                repair_prompt = groq_mock.await_args_list[1].args[0]
+                self.assertIn(reason, repair_prompt)
+                self.assertIn(llm.AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS[reason], repair_prompt)
+
+    async def test_invalid_repair_stops_after_the_single_retry(self):
+        out, ok, note, groq_mock, gemini_mock = await self._run(
+            [RUN_512_SHAPED_CARD, RUN_512_SHAPED_CARD]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(out, "")
+        self.assertEqual(note, "invalid_groq_retry:sunday_age_not_numeric")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+
+    async def test_auto_fallback_keeps_one_repair_per_provider(self):
+        # The existing auto routing is unchanged: a non-fail-closed reason that
+        # survives the Groq repair falls back to Gemini, which gets its own one
+        # existing repair -- never more than initial + one repair per provider.
+        out, ok, note, groq_mock, gemini_mock = await self._run(
+            [RUN_512_SHAPED_CARD, RUN_512_SHAPED_CARD],
+            gemini_outputs=[RUN_512_SHAPED_CARD, RUN_512_SHAPED_CARD],
+            provider="auto",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_gemini_retry:sunday_age_not_numeric")
+        self.assertEqual(groq_mock.call_count, 2)
+        self.assertEqual(gemini_mock.call_count, 2)
+
+    async def test_non_age_norms_repair_budget_is_unchanged(self):
+        evidence = _long_evidence("2–3 years")
+        _out, ok, note, groq_mock, gemini_mock = await self._run(
+            [INVALID_AGE_OUTPUT, INVALID_AGE_OUTPUT],
+            rubric_format="games_vocab",
+            day_key="",
+            evidence=evidence,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(note, "invalid_groq_retry:parent_age_not_grounded")
+        self.assertEqual(groq_mock.call_count, 2)
+        gemini_mock.assert_not_awaited()
+        repair_prompt = groq_mock.await_args_list[1].args[0]
+        for instruction in llm.AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS.values():
+            self.assertNotIn(instruction, repair_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import re
 import sys
 import types
 import unittest
@@ -9,26 +10,44 @@ sys.modules.setdefault(
     types.SimpleNamespace(SentenceTransformer=object, util=types.SimpleNamespace()),
 )
 
-from src.publisher.run_publisher import _build_age_tag, finalize_plain_post_for_publication
+from src.publisher.run_publisher import finalize_plain_post_for_publication
 
 
 class HashtagPolicyTest(unittest.TestCase):
-    def test_age_aliases_are_normalized_before_slug_fallback(self):
-        cases = {
-            "дошкольный": "#для_дошкольников",
-            "Дошкольный возраст": "#для_дошкольников",
-            "дошкольники": "#для_дошкольников",
-            "младший дошкольный возраст": "#для_младших_дошкольников",
-            "старший дошкольный возраст": "#для_старших_дошкольников",
-            "школьный возраст": "#для_школьников",
-            "ранний возраст": "#для_детей_раннего_возраста",
-        }
-        for age, expected in cases.items():
-            with self.subTest(age=age):
-                self.assertEqual(_build_age_tag(age), expected)
+    def _hashtags(self, text):
+        return re.findall(r"(?<!\\w)#[A-Za-zА-Яа-яЁё0-9_]+", text)
 
-        self.assertEqual(_build_age_tag("  Дошкольный   возраст!  "), "#для_дошкольников")
-        self.assertEqual(_build_age_tag("5–6 лет"), "#для_детей_5_6_лет")
+    def test_age_values_never_create_publication_tags(self):
+        for age in ("3 года", "2-3 года", "ранний возраст"):
+            with self.subTest(age=age):
+                plain = (
+                    "Первые слова и фразы\n\n"
+                    f"👶 Возраст: {age}\n\n"
+                    "Ребёнок соединяет два слова в короткую фразу.\n\n"
+                    "Источник: Example\n"
+                    "🔗 https://example.com\n"
+                    "#случайный_тег"
+                )
+
+                final = finalize_plain_post_for_publication(
+                    plain,
+                    day_key="SU",
+                    source_domain="Example",
+                    source_url="https://example.com",
+                    max_chars=1000,
+                    rubric_id="age_norms",
+                    topic_id="vocabulary_phrase",
+                )
+
+                self.assertIn(f"👶 Возраст: {age}", final)
+                self.assertNotIn("#для_детей_", final)
+                self.assertIn("#возрастная_норма", final)
+                self.assertIn("#фразовая_речь", final)
+                self.assertIn("Источник: Example\n🔗 https://example.com", final)
+                self.assertEqual(
+                    self._hashtags(final),
+                    ["#возрастная_норма", "#фразовая_речь"],
+                )
 
     def test_uses_controlled_thematic_tag_only(self):
         plain = (
@@ -48,11 +67,16 @@ class HashtagPolicyTest(unittest.TestCase):
             max_chars=1000,
         )
 
+        self.assertIn("👶 Возраст: 2-3 года", final)
+        self.assertNotIn("#для_детей_", final)
         self.assertIn("#совет_логопеда", final)
-        self.assertIn("#для_детей_2_3_года", final)
         self.assertIn("#фразовая_речь", final)
         self.assertNotIn("#запросбез_пожалуйста", final)
         self.assertNotIn("#случайный_тег", final)
+        self.assertEqual(
+            self._hashtags(final),
+            ["#совет_логопеда", "#фразовая_речь"],
+        )
 
     def test_omits_thematic_tag_without_match(self):
         plain = (
@@ -73,6 +97,7 @@ class HashtagPolicyTest(unittest.TestCase):
 
         self.assertIn("#играем_и_говорим", final)
         self.assertNotIn("#что_угодно", final)
+        self.assertEqual(self._hashtags(final), ["#играем_и_говорим"])
 
     def test_bilingual_rubric_prioritizes_bilingual_tag(self):
         plain = (
@@ -95,6 +120,10 @@ class HashtagPolicyTest(unittest.TestCase):
 
         self.assertIn("#билингвизм", final)
         self.assertNotIn("#фразовая_речь", final)
+        self.assertEqual(
+            self._hashtags(final),
+            ["#речь_в_разных_ситуациях", "#билингвизм"],
+        )
 
 
 if __name__ == "__main__":

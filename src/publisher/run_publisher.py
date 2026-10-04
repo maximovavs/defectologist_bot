@@ -1179,9 +1179,7 @@ def finalize_plain_post_for_publication(
     link_line = _extract_link_line(no_tag_lines, source_url)
     body_lines = _remove_footer_lines(no_tag_lines)
 
-    age_value = _extract_age_value(body_lines)
     rubric_tag = RUBRIC_TAGS_BY_DAY.get((day_key or "").upper(), "")
-    age_tag = _build_age_tag(age_value)
 
     body_text = "\n".join(body_lines).strip()
     thematic_tags = _filter_relevant_thematic_tags(
@@ -1193,7 +1191,7 @@ def finalize_plain_post_for_publication(
     )
 
     final_tags: List[str] = []
-    for tag in [rubric_tag, age_tag, *thematic_tags]:
+    for tag in [rubric_tag, *thematic_tags]:
         tag = (tag or "").strip()
         if not tag:
             continue

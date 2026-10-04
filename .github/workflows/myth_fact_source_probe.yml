@@ -1,5 +1,8 @@
-name: Myth fact source runtime probe
+name: Gemini 3.8 visual QA canary
 
+# Temporary branch-local canary. Manual only; exactly one Gemini visual-QA
+# request through the existing evaluate_visual_quality(), no model or key
+# fallback, no publisher, Pollinations, Groq, Telegram or state access.
 on:
   workflow_dispatch:
 
@@ -7,26 +10,203 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  canary:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Install probe dependencies
+      - name: Install visual pipeline dependencies
         run: |
           python -m pip install \
             "requests>=2.31.0,<3" \
-            "beautifulsoup4>=4.12.2" \
-            "lxml>=5.1.0" \
-            "PyYAML>=6.0.1" \
             "Pillow>=10.3.0"
 
-      - name: Probe configured myth_fact sources
-        run: python -m scripts.probe_myth_fact_sources
+      - name: Gemini 3.8 visual QA canary (one request)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - <<'PY'
+          """Isolated Gemini 3.8 visual-QA canary: exactly one real request, no fallback."""
+
+          import base64
+          import json
+          import os
+          import sys
+          import time
+          from io import BytesIO
+
+          import requests
+          from PIL import Image
+
+          EXPECTED_MODEL = "gemini-3.8-flash"
+          EXPECTED_URL = (
+              "https://generativelanguage.googleapis.com/v1beta/models/"
+              f"{EXPECTED_MODEL}:generateContent"
+          )
+          EXPECTED_GENERATION_CONFIG = {"responseMimeType": "application/json"}
+          FORBIDDEN_KEYS = {
+              "temperature", "topP", "top_p", "topK", "top_k", "candidateCount",
+              "candidate_count", "thinkingConfig", "thinking_config", "thinkingLevel",
+              "thinking_level", "thinkingBudget", "thinking_budget", "maxOutputTokens",
+              "seed", "presencePenalty", "frequencyPenalty",
+          }
+          EXPECTED_TIMEOUT_SECONDS = 25
+
+          failures = []
+
+
+          def fail(message):
+              failures.append(message)
+              print(f"[CANARY][FAIL] {message}", flush=True)
+
+
+          # Only GEMINI_API_KEY may be a key candidate.
+          os.environ.pop("GEMINI_VISUAL_QA_API_KEY", None)
+          if not os.environ.get("GEMINI_API_KEY", "").strip():
+              print("[CANARY][FAIL] GEMINI_API_KEY is empty; no request made", flush=True)
+              sys.exit(1)
+
+          import src.services.visual_pipeline as vp  # noqa: E402
+
+          key_sources = [name for name, _key in vp._runtime_visual_qa_key_candidates("")]
+          print(f"[CANARY] key_sources={key_sources}", flush=True)
+          if key_sources != ["general"]:
+              print("[CANARY][FAIL] key candidates are not exactly [general]; no request made", flush=True)
+              sys.exit(1)
+          if vp.GEMINI_VISUAL_QA_TIMEOUT_SECONDS != EXPECTED_TIMEOUT_SECONDS:
+              print(
+                  f"[CANARY][FAIL] timeout={vp.GEMINI_VISUAL_QA_TIMEOUT_SECONDS} expected=25; no request made",
+                  flush=True,
+              )
+              sys.exit(1)
+
+          # Local asset -> PNG bytes; nothing is downloaded.
+          with Image.open("assets/backgrounds/Sunday.jpg") as source:
+              png = BytesIO()
+              source.convert("RGB").save(png, format="PNG")
+          png_bytes = png.getvalue()
+          if not png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+              print("[CANARY][FAIL] local PNG conversion failed; no request made", flush=True)
+              sys.exit(1)
+          print(f"[CANARY] image=assets/backgrounds/Sunday.jpg png_bytes={len(png_bytes)}", flush=True)
+
+          # Every HTTP request made through requests is counted at the Session level, so
+          # any second provider or external call is visible, not only visual_pipeline's.
+          session_calls = []
+          _original_session_request = requests.sessions.Session.request
+
+
+          def counting_session_request(self, method, url, *args, **kwargs):
+              session_calls.append(f"{method} {url}")
+              return _original_session_request(self, method, url, *args, **kwargs)
+
+
+          requests.sessions.Session.request = counting_session_request
+
+          observed = []
+          _original_post = vp.requests.post
+
+
+          def observing_post(url, *args, **kwargs):
+              record = {"url": url, "timeout": kwargs.get("timeout")}
+              payload = kwargs.get("json") or {}
+              record["payload_keys"] = sorted(payload)
+              record["generation_config"] = payload.get("generationConfig")
+
+              def walk(node):
+                  found = set()
+                  if isinstance(node, dict):
+                      for key, value in node.items():
+                          if key in FORBIDDEN_KEYS:
+                              found.add(key)
+                          found |= walk(value)
+                  elif isinstance(node, list):
+                      for item in node:
+                          found |= walk(item)
+                  return found
+
+              record["forbidden_keys"] = sorted(walk(payload))
+              try:
+                  image_part = payload["contents"][0]["parts"][1]["inline_data"]
+                  decoded = base64.b64decode(image_part["data"], validate=True)
+                  record["image_mime_type"] = image_part["mime_type"]
+                  record["image_is_sent_png"] = decoded == png_bytes
+              except Exception as exc:  # noqa: BLE001
+                  record["image_mime_type"] = f"unreadable:{exc.__class__.__name__}"
+                  record["image_is_sent_png"] = False
+              started = time.monotonic()
+              try:
+                  response = _original_post(url, *args, **kwargs)
+              except Exception as exc:  # noqa: BLE001
+                  record["latency_seconds"] = round(time.monotonic() - started, 3)
+                  record["http_status"] = f"exception:{exc.__class__.__name__}"
+                  observed.append(record)
+                  raise
+              record["latency_seconds"] = round(time.monotonic() - started, 3)
+              record["http_status"] = int(getattr(response, "status_code", 0) or 0)
+              if record["http_status"] != 200:
+                  record["error_body"] = str(getattr(response, "text", "") or "")[:600]
+              observed.append(record)
+              return response
+
+
+          vp.requests.post = observing_post
+
+          result = vp.evaluate_visual_quality(
+              BytesIO(png_bytes),
+              rubric_id="age_norms",
+              model=EXPECTED_MODEL,
+              _allow_model_fallback=False,
+          )
+
+          print("[CANARY] request_records=" + json.dumps(observed, ensure_ascii=False), flush=True)
+          print(f"[CANARY] session_request_count={len(session_calls)} calls={session_calls}", flush=True)
+          print("[CANARY] parsed_result=" + json.dumps(result, ensure_ascii=False, default=str), flush=True)
+
+          if len(observed) != 1:
+              fail(f"request_count={len(observed)} expected=1")
+          if len(session_calls) != 1:
+              fail(f"session_request_count={len(session_calls)} expected=1")
+          if observed:
+              record = observed[0]
+              if record["url"] != EXPECTED_URL:
+                  fail(f"url={record['url']}")
+              if record["timeout"] != EXPECTED_TIMEOUT_SECONDS:
+                  fail(f"timeout={record['timeout']}")
+              if record["payload_keys"] != ["contents", "generationConfig"]:
+                  fail(f"payload_keys={record['payload_keys']}")
+              if record["generation_config"] != EXPECTED_GENERATION_CONFIG:
+                  fail(f"generationConfig={record['generation_config']}")
+              if record["forbidden_keys"]:
+                  fail(f"forbidden_keys={record['forbidden_keys']}")
+              if record["image_mime_type"] != "image/png" or not record["image_is_sent_png"]:
+                  fail(f"image mime={record['image_mime_type']} sent_png={record['image_is_sent_png']}")
+              if record["http_status"] != 200:
+                  fail(f"http_status={record['http_status']}")
+          status = str(result.get("status", ""))
+          if status not in {"pass", "fail"}:
+              fail(f"status={status} reason={result.get('reason')}")
+          for field in ("pass", "reason", "people_count", "adult_count", "child_count", "ppe_detected", "text_detected"):
+              if field not in result:
+                  fail(f"parsed field missing: {field}")
+          if str(result.get("qa_key_source", "")) != "general" or str(result.get("qa_key_attempts", "")) != "1":
+              fail(f"key metadata source={result.get('qa_key_source')} attempts={result.get('qa_key_attempts')}")
+
+          if failures:
+              print(f"[CANARY][RESULT] NO-GO failures={len(failures)}", flush=True)
+              sys.exit(1)
+          print(
+              f"[CANARY][RESULT] GO model={EXPECTED_MODEL} http=200 status={status} "
+              f"latency_seconds={observed[0]['latency_seconds']}",
+              flush=True,
+          )
+          PY

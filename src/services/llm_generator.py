@@ -2057,6 +2057,77 @@ def _validate_tip_of_day_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+# Run #512 (37208362471, age_norms) published «👶 Возраст: раннее детство», an
+# orientir saying the child «повторяет простые команды», and the H1 «Какие слова
+# и простые фразы обычно появляются у малышей» over a body with no phrase
+# milestone. The Sunday prompt already asked for an age range, but the
+# deterministic contract was looser than the generation contract: a descriptive
+# age passed, because the generic age-evidence check deliberately fails open on
+# a non-numeric value, and nothing caught the malformed command relation or the
+# title/body mismatch. The three checks below are age_norms-only. Every other
+# rubric keeps its existing behaviour, descriptive-age fail-open included.
+AGE_NORMS_AGE_NOT_NUMERIC_REASON = "sunday_age_not_numeric"
+AGE_NORMS_REPEAT_COMMANDS_REASON = "sunday_repeat_commands_semantic_error"
+AGE_NORMS_TITLE_BODY_PHRASE_REASON = "sunday_title_body_phrase_mismatch"
+
+# "Follows simple commands" is a comprehension milestone. A child who
+# «повторяет ... команды» repeats them, which is a different and wrong relation.
+# Only the finite third-person forms are matched, with at most two words
+# («простые», «короткие простые») between the verb and the noun, and never when
+# an adult is the subject: «Мама повторяет команду» and the imperative
+# «Повторите команду» stay valid.
+AGE_NORMS_REPEAT_COMMANDS_RE = re.compile(
+    r"\bповтор(?:яет|яют|ял|яла|яли)\s+(?:[а-я-]+\s+){0,2}?команд\w*",
+    re.IGNORECASE,
+)
+AGE_NORMS_ADULT_SUBJECT_BEFORE_RE = re.compile(
+    r"\b(?:мам\w*|пап\w*|родител\w*|взросл\w*|логопед\w*|педагог\w*|воспитател\w*)"
+    r"(?:\s+[а-я-]+){0,2}\s*$",
+    re.IGNORECASE,
+)
+# A body anchor for an H1 that promises phrases: the word itself, a two-word
+# combination, or «словосочетание». The H1 can never satisfy its own claim.
+AGE_NORMS_BODY_PHRASE_ANCHOR_RE = re.compile(
+    r"фраз|(?:два|двух|2)\s+слов|двухсловн|словосочетани",
+    re.IGNORECASE,
+)
+
+
+def _validate_age_norms_numeric_age(text: str) -> Tuple[bool, str]:
+    """age_norms only: the age line must be a numeric month/year age or range.
+
+    A missing or empty line is left to the structural validator, which already
+    owns those reasons. Grounding of the numeric value stays with the existing
+    exact-anchor check in _validate_parent_age_evidence_output().
+    """
+
+    parsed = _parse_parent_age_range(text)
+    if parsed is None:
+        return True, "ok"
+    if parsed.min_months is None or parsed.max_months is None:
+        return False, AGE_NORMS_AGE_NOT_NUMERIC_REASON
+    return True, "ok"
+
+
+def _validate_age_norms_editorial_coherence(text: str) -> Tuple[bool, str]:
+    """age_norms only: the repeat-commands relation and H1/body phrase claim."""
+
+    normalized = (text or "").lower().replace("ё", "е")
+    for clause in re.split(r"[.!?;\n]+", normalized):
+        for match in AGE_NORMS_REPEAT_COMMANDS_RE.finditer(clause):
+            if AGE_NORMS_ADULT_SUBJECT_BEFORE_RE.search(clause[: match.start()]):
+                continue
+            return False, AGE_NORMS_REPEAT_COMMANDS_REASON
+
+    lines = _extract_nonempty_lines(normalized)
+    if lines and "фраз" in lines[0]:
+        body = "\n".join(lines[1:])
+        if not AGE_NORMS_BODY_PHRASE_ANCHOR_RE.search(body):
+            return False, AGE_NORMS_TITLE_BODY_PHRASE_REASON
+
+    return True, "ok"
+
+
 def _validate_age_norms_output(text: str) -> Tuple[bool, str]:
     lines = _extract_nonempty_lines(text)
     if not lines:
@@ -2736,6 +2807,11 @@ def _validate_output(
         if not ok:
             return False, reason
 
+    if rf == "age_norms":
+        ok, reason = _validate_age_norms_numeric_age(out)
+        if not ok:
+            return False, reason
+
     if rf == "myth_fact":
         ok, reason = _validate_myth_fact_output(out, evidence_text, topic_id=topic_id)
         if not ok:
@@ -2840,6 +2916,10 @@ def _validate_output(
         result = _validate_age_norms_output(out)
         if not result[0]:
             return result
+        if rf == "age_norms":
+            result = _validate_age_norms_editorial_coherence(out)
+            if not result[0]:
+                return result
         return _validate_parent_observable_benefit_output(out)
 
     if rf == "pro_friendly":
@@ -3603,6 +3683,17 @@ def _build_generation_prompt_raw(
             "Хорошие паттерны: «Что обычно понимает ребенок к 2 годам», «Какие фразы часто появляются ближе к 3 годам».\n\n"
             "👶 Возраст: укажи диапазон\n"
             "Ориентиры: коротко перечисли 2–4 age / milestone ориентира в одной строке.\n\n"
+            "Возраст: выбери ОДИН точный числовой возраст или возрастной диапазон в месяцах или годах, который дословно есть в EVIDENCE, "
+            "и перенеси его в строку «👶 Возраст:» (например «2 года» или «18–24 месяца»). "
+            "Не пиши описательный возраст вроде «раннее детство» или «дошкольный возраст». "
+            "Не придумывай, не сужай и не расширяй возраст.\n"
+            "Весь пост — заголовок, ориентиры, текст и наблюдение дома — относится к этому же возрасту. "
+            "Не смешивай ориентиры из разных возрастов EVIDENCE в одном посте.\n"
+            "«Follows simple commands» / «follows simple directions» переводи как «понимает и выполняет простые просьбы "
+            "или инструкции». Никогда не пиши, что ребенок «повторяет команды».\n"
+            "Если заголовок обещает фразы, в ориентирах или тексте должен быть ориентир про фразы или сочетания двух слов из EVIDENCE.\n"
+            "Не создавай новый пример «причина → реакция», соединяя разные утверждения EVIDENCE. "
+            "Каждый пример должен сохранять ту связь, которая прямо есть в EVIDENCE.\n\n"
             "Дальше в 2–4 спокойных предложениях объясни смысл без запугивания и без патологической лексики.\n"
             "Обязательно вплети фразу: Каждый ребенок развивается индивидуально.\n"
             "Говори только про типичное развитие и наблюдаемые milestones.\n\n"
@@ -4338,7 +4429,30 @@ PARENT_TITLE_STATUS_LABEL_REPAIR_INSTRUCTION = (
 )
 
 
+AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS = {
+    AGE_NORMS_AGE_NOT_NUMERIC_REASON: (
+        "Исправь строку «👶 Возраст:»: укажи один точный числовой возраст или возрастной диапазон в месяцах или годах, "
+        "который дословно есть в EVIDENCE. Описательный возраст вроде «раннее детство» или «дошкольный возраст» не подходит. "
+        "Не придумывай, не сужай и не расширяй возраст. Все ориентиры, текст и наблюдение дома должны относиться к этому же "
+        "возрасту; ориентиры из других возрастов EVIDENCE убери. Не добавляй новых фактов и примеров."
+    ),
+    AGE_NORMS_REPEAT_COMMANDS_REASON: (
+        "Исправь ориентир про команды: «follows simple commands» означает, что ребенок понимает и выполняет простые просьбы "
+        "или инструкции, а не повторяет их. Замени «повторяет команды» на «понимает и выполняет простые просьбы». "
+        "Не создавай новый пример «причина → реакция» из разных утверждений EVIDENCE и не добавляй новых ориентиров, "
+        "возрастов или фактов."
+    ),
+    AGE_NORMS_TITLE_BODY_PHRASE_REASON: (
+        "Заголовок обещает фразы, но в ориентирах и тексте нет ориентира про фразы или сочетания двух слов. "
+        "Если такой ориентир для этого же возраста есть в EVIDENCE — добавь его в «Ориентиры:»; если нет — убери фразы "
+        "из заголовка, чтобы он совпадал с ориентирами. Не придумывай новых ориентиров, возрастов или примеров."
+    ),
+}
+
+
 def _parent_content_repair_instruction(reason: str) -> str:
+    if reason in AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS:
+        return AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS[reason]
     if reason == "parent_modality_not_grounded":
         return PARENT_MODALITY_REPAIR_INSTRUCTION
     if reason == "parent_diagnostic_role_violation":
@@ -4486,6 +4600,11 @@ THEMATIC_PARENTS_REPAIR_EXACT_REASONS = {
     "thematic_nonobservable_benefit",
     *PARENT_CONTENT_REPAIR_REASONS,
 }
+
+# age_norms-only reasons join the existing single parent-content repair. They
+# are added after the bilingual/thematic exact-reason sets above were built, so
+# those rubrics' repair sets are unchanged. No provider, retry or budget change.
+PARENT_CONTENT_REPAIR_REASONS.update(AGE_NORMS_EDITORIAL_REPAIR_INSTRUCTIONS)
 
 
 def build_thematic_parents_repair_prompt(

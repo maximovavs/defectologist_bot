@@ -150,6 +150,20 @@ OBJECT_SCENE_MARKER_RE = re.compile(r"\[object_scene:([a-z_]+)\|([0-9a-f]*)\]")
 VISUAL_STYLE_RETRY_MARKER = "[style_retry]"
 VISUAL_STYLE_RETRY_MARKER_RE = re.compile(r"\[style_retry\]")
 
+# And for the action retry. Run #513 (37347011941) rejected both human attempts
+# with action_mismatch: the retry kept the brief verbatim and added nothing, so
+# it compiled to the very same internal prompt and therefore the very same
+# deterministic Pollinations seed -- a no-op regeneration. The brief must stay
+# byte-identical (QA judges against the same expected action), so the retry is
+# differentiated only by this technical marker, which changes the internal prompt
+# and with it the seed, and by a provider-only emphasis of the already-named
+# action. The marker never reaches the provider, and the emphasis never reaches
+# the QA expected brief.
+VISUAL_ACTION_RETRY_MARKER = "[action_retry]"
+VISUAL_ACTION_RETRY_MARKER_RE = re.compile(r"\[action_retry\]")
+VISUAL_ACTION_RETRY_REASONS = frozenset({"action_mismatch", "action_match_unknown"})
+POLLINATIONS_ACTION_RETRY_EMPHASIS = "Make the named action the unmistakable central visible interaction."
+
 # Compact provider-facing object style. The compiled prompt stays verbose for
 # deterministic parsing/tests; Pollinations only receives this short version.
 # Wording is deliberately painterly: photographic composition vocabulary here
@@ -379,6 +393,10 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
     if style_retry:
         cleaned = " ".join(VISUAL_STYLE_RETRY_MARKER_RE.sub(" ", cleaned).split()).strip()
 
+    action_retry = bool(VISUAL_ACTION_RETRY_MARKER_RE.search(cleaned))
+    if action_retry:
+        cleaned = " ".join(VISUAL_ACTION_RETRY_MARKER_RE.sub(" ", cleaned).split()).strip()
+
     marker_match = OBJECT_SCENE_MARKER_RE.search(cleaned)
     if marker_match:
         # Technical fields never reach the provider.
@@ -396,14 +414,19 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
         return build_object_provider_prompt(category, variation_id)
 
     provider_style = POLLINATIONS_STYLE_RETRY_TAIL if style_retry else POLLINATIONS_GENERATION_STYLE_TAIL
+    # Provider-only: emphasises the action the scene already names, adds nothing.
+    action_emphasis = f"{POLLINATIONS_ACTION_RETRY_EMPHASIS} " if action_retry else ""
 
     style_marker = "Warm soft editorial illustration"
     if style_marker in cleaned:
         scene_prefix = cleaned.split(style_marker, 1)[0].rstrip(" .")
-        return " ".join(f"{scene_prefix}. {provider_style}".split())
+        return " ".join(f"{scene_prefix}. {action_emphasis}{provider_style}".split())
 
     if style_retry:
-        return " ".join(f"{cleaned.rstrip(' .')}. {provider_style}".split())
+        return " ".join(f"{cleaned.rstrip(' .')}. {action_emphasis}{provider_style}".split())
+
+    if action_retry:
+        return " ".join(f"{cleaned.rstrip(' .')}. {POLLINATIONS_ACTION_RETRY_EMPHASIS}".split())
 
     return " ".join(cleaned.split())
 
@@ -1406,6 +1429,8 @@ def build_visual_retry_prompt(
     retry_prompt = _compile_visual_prompt(retry_brief)
     if retry_prompt and _is_visual_style_retry_reason(reason):
         retry_prompt = f"{retry_prompt} {VISUAL_STYLE_RETRY_MARKER}"
+    if retry_prompt and reason in VISUAL_ACTION_RETRY_REASONS:
+        retry_prompt = f"{retry_prompt} {VISUAL_ACTION_RETRY_MARKER}"
     return retry_prompt
 
 

@@ -19,8 +19,10 @@ from src.services.llm_generator import (
     build_image_prompt_prompt,
 )
 from src.services.visual_pipeline import (
+    POLLINATIONS_ACTION_RETRY_EMPHASIS,
     POLLINATIONS_GEN_HEIGHT,
     POLLINATIONS_GEN_WIDTH,
+    VISUAL_ACTION_RETRY_MARKER,
     VISUAL_ROLE_RULE_MAX_CHARS,
     VISUAL_STYLE_RETRY_MARKER,
     VISUAL_STYLE_TAIL,
@@ -38,6 +40,8 @@ from src.services.visual_pipeline import (
     build_visual_retry_prompt,
     evaluate_visual_quality,
     _normalize_pollinations_image,
+    _pollinations_request_once,
+    PollinationsImageError,
 )
 
 
@@ -621,7 +625,11 @@ class VisualPromptPolicyTest(unittest.TestCase):
 
         self.assertIn(f"Action: {action};", retry)
         self.assertLess(retry.index(f"Action: {action}"), retry.index("Warm soft editorial illustration"))
-        self.assertLessEqual(len(retry), 900)
+        # The compiled content keeps its 900-char budget; the technical action-retry
+        # marker rides outside it, like the existing style-retry marker, and is
+        # stripped before the provider.
+        self.assertTrue(retry.endswith(f" {VISUAL_ACTION_RETRY_MARKER}"))
+        self.assertLessEqual(len(retry[: -len(f" {VISUAL_ACTION_RETRY_MARKER}")]), 900)
 
     def test_horizontal_stretch_retry_uses_normal_50mm_and_body_width(self):
         base = _deterministic_visual_prompt(
@@ -1584,6 +1592,177 @@ class VisualGenerationContractTest(unittest.TestCase):
         for phrase in ("visible washes", "painterly edges", "simplified painted surfaces", "not photography"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, provider)
+
+
+
+# Run #513 (37347011941, tip_of_day): QA rejected both human attempts with
+# action_mismatch. The retry kept the brief verbatim and added nothing, so it
+# compiled to the same internal prompt and therefore the same deterministic
+# Pollinations seed -- a no-op regeneration.
+RUN_513_BRIEF = VisualBrief(
+    rubric_id="tip_of_day",
+    role_rule=(
+        "Exactly one adult parent and exactly one preschool child, "
+        "visibly different in age and height, no other people."
+    ),
+    age_descriptor="preschool child",
+    setting="simple uncluttered home play area",
+    action="Parent picks up a favorite toy",
+    props=("toy",),
+)
+
+
+class ActionMismatchRetryDifferentiationTest(unittest.TestCase):
+    def setUp(self):
+        self.initial = _compile_visual_prompt(RUN_513_BRIEF)
+        self.retry = build_visual_retry_prompt(
+            self.initial, rubric_id="tip_of_day", qa_reason="action_mismatch"
+        )
+
+    def _seed_and_url(self, prompt):
+        response = Mock(status_code=200, content=b"not-an-image")
+        response.headers = {"Content-Type": "image/png"}
+        with patch("src.services.visual_pipeline.requests.get", return_value=response) as request:
+            with self.assertRaises(PollinationsImageError):
+                _pollinations_request_once(prompt)
+        return request.call_args.kwargs["params"]["seed"], request.call_args.args[0]
+
+    # --- 1 / 2 / 3 / 4: the retry is no longer a no-op ----------------------
+
+    def test_retry_internal_prompt_differs_from_initial(self):
+        self.assertNotEqual(self.retry, self.initial)
+        self.assertEqual(self.retry, f"{self.initial} {VISUAL_ACTION_RETRY_MARKER}")
+
+    def test_retry_provider_prompt_differs_from_initial(self):
+        self.assertNotEqual(
+            _prepare_pollinations_prompt(self.retry), _prepare_pollinations_prompt(self.initial)
+        )
+
+    def test_marker_never_reaches_the_provider(self):
+        provider = _prepare_pollinations_prompt(self.retry)
+        self.assertNotIn(VISUAL_ACTION_RETRY_MARKER, provider)
+        self.assertNotIn("action_retry", provider)
+        _seed, url = self._seed_and_url(self.retry)
+        self.assertNotIn("action_retry", url)
+
+    def test_retry_provider_prompt_carries_the_bounded_action_emphasis(self):
+        provider = _prepare_pollinations_prompt(self.retry)
+        self.assertIn(POLLINATIONS_ACTION_RETRY_EMPHASIS, provider)
+        self.assertNotIn(POLLINATIONS_ACTION_RETRY_EMPHASIS, _prepare_pollinations_prompt(self.initial))
+        # It sits after the unchanged scene and before the provider style.
+        scene = _prepare_pollinations_prompt(self.initial).split("Warm soft editorial illustration", 1)[0]
+        self.assertTrue(provider.startswith(scene.rstrip()))
+        self.assertLess(
+            provider.index(POLLINATIONS_ACTION_RETRY_EMPHASIS),
+            provider.index("Warm soft editorial illustration"),
+        )
+        # The emphasis names no new object, person or behaviour.
+        self.assertEqual(
+            POLLINATIONS_ACTION_RETRY_EMPHASIS,
+            "Make the named action the unmistakable central visible interaction.",
+        )
+
+    # --- 5 - 10: the semantic brief is byte-identical ------------------------
+
+    def test_retry_brief_fields_are_unchanged(self):
+        initial = _parse_compiled_visual_prompt(self.initial, rubric_id="tip_of_day")
+        retry = _parse_compiled_visual_prompt(self.retry, rubric_id="tip_of_day")
+        self.assertEqual(retry.action, "Parent picks up a favorite toy")
+        self.assertEqual(retry.action, initial.action)
+        self.assertEqual(retry.role_rule, initial.role_rule)
+        self.assertEqual(retry.age_descriptor, initial.age_descriptor)
+        self.assertEqual(retry.age_descriptor, "preschool child")
+        self.assertEqual(retry.props, initial.props)
+        self.assertEqual(retry.props, ("toy",))
+        self.assertEqual(retry.setting, initial.setting)
+
+    def test_qa_expected_brief_keeps_the_exact_action(self):
+        expected = _build_visual_qa_expected_brief(self.retry, "tip_of_day")
+        self.assertIn("Expected action: Parent picks up a favorite toy\n", expected)
+        self.assertEqual(expected, _build_visual_qa_expected_brief(self.initial, "tip_of_day"))
+        self.assertNotIn(POLLINATIONS_ACTION_RETRY_EMPHASIS, expected)
+        self.assertNotIn("action_retry", expected)
+
+    # --- 11: deterministic seed differs ---------------------------------------
+
+    def test_deterministic_seed_differs_between_attempts(self):
+        first_seed, _ = self._seed_and_url(self.initial)
+        retry_seed, _ = self._seed_and_url(self.retry)
+        self.assertNotEqual(first_seed, retry_seed)
+        # Still deterministic: no randomness was introduced.
+        self.assertEqual(self._seed_and_url(self.retry)[0], retry_seed)
+
+    # --- 12 / 13 / 14: scope -------------------------------------------------
+
+    def test_action_match_unknown_gets_the_same_differentiation(self):
+        unknown = build_visual_retry_prompt(
+            self.initial, rubric_id="tip_of_day", qa_reason="action_match_unknown"
+        )
+        self.assertEqual(unknown, self.retry)
+        self.assertIn(POLLINATIONS_ACTION_RETRY_EMPHASIS, _prepare_pollinations_prompt(unknown))
+
+    def test_unrelated_retry_reasons_keep_existing_behaviour(self):
+        for reason in ("too_many_people", "deformed_hands", "unexpected_ppe", "wrong_character_roles"):
+            with self.subTest(reason=reason):
+                retry = build_visual_retry_prompt(self.initial, rubric_id="tip_of_day", qa_reason=reason)
+                self.assertNotIn(VISUAL_ACTION_RETRY_MARKER, retry)
+                self.assertNotIn(
+                    POLLINATIONS_ACTION_RETRY_EMPHASIS, _prepare_pollinations_prompt(retry)
+                )
+
+    def test_style_retry_is_unchanged(self):
+        retry = build_visual_retry_prompt(
+            self.initial, rubric_id="tip_of_day", qa_reason="photorealistic_imagery"
+        )
+        self.assertEqual(retry, f"{self.initial} {VISUAL_STYLE_RETRY_MARKER}")
+        self.assertNotIn(VISUAL_ACTION_RETRY_MARKER, retry)
+        provider = _prepare_pollinations_prompt(retry)
+        self.assertNotIn(POLLINATIONS_ACTION_RETRY_EMPHASIS, provider)
+        self.assertIn("unmistakably hand-painted", provider.lower())
+
+    # --- 15: still exactly two human attempts ----------------------------------
+
+    def test_action_retry_regenerates_the_human_image_once(self):
+        expected_prompts = []
+
+        def qa(*_args, **kwargs):
+            expected_prompts.append(kwargs.get("expected_prompt", ""))
+            return {
+                "status": "fail",
+                "pass": False,
+                "reason": "action_mismatch",
+                "people_count": 2,
+                "adult_count": 1,
+                "child_count": 1,
+            }
+
+        with patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=[
+                (BytesIO(b"first"), {"attempts_used": "1", "final_reason": "ok"}),
+                (BytesIO(b"second"), {"attempts_used": "1", "final_reason": "ok"}),
+                RuntimeError("object generation failed 1"),
+                RuntimeError("object generation failed 2"),
+            ],
+        ) as download:
+            _, meta = build_post_visual(
+                title="Любимая игрушка",
+                day_key="MO",
+                image_prompt=self.initial,
+                visual_qa_fn=qa,
+                rubric_id="tip_of_day",
+            )
+
+        human_prompts = [call.kwargs["prompt"] for call in download.call_args_list[:2]]
+        self.assertEqual(download.call_count, 4)  # 2 human + 2 object, unchanged budgets
+        self.assertNotIn(VISUAL_ACTION_RETRY_MARKER, human_prompts[0])
+        self.assertIn(VISUAL_ACTION_RETRY_MARKER, human_prompts[1])
+        self.assertEqual(human_prompts[1], f"{human_prompts[0]} {VISUAL_ACTION_RETRY_MARKER}")
+        self.assertEqual(len(expected_prompts), 2)
+        for expected in expected_prompts:
+            self.assertIn("Expected action: Parent picks up a favorite toy\n", expected)
+        self.assertEqual(expected_prompts[0], expected_prompts[1])
+        self.assertEqual(meta["mode"], "text_fallback")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 import inspect
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -897,6 +898,329 @@ class ProductionStatePredecessorTest(unittest.TestCase):
             predecessor = self._resolve([_workflow_run(99, 99)])
         self.assertEqual(predecessor.run_id, 99)
         urlopen.assert_not_called()
+
+
+
+# Run #514 (37486543863) requested the cache of #342 (27962120533) although
+# #513 (37347011941) was the successful prod predecessor. Root cause: PARTIAL.
+# These tests pin the stderr diagnostics added to make a recurrence
+# distinguishable, and that they change no decision.
+_DIAG_TOKEN = "ghs_DIAGNOSTIC_TOKEN_MUST_NOT_LEAK"
+_RUN_513 = _workflow_run(37347011941, 513)
+_RUN_343 = _workflow_run(28023253494, 343)
+_RUN_342 = _workflow_run(27962120533, 342, event="workflow_dispatch")
+_RUN_514 = {"id": 37486543863, "run_number": 514, "run_attempt": 1, "status": "in_progress"}
+
+
+class _FakeApiResponse:
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self, *_args):
+        body, self._body = self._body, b""
+        return body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class ProductionStatePredecessorDiagnosticsTest(unittest.TestCase):
+    ENV = {
+        "GITHUB_RUN_ID": "37486543863",
+        "GITHUB_RUN_NUMBER": "514",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_REF_NAME": "main",
+        "GITHUB_API_URL": "https://api.github.com",
+        "GITHUB_REPOSITORY": "maximovavs/defectologist_bot",
+        "GITHUB_TOKEN": _DIAG_TOKEN,
+        "STATE_CACHE_VERSION": "v12",
+    }
+
+    def _resolve(self, runs, *, jobs_loader=None, current_run_id=100, current_run_number=100,
+                 current_attempt=1):
+        stderr = StringIO()
+        stdout = StringIO()
+        with redirect_stderr(stderr), redirect_stdout(stdout):
+            predecessor = continuity.resolve_predecessor(
+                runs,
+                current_run_id=current_run_id,
+                current_run_number=current_run_number,
+                current_run_attempt=current_attempt,
+                ref_name="main",
+                jobs_loader=jobs_loader or (lambda _run_id: {"jobs": []}),
+            )
+        self.assertEqual(stdout.getvalue(), "")
+        return predecessor, stderr.getvalue()
+
+    def _main(self, pages, jobs=None, env=None):
+        requests = []
+
+        def urlopen(request, timeout=None):
+            requests.append(request)
+            url = request.full_url
+            if "/jobs?" in url:
+                run_id = int(url.split("/actions/runs/", 1)[1].split("/", 1)[0])
+                return _FakeApiResponse((jobs or {}).get(run_id, {"jobs": []}))
+            page = int(url.rsplit("page=", 1)[1])
+            return _FakeApiResponse({"workflow_runs": pages[page - 1]})
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with patch.dict(os.environ, env or self.ENV, clear=True), patch.object(
+            continuity.urllib.request, "urlopen", side_effect=urlopen
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            code = continuity.main()
+        return code, stdout.getvalue(), stderr.getvalue(), requests
+
+    def _lines(self, stderr, tag):
+        prefix = f"[STATE_CONTINUITY][{tag}] "
+        return [line[len(prefix):] for line in stderr.splitlines() if line.startswith(prefix)]
+
+    # --- 1 / 2 / 3 / 7 / 10 / 16 / 18: main() on a #513-shaped history -----
+
+    def test_main_selects_513_with_unchanged_stdout_and_diagnostics_on_stderr(self):
+        code, stdout, stderr, requests = self._main([[_RUN_514, _RUN_513, _RUN_343, _RUN_342]])
+
+        self.assertEqual(code, 0)
+        # stdout is the $GITHUB_OUTPUT contract: exactly these two lines.
+        self.assertEqual(
+            stdout,
+            "predecessor_run_id=37347011941\n"
+            "expected_cache_key=logoped-state-v12-prod-main-37347011941\n",
+        )
+        self.assertNotIn("STATE_CONTINUITY", stdout)
+        self.assertEqual(
+            self._lines(stderr, "CURRENT"),
+            ["run_id=37486543863 run_number=514 run_attempt=1 ref=main"],
+        )
+        self.assertEqual(
+            self._lines(stderr, "SELECTED"),
+            ["run_id=37347011941 run_number=513 conclusion=success"],
+        )
+        # Only the history page was read: a success is selected without jobs.
+        self.assertEqual(len(requests), 1)
+
+    def test_token_and_authorization_never_reach_stdout_or_stderr(self):
+        code, stdout, stderr, requests = self._main([[_RUN_514, _RUN_513]])
+        self.assertEqual(code, 0)
+        self.assertEqual(requests[0].get_header("Authorization"), f"Bearer {_DIAG_TOKEN}")
+        for stream in (stdout, stderr):
+            self.assertNotIn(_DIAG_TOKEN, stream)
+            self.assertNotIn("Authorization", stream)
+            self.assertNotIn("Bearer", stream)
+            self.assertNotIn("https://", stream)
+
+    def test_blocked_main_keeps_stdout_empty_and_reports_on_stderr(self):
+        env = dict(self.ENV, GITHUB_RUN_ATTEMPT="2")
+        code, stdout, stderr, requests = self._main([[_RUN_514, _RUN_513]], env=env)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("production_state_continuity_blocked:production_rerun_not_safe", stderr)
+        # The rerun identity is visible before resolution refuses it.
+        self.assertEqual(
+            self._lines(stderr, "CURRENT"),
+            ["run_id=37486543863 run_number=514 run_attempt=2 ref=main"],
+        )
+        self.assertNotIn(_DIAG_TOKEN, stderr)
+
+    # --- 4 / 17: page diagnostics and exact pagination -----------------------
+
+    def test_each_page_logs_count_and_run_number_range_with_exact_requests(self):
+        full_page = [_workflow_run(10_000 + n, 400 - n) for n in range(100)]
+        full_page[0] = _RUN_513
+        last_page = [_workflow_run(20_000 + n, 300 - n) for n in range(5)]
+        code, stdout, stderr, requests = self._main([full_page, last_page])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [request.full_url for request in requests],
+            [
+                "https://api.github.com/repos/maximovavs/defectologist_bot/actions/workflows/"
+                "post.yml/runs?branch=main&per_page=100&page=1",
+                "https://api.github.com/repos/maximovavs/defectologist_bot/actions/workflows/"
+                "post.yml/runs?branch=main&per_page=100&page=2",
+            ],
+        )
+        self.assertEqual(
+            self._lines(stderr, "PAGE"),
+            [
+                "page=1 count=100 min_run_number=301 max_run_number=513 unparsed_run_number=0",
+                "page=2 count=5 min_run_number=296 max_run_number=300 unparsed_run_number=0",
+            ],
+        )
+
+    def test_page_limit_and_truncation_failure_are_unchanged(self):
+        full_page = [_workflow_run(n + 1, n + 1) for n in range(100)]
+        code, stdout, stderr, requests = self._main([full_page] * 20)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(len(requests), 20)
+        self.assertTrue(requests[-1].full_url.endswith("&per_page=100&page=20"))
+        self.assertIn("production_state_continuity_blocked:github_actions_history_truncated", stderr)
+        self.assertEqual(len(self._lines(stderr, "PAGE")), 20)
+
+    def test_malformed_page_run_numbers_are_reported_not_normalised(self):
+        page = [_RUN_514, {"id": 1, "run_number": "not-a-number"}, _RUN_513]
+        code, stdout, stderr, _requests = self._main([page])
+        # Resolution still fails closed exactly as before on the malformed run.
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("production_state_continuity_blocked:ambiguous_run_metadata:run_number", stderr)
+        self.assertEqual(
+            self._lines(stderr, "PAGE"),
+            ["page=1 count=3 min_run_number=513 max_run_number=514 unparsed_run_number=1"],
+        )
+
+    def test_page_diagnostic_never_raises_on_pathological_run_number(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            continuity._emit_page_diagnostic(
+                1, [{"run_number": float("inf")}, {"run_number": True}, "not-a-run", _RUN_513]
+            )
+        self.assertEqual(
+            self._lines(stderr.getvalue(), "PAGE"),
+            ["page=1 count=4 min_run_number=513 max_run_number=513 unparsed_run_number=3"],
+        )
+
+    def test_missing_recent_history_is_visible_in_page_and_candidate_diagnostics(self):
+        # A #514-like recurrence: #513..#344 absent from the history the
+        # runtime received. Resolution selects #343 exactly as before; the
+        # diagnostics now show that the newest prior run seen was #343.
+        code, stdout, stderr, _requests = self._main([[_RUN_514, _RUN_343, _RUN_342]])
+        self.assertEqual(code, 0)
+        self.assertIn("predecessor_run_id=28023253494\n", stdout)
+        self.assertEqual(
+            self._lines(stderr, "PAGE"),
+            ["page=1 count=3 min_run_number=342 max_run_number=514 unparsed_run_number=0"],
+        )
+        candidates = self._lines(stderr, "CANDIDATE")
+        self.assertTrue(candidates[0].startswith("rank=1 run_number=343 run_id=28023253494 "))
+
+    # --- 5 / 6: bounded candidate summary, unchanged selection ---------------
+
+    def test_candidate_summary_is_bounded_and_newest_first(self):
+        runs = [_workflow_run(1000 + n, n) for n in range(1, 31)]
+        predecessor, stderr = self._resolve(runs, current_run_id=5000, current_run_number=31)
+        self.assertEqual((predecessor.run_id, predecessor.run_number), (1030, 30))
+        self.assertEqual(
+            self._lines(stderr, "CANDIDATES"),
+            ["history_count=30 prior_count=30 shown=10 limit=10"],
+        )
+        candidates = self._lines(stderr, "CANDIDATE")
+        self.assertEqual(len(candidates), continuity.DIAGNOSTIC_CANDIDATE_LIMIT)
+        self.assertEqual(
+            [line.split()[1] for line in candidates],
+            [f"run_number={n}" for n in range(30, 20, -1)],
+        )
+        self.assertIn(
+            "event=schedule head_branch=main run_attempt=1 status=completed "
+            "conclusion=success lineage=prod",
+            candidates[0],
+        )
+
+    def test_diagnostics_do_not_change_newest_to_oldest_selection(self):
+        runs = [_RUN_342, _RUN_513, _RUN_343]
+        for order in (runs, list(reversed(runs))):
+            with self.subTest(order=[r["run_number"] for r in order]):
+                predecessor, _stderr = self._resolve(
+                    order, current_run_id=37486543863, current_run_number=514
+                )
+                self.assertEqual(
+                    (predecessor.run_id, predecessor.run_number), (37347011941, 513)
+                )
+
+    def test_candidate_diagnostics_never_raise_on_irrelevant_metadata(self):
+        legacy = {"id": 50, "run_number": 50, "display_title": None, "event": None}
+        predecessor, stderr = self._resolve(
+            [_workflow_run(99, 99), legacy], current_run_id=100, current_run_number=100
+        )
+        self.assertEqual(predecessor.run_id, 99)
+        self.assertIn("run_number=50 run_id=50 event=none", stderr)
+        self.assertIn("lineage=unknown", stderr)
+
+    # --- 8 / 9: safe-skip result and its diagnostics ---------------------------
+
+    def test_safe_skip_returns_the_same_predecessor_and_logs_the_skip(self):
+        jobs = _post_job_payload(run_conclusion="failure")
+        predecessor, stderr = self._resolve(
+            [_workflow_run(99, 99, conclusion="failure"), _workflow_run(98, 98)],
+            jobs_loader=lambda run_id: jobs if run_id == 99 else {"jobs": []},
+        )
+        self.assertEqual((predecessor.run_id, predecessor.run_number), (98, 98))
+        self.assertEqual(
+            self._lines(stderr, "SKIP"),
+            ["run_id=99 run_number=99 conclusion=failure reason=publisher_not_executed"],
+        )
+        self.assertEqual(
+            self._lines(stderr, "SELECTED"), ["run_id=98 run_number=98 conclusion=success"]
+        )
+
+    def test_proven_incident_skip_logs_its_distinct_reason(self):
+        incident = continuity.PROVEN_PRE_MUTATION_INCIDENT
+        runs = [
+            _workflow_run(
+                incident.run_id,
+                incident.run_number,
+                conclusion="failure",
+                event=incident.event,
+                head_sha=incident.head_sha,
+            ),
+            _workflow_run(34000000000, 469),
+        ]
+        jobs = _post_job_payload(run_conclusion="failure", publisher_conclusion="failure")
+        predecessor, stderr = self._resolve(
+            runs,
+            current_run_id=34400000000,
+            current_run_number=471,
+            jobs_loader=lambda run_id: jobs if run_id == incident.run_id else {"jobs": []},
+        )
+        self.assertEqual(predecessor.run_number, 469)
+        self.assertEqual(
+            self._lines(stderr, "SKIP"),
+            [
+                f"run_id={incident.run_id} run_number={incident.run_number} "
+                "conclusion=failure reason=proven_pre_mutation_incident"
+            ],
+        )
+
+    # --- 11 - 15: fail-closed behaviour is unchanged ---------------------------
+
+    def test_fail_closed_paths_are_unchanged(self):
+        cases = (
+            ("ambiguous_run_metadata:channel",
+             [_workflow_run(99, 99, title="Logoped Bot without channel")], 1),
+            ("ambiguous_run_metadata:run_number", [{"id": 99, "run_number": "x"}], 1),
+            ("production_rerun_not_safe", [_workflow_run(99, 99)], 2),
+            ("production_predecessor_rerun_not_safe", [_workflow_run(99, 99, run_attempt=2)], 1),
+            ("ambiguous_production_predecessor_order",
+             [_workflow_run(99, 99), _workflow_run(97, 99)], 1),
+        )
+        for expected, runs, attempt in cases:
+            with self.subTest(expected=expected):
+                with patch.object(continuity.urllib.request, "urlopen") as urlopen:
+                    with self.assertRaisesRegex(continuity.StateContinuityError, expected):
+                        self._resolve(runs, current_attempt=attempt)
+                urlopen.assert_not_called()
+
+    def test_expected_cache_key_is_byte_identical(self):
+        self.assertEqual(
+            continuity.build_expected_cache_key(
+                cache_version="v12", ref_name="main", predecessor_run_id=37347011941
+            ),
+            "logoped-state-v12-prod-main-37347011941",
+        )
+
+    def test_diagnostic_values_are_single_line_and_bounded(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            continuity._emit_diagnostic("CURRENT", ref="main\n::set-output name=x::y " + "z" * 200)
+        line = stderr.getvalue()
+        self.assertEqual(line.count("\n"), 1)
+        self.assertTrue(line.startswith("[STATE_CONTINUITY][CURRENT] ref=main_::set-output"))
+        self.assertLessEqual(len(line.split("ref=", 1)[1].strip()), 64)
 
 
 class ProductionWorkflowDeliveryStateTest(unittest.TestCase):

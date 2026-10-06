@@ -35,6 +35,107 @@ class StateContinuityError(RuntimeError):
     """Production state continuity cannot be proven safely."""
 
 
+# Diagnostics only. Run #514 (37486543863) requested the cache of #342
+# (27962120533) although #513 (37347011941) was the successful prod predecessor;
+# the upstream cause is not yet proven. These stderr lines make a recurrence
+# distinguishable (what the runtime was, which history pages it saw, which newest
+# candidates it ordered, what it skipped and selected). They never change a
+# decision: they are written to stderr only -- stdout is the $GITHUB_OUTPUT
+# contract -- carry run metadata only, never the token, headers or URLs, and any
+# failure while building or writing them is swallowed.
+DIAGNOSTIC_PREFIX = "[STATE_CONTINUITY]"
+DIAGNOSTIC_CANDIDATE_LIMIT = 10
+_DIAGNOSTIC_VALUE_MAX_CHARS = 64
+
+
+def _diagnostic_value(value: object) -> str:
+    text = "none" if value is None else str(value)
+    # One line, no spaces, printable only: a value can never start a new log
+    # line or a workflow command.
+    cleaned = "".join(ch if ch.isprintable() and not ch.isspace() else "_" for ch in text)
+    return cleaned[:_DIAGNOSTIC_VALUE_MAX_CHARS] or "empty"
+
+
+def _emit_diagnostic(tag: str, **fields: object) -> None:
+    try:
+        details = " ".join(
+            f"{name}={_diagnostic_value(value)}" for name, value in fields.items()
+        )
+        print(f"{DIAGNOSTIC_PREFIX}[{tag}] {details}".rstrip(), file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 - diagnostics must never affect continuity
+        pass
+
+
+def _diagnostic_run_number(raw: object) -> int | None:
+    """Same acceptance as resolution, but report-only: never raises."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        return _positive_int(raw.get("run_number"), "run_number")
+    except Exception:  # noqa: BLE001 - report-only; resolution re-validates
+        return None
+
+
+def _emit_page_diagnostic(page: int, page_runs: Sequence[object]) -> None:
+    try:
+        numbers = [
+            number
+            for number in (_diagnostic_run_number(raw) for raw in page_runs)
+            if number is not None
+        ]
+        _emit_diagnostic(
+            "PAGE",
+            page=page,
+            count=len(page_runs),
+            min_run_number=min(numbers) if numbers else None,
+            max_run_number=max(numbers) if numbers else None,
+            unparsed_run_number=len(page_runs) - len(numbers),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must never affect continuity
+        pass
+
+
+def _diagnostic_lineage(raw: Mapping[str, object]) -> str:
+    title = raw.get("display_title")
+    if not isinstance(title, str) or not title.strip():
+        return "unknown"
+    try:
+        return _lineage_from_title(title.strip())
+    except StateContinuityError:
+        return "ambiguous"
+
+
+def _emit_candidate_summary(
+    runs: Sequence[Mapping[str, object]],
+    ordered: Sequence[Tuple[int, int, Mapping[str, object]]],
+) -> None:
+    try:
+        shown = list(ordered[:DIAGNOSTIC_CANDIDATE_LIMIT])
+        _emit_diagnostic(
+            "CANDIDATES",
+            history_count=len(runs),
+            prior_count=len(ordered),
+            shown=len(shown),
+            limit=DIAGNOSTIC_CANDIDATE_LIMIT,
+        )
+        for rank, (run_number, run_id, raw) in enumerate(shown, start=1):
+            _emit_diagnostic(
+                "CANDIDATE",
+                rank=rank,
+                run_number=run_number,
+                run_id=run_id,
+                event=raw.get("event"),
+                head_branch=raw.get("head_branch"),
+                run_attempt=raw.get("run_attempt"),
+                status=raw.get("status"),
+                conclusion=raw.get("conclusion"),
+                lineage=_diagnostic_lineage(raw),
+            )
+    except Exception:  # noqa: BLE001 - diagnostics must never affect continuity
+        pass
+
+
 @dataclass(frozen=True)
 class Predecessor:
     run_id: int
@@ -322,6 +423,7 @@ def resolve_predecessor(
         current_run_number=current_run_number,
         current_run_id=current_run_id,
     )
+    _emit_candidate_summary(runs, ordered)
     if not ordered:
         raise StateContinuityError("production_predecessor_missing")
 
@@ -358,12 +460,27 @@ def resolve_predecessor(
         if conclusion in PRE_PUBLISHER_SKIPPABLE:
             jobs_payload = jobs_loader(run_id)
             if _post_job_proves_publisher_not_executed(jobs_payload, run_id):
+                _emit_diagnostic(
+                    "SKIP",
+                    run_id=run_id,
+                    run_number=run_number,
+                    conclusion=conclusion,
+                    reason="publisher_not_executed",
+                )
                 continue
             if matches_proven_incident and _post_job_proves_incident_publisher_failure(
                 jobs_payload, run_id
             ):
+                _emit_diagnostic(
+                    "SKIP",
+                    run_id=run_id,
+                    run_number=run_number,
+                    conclusion=conclusion,
+                    reason="proven_pre_mutation_incident",
+                )
                 continue
 
+        _emit_diagnostic("SELECTED", run_id=run_id, run_number=run_number, conclusion=conclusion)
         return Predecessor(run_id=run_id, run_number=run_number)
 
     raise StateContinuityError("production_predecessor_missing_after_safe_skips")
@@ -411,6 +528,7 @@ class GitHubActionsClient:
             page_runs = payload.get("workflow_runs")
             if not isinstance(page_runs, list):
                 raise StateContinuityError("github_actions_runs_payload_invalid")
+            _emit_page_diagnostic(page, page_runs)
             runs.extend(page_runs)
             if len(page_runs) < 100:
                 return runs
@@ -432,6 +550,13 @@ def build_expected_cache_key(
 
 
 def main() -> int:
+    _emit_diagnostic(
+        "CURRENT",
+        run_id=os.getenv("GITHUB_RUN_ID"),
+        run_number=os.getenv("GITHUB_RUN_NUMBER"),
+        run_attempt=os.getenv("GITHUB_RUN_ATTEMPT"),
+        ref=os.getenv("GITHUB_REF_NAME"),
+    )
     try:
         current_run_id = _positive_int(os.getenv("GITHUB_RUN_ID"), "GITHUB_RUN_ID")
         current_run_number = _positive_int(

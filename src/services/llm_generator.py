@@ -2549,6 +2549,70 @@ def _validate_parent_hearing_inference_output(text: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+PARENT_HEARING_SPECIALIST_ROUTING_REASON = "parent_hearing_specialist_routing"
+PARENT_HEARING_HOME_OBSERVATION_REASON = "parent_hearing_home_observation_needs_disclaimer"
+PARENT_HEARING_TOPIC_IDS = frozenset({"hearing_and_speech"})
+PARENT_HEARING_LOGOPED_CHECK_RE = re.compile(
+    r"(?:педиатр\\w*\\s+или\\s+логопед\\w*|логопед\\w*\\s+или\\s+педиатр\\w*)"
+    r"\\s*,?\\s*(?:и|чтобы)\\s+(?:провер\\w*.{0,25}слух\\w*|обслед\\w*.{0,25}слух\\w*)|"
+    r"(?:провер\\w*.{0,25}слух\\w*|обслед\\w*.{0,25}слух\\w*)"
+    r".{0,45}(?:у|с|к)\\s+логопед\\w*|"
+    r"(?:к|у|с)\\s+логопед\\w*.{0,35}(?:для|чтобы)\\s+"
+    r"(?:провер\\w*.{0,25}слух\\w*|обслед\\w*.{0,25}слух\\w*)",
+    re.IGNORECASE,
+)
+PARENT_HEARING_HOME_OBSERVATION_RE = re.compile(
+    r"(?:назов\\w*.{0,35}(?:имя|по\\s+имени)|позов\\w*.{0,35}(?:имя|ребен\\w*)|"
+    r"изда\\w*.{0,35}(?:звук\\w*|шум\\w*)|проигра\\w*.{0,35}звук\\w*)"
+    r".{0,180}(?:понаблюда\\w*|реагир\\w*|реакц\\w*|поворачива\\w*|отклик\\w*)",
+    re.IGNORECASE,
+)
+PARENT_HEARING_NONDIAGNOSTIC_OBSERVATION_RE = re.compile(
+    r"(?:не\\s+(?:явля\\w*.{0,20})?провер\\w*.{0,45}слух\\w*|"
+    r"не\\s+позволя\\w*.{0,45}(?:вывод\\w*|судить).{0,45}слух\\w*|"
+    r"не\\s+означа\\w*.{0,45}слух\\w*\\s+в\\s+норм\\w*|"
+    r"не\\s+дела\\w*.{0,45}вывод\\w*.{0,45}слух\\w*|"
+    r"(?:один|одна|одно|единичн\\w*|эта|так\\w*)(?:\\s+\\w+){0,2}\\s+"
+    r"(?:реакц\\w*|эпизод\\w*|наблюдени\\w*).{0,70}"
+    r"(?:ничего\\s+не\\s+доказ\\w*|не\\s+подтвержда\\w*|не\\s+исключа\\w*))",
+    re.IGNORECASE,
+)
+
+
+def _is_parent_hearing_context(evidence_text: str = "", topic_id: str = "") -> bool:
+    topic = (topic_id or "").strip().lower()
+    if topic in PARENT_HEARING_TOPIC_IDS:
+        return True
+    return "hearing" in _myth_fact_families(evidence_text or "")
+
+
+def _validate_parent_hearing_guidance_output(
+    text: str,
+    evidence_text: str = "",
+    topic_id: str = "",
+) -> Tuple[bool, str]:
+    if not _is_parent_hearing_context(evidence_text, topic_id):
+        return True, "ok"
+
+    non_myth = "\n".join(
+        line
+        for line in (text or "").splitlines()
+        if not re.match(r"^\\s*🔴\\s*Миф\\s*[:：]", line, flags=re.IGNORECASE)
+    )
+    blob = _normalize_scan_text(non_myth)
+
+    if PARENT_HEARING_LOGOPED_CHECK_RE.search(blob):
+        return False, PARENT_HEARING_SPECIALIST_ROUTING_REASON
+
+    if (
+        PARENT_HEARING_HOME_OBSERVATION_RE.search(blob)
+        and not PARENT_HEARING_NONDIAGNOSTIC_OBSERVATION_RE.search(blob)
+    ):
+        return False, PARENT_HEARING_HOME_OBSERVATION_REASON
+
+    return True, "ok"
+
+
 def _evidence_is_predominantly_english(evidence_text: str) -> bool:
     cleaned = re.sub(r"https?://\S+|www\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", " ", evidence_text or "", flags=re.IGNORECASE)
     latin = len(re.findall(r"[A-Za-z]", cleaned))
@@ -2834,6 +2898,11 @@ def _validate_output(
             _validate_parent_age_range_width,
             _validate_parent_age_action_fit,
             _validate_parent_hearing_inference_output,
+            lambda value: _validate_parent_hearing_guidance_output(
+                value,
+                evidence_text=evidence_text,
+                topic_id=topic_id,
+            ),
             _validate_parent_diagnostic_role_output,
             lambda value: _validate_cross_language_sound_output(value, evidence_text),
             lambda value: _validate_parent_title_status_label_output(value, evidence_text),
@@ -4388,6 +4457,8 @@ PARENT_CONTENT_REPAIR_REASONS = {
     "parent_nonobservable_benefit",
     "thematic_nonobservable_benefit",
     "parent_false_hearing_inference",
+    PARENT_HEARING_SPECIALIST_ROUTING_REASON,
+    PARENT_HEARING_HOME_OBSERVATION_REASON,
     "parent_cross_language_sound_norm",
     "parent_too_many_numbered_steps",
     "parent_title_untranslated_status_label",
@@ -4417,6 +4488,15 @@ PARENT_DIAGNOSTIC_ROLE_REPAIR_INSTRUCTION = (
     "и, если это поддержано EVIDENCE, спокойную рекомендацию обсудить устойчивые вопросы с квалифицированным специалистом. "
     "Домашнюю игру, упражнение или тест не называй способом выявить, подтвердить, диагностировать или исключить нарушение. "
     "Не добавляй новый диагноз, причину, тест, число, возраст, milestone или факт."
+)
+
+
+PARENT_HEARING_GUIDANCE_REPAIR_INSTRUCTION = (
+    "Исправь только hearing-guidance boundary. Проверку или обследование слуха не связывай с логопедом как с заменой "
+    "врачу, ЛОР-врачу, сурдологу или аудиологу. Логопеда можно оставить отдельно только в связи с развитием речи. "
+    "Если домашний шаг просит назвать ребёнка по имени, позвать его или дать звук и наблюдать реакцию, оставь это только "
+    "как наблюдение и прямо укажи, что единичная реакция не проверяет и не подтверждает нормальный слух. "
+    "Не добавляй новый диагноз, тест, число, возраст, milestone, причину или факт."
 )
 
 
@@ -4457,6 +4537,11 @@ def _parent_content_repair_instruction(reason: str) -> str:
         return PARENT_MODALITY_REPAIR_INSTRUCTION
     if reason == "parent_diagnostic_role_violation":
         return PARENT_DIAGNOSTIC_ROLE_REPAIR_INSTRUCTION
+    if reason in {
+        PARENT_HEARING_SPECIALIST_ROUTING_REASON,
+        PARENT_HEARING_HOME_OBSERVATION_REASON,
+    }:
+        return PARENT_HEARING_GUIDANCE_REPAIR_INSTRUCTION
     if reason == "parent_title_untranslated_status_label":
         return PARENT_TITLE_STATUS_LABEL_REPAIR_INSTRUCTION
     return PARENT_CONTENT_REPAIR_INSTRUCTION
@@ -4497,7 +4582,10 @@ PARENT_EDITORIAL_PROMPT_RULE = (
     "не переноси на весь пост самый широкий диапазон источника. Не требуй от младенца слова, фразы или открытого словесного ответа: "
     "разрешены взгляд, улыбка, поворот, поиск глазами, жест, звук, лепет, показ и ожидание продолжения. "
     "В блоке пользы описывай только наблюдаемое действие или реакцию ребенка, без обещаний развития, механизмов, слуховых проверок и диагнозов. "
-    "Не называй игру домашней проверкой слуха. Не переноси русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
+    "Не называй игру домашней проверкой слуха. Если тема касается слуха, не представляй логопеда как специалиста, который проверяет или исключает нарушение слуха; "
+    "для проверки слуха используй врача, ЛОР-врача, сурдолога или аудиолога. Если домашний шаг просит назвать ребёнка по имени, позвать его или дать звук и наблюдать реакцию, "
+    "прямо обозначь это как наблюдение, а не проверку слуха, и укажи, что единичная реакция не подтверждает нормальный слух. "
+    "Не переноси русские звуки, примеры слов или возрастные нормы из англоязычного EVIDENCE без прямой опоры. "
     "Сохраняй модальность EVIDENCE: «может», «часто», «обычно» и аналогичные мягкие формулировки не превращай в «должен», «обязан», «это норма» или другую категорическую возрастную норму. "
     "Домашнее наблюдение, игра, упражнение или ответ не являются основанием ставить, подтверждать или исключать диагноз; описывай наблюдение и при необходимости calibrated referral без индивидуального диагностического вывода. "
     "Используй не более четырех нумерованных шагов, обычно три; объединяй близкие действия. Заголовок делай коротким, естественным и законченным, "
@@ -4816,7 +4904,8 @@ async def generate_post_plain_from_evidence_async(
         if reason in {"missing_parent_safety_note", "blanket_reassurance"}:
             repair += (
                 "Если текст прямо описывает ребёнка с потерей навыков, непониманием речи, остановкой речи или долгим отсутствием прогресса, "
-                "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом и проверить слух.» "
+                "добавь спокойную фразу: «Если навык пропал, понимание речи вызывает вопросы или прогресса долго нет, стоит обсудить это с педиатром или логопедом. "
+                "Если есть сомнения в слухе, проверку слуха обсудите с врачом или аудиологом.» "
                 "Не успокаивай blanket-фразами вроде «не стоит беспокоиться»."
             )
 

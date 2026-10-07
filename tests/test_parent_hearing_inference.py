@@ -1,6 +1,13 @@
 import unittest
 
-from src.services.llm_generator import _validate_parent_hearing_inference_output
+from src.services.llm_generator import (
+    PARENT_EDITORIAL_PROMPT_RULE,
+    PARENT_HEARING_HOME_OBSERVATION_REASON,
+    PARENT_HEARING_SPECIALIST_ROUTING_REASON,
+    _parent_content_repair_instruction,
+    _validate_parent_hearing_guidance_output,
+    _validate_parent_hearing_inference_output,
+)
 
 
 class ParentHearingInferenceTest(unittest.TestCase):
@@ -89,6 +96,92 @@ class ParentHearingInferenceTest(unittest.TestCase):
                     _validate_parent_hearing_inference_output(text)[1],
                     "parent_false_hearing_inference",
                 )
+
+class ParentHearingGuidanceTest(unittest.TestCase):
+    HEARING_EVIDENCE = (
+        "Newborn hearing screening can identify possible hearing loss at birth. "
+        "Later hearing concerns may require a hearing evaluation."
+    )
+
+    def test_rejects_logoped_as_alternative_for_hearing_check(self):
+        text = (
+            "Если навык пропал, стоит обсудить это с педиатром или логопедом "
+            "и проверить слух."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(
+                text,
+                evidence_text=self.HEARING_EVIDENCE,
+                topic_id="hearing_and_speech",
+            ),
+            (False, PARENT_HEARING_SPECIALIST_ROUTING_REASON),
+        )
+
+    def test_allows_separate_speech_and_hearing_roles(self):
+        text = (
+            "Если развитие речи вызывает вопросы, обсудите это с педиатром или логопедом. "
+            "Если есть сомнения в слухе, проверку слуха обсудите с врачом или аудиологом."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(
+                text,
+                evidence_text=self.HEARING_EVIDENCE,
+                topic_id="hearing_and_speech",
+            ),
+            (True, "ok"),
+        )
+
+    def test_non_hearing_post_keeps_logoped_referral(self):
+        text = "Если речь вызывает вопросы, обсудите это с логопедом."
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(
+                text,
+                evidence_text="Speech and language development guidance for parents.",
+                topic_id="vocabulary_phrase",
+            ),
+            (True, "ok"),
+        )
+
+    def test_home_name_or_sound_observation_requires_non_diagnostic_framing(self):
+        text = (
+            "Когда ребёнок занят и не смотрит на вас, тихо назовите его имя "
+            "или издайте новый звук. Понаблюдайте, как он реагирует."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(
+                text,
+                evidence_text=self.HEARING_EVIDENCE,
+                topic_id="hearing_and_speech",
+            ),
+            (False, PARENT_HEARING_HOME_OBSERVATION_REASON),
+        )
+
+    def test_home_name_or_sound_observation_passes_with_disclaimer(self):
+        text = (
+            "Когда ребёнок занят и не смотрит на вас, тихо назовите его имя "
+            "или издайте новый звук. Понаблюдайте, как он реагирует. "
+            "Один такой эпизод ничего не доказывает и не является проверкой слуха."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(
+                text,
+                evidence_text=self.HEARING_EVIDENCE,
+                topic_id="hearing_and_speech",
+            ),
+            (True, "ok"),
+        )
+
+    def test_hearing_repair_and_prompt_contract_are_explicit(self):
+        for reason in (
+            PARENT_HEARING_SPECIALIST_ROUTING_REASON,
+            PARENT_HEARING_HOME_OBSERVATION_REASON,
+        ):
+            repair = _parent_content_repair_instruction(reason)
+            self.assertIn("Логопеда", repair)
+            self.assertIn("единичная реакция", repair)
+        self.assertIn("ЛОР-врача", PARENT_EDITORIAL_PROMPT_RULE)
+        self.assertIn("единичная реакция", PARENT_EDITORIAL_PROMPT_RULE)
+
 
 if __name__ == "__main__":
     unittest.main()

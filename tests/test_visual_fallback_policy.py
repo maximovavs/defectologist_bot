@@ -364,7 +364,6 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         self.assertNotIn("topK", generation_config)
 
     def test_generic_model_fallback_uses_25_when_an_explicit_37_primary_is_unavailable(self):
-    def test_generic_model_fallback_uses_25_when_an_explicit_37_primary_is_unavailable(self):
         # 3.7 is an explicit test model here, not the configured visual-QA
         # primary: this covers the generic primary -> fallback machinery only.
         with patch.dict(os.environ, {"GEMINI_API_KEY": "GENERAL_SECRET"}, clear=True), patch(
@@ -478,7 +477,6 @@ class VisualFallbackPolicyTest(unittest.TestCase):
         # Text generation keeps its own Gemini routing.
         self.assertIn('GEMINI_MODEL: "gemini-3.7-flash"', workflow)
 
-    def test_gemini_human_qa_prompt_requires_character_roles_match_and_exact_child_age(self):
     def test_gemini_human_qa_prompt_requires_character_roles_match_and_exact_child_age(self):
         expected = (
             "Expected roles: Exactly one adult parent and exactly one 2-year-old toddler, "

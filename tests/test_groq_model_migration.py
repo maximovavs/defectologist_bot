@@ -129,17 +129,21 @@ def test_gemini_primary_unavailable_attempts_fallback_without_legacy_sampling() 
         assert "top_k" not in payload
 
 
-def test_workflow_uses_gemini_37_text_primary_and_38_visual_qa_primary() -> None:
+def test_workflow_uses_gemini_37_text_routing_and_25_visual_qa_only() -> None:
     workflow = (ROOT / ".github/workflows/post.yml").read_text(encoding="utf-8")
-    # Text generation: gemini-3.7-flash primary with gemini-2.5-flash fallback.
+    # Text generation keeps its independent 3.7 -> 2.5 routing.
     assert f'GEMINI_MODEL: "{GEMINI_PRIMARY_MODEL}"' in workflow
     assert f'GEMINI_FALLBACK_MODEL: "{GEMINI_FALLBACK_MODEL}"' in workflow
     assert f'GEMINI_MODELS: "{GEMINI_PRIMARY_MODEL},{GEMINI_FALLBACK_MODEL}"' in workflow
-    # Visual QA: gemini-3.8-flash primary, gemini-2.5-flash fallback, independent
-    # of text routing.
-    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-3.8-flash"' in workflow
+    # Production Visual QA is intentionally single-model after candidate dedup:
+    # 2.5 primary and the same 2.5 fallback slot. 3.8 is not on the critical path.
+    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-2.5-flash"' in workflow
     assert 'GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-2.5-flash"' in workflow
+    assert 'GEMINI_VISUAL_QA_MODEL: "gemini-3.8-flash"' not in workflow
+    assert 'GEMINI_VISUAL_QA_FALLBACK_MODEL: "gemini-3.8-flash"' not in workflow
     assert 'GEMINI_VISUAL_QA_MODEL: "gemini-3.7-flash"' not in workflow
+
+
 
 
 def test_primary_failure_attempts_fallback_model() -> None:

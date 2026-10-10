@@ -266,8 +266,7 @@ def _fit_title_lines(
         font = _load_font(font_size)
         lines = _wrap_to_width(draw, cleaned, font, max_width)
         if len(lines) > max_lines:
-            lines = lines[:max_lines]
-            lines[-1] = _ellipsize_line(draw, lines[-1], font, max_width)
+            continue
 
         multiline = "\n".join(lines)
         spacing = max(8, int(font_size * 0.2))
@@ -278,9 +277,18 @@ def _fit_title_lines(
             return font, multiline, spacing
 
     font = _load_font(34)
-    lines = _wrap_to_width(draw, cleaned, font, max_width)[:max_lines]
-    if lines:
-        lines[-1] = _ellipsize_line(draw, lines[-1], font, max_width)
+    lines = _wrap_to_width(draw, cleaned, font, max_width)
+    if len(lines) > max_lines:
+        visible_lines = lines[: max_lines - 1]
+        visible_lines.append(
+            _ellipsize_line(
+                draw,
+                " ".join(lines[max_lines - 1 :]),
+                font,
+                max_width,
+            )
+        )
+        lines = visible_lines
     return font, "\n".join(lines), max(8, int(34 * 0.2))
 
 def _open_background(day_key: str) -> Image.Image:

@@ -11,8 +11,15 @@ import unittest
 from unittest.mock import Mock, patch
 
 import requests
+from PIL import Image, ImageDraw
 
 from src.services import visual_pipeline
+from src.services.image_builder import (
+    MAX_TITLE_LINES,
+    TARGET_SIZE,
+    _fit_title_lines,
+    sanitize_cover_title,
+)
 from src.services.visual_pipeline import (
     DEFAULT_GEMINI_VISUAL_QA_FALLBACK_MODEL,
     DEFAULT_GEMINI_VISUAL_QA_MODEL,
@@ -259,6 +266,70 @@ class VisualQAPrimaryModelContractTest(unittest.TestCase):
             ),
             ["gemini-3.8-flash", "gemini-3.8-flash,gemini-2.5-flash"],
         )
+
+
+class FallbackCoverTitleFittingTest(unittest.TestCase):
+    RUN_518_TITLE = "Чтение интерактивных книг для развития словаря"
+
+    def setUp(self):
+        self.image = Image.new("RGB", TARGET_SIZE)
+        self.draw = ImageDraw.Draw(self.image)
+        self.max_width = int(TARGET_SIZE[0] * 0.72)
+        self.max_height = int(TARGET_SIZE[1] * 0.42)
+
+    def _fit(self, title: str):
+        font, multiline, spacing = _fit_title_lines(
+            draw=self.draw,
+            title=title,
+            max_width=self.max_width,
+            max_height=self.max_height,
+            max_lines=MAX_TITLE_LINES,
+        )
+        bbox = self.draw.multiline_textbbox(
+            (0, 0),
+            multiline,
+            font=font,
+            align="center",
+            spacing=spacing,
+        )
+        return font, multiline, spacing, bbox
+
+    def _assert_within_existing_layout(self, multiline: str, bbox) -> None:
+        self.assertLessEqual(len(multiline.splitlines()), MAX_TITLE_LINES)
+        self.assertLessEqual(int(bbox[2] - bbox[0]), self.max_width)
+        self.assertLessEqual(int(bbox[3] - bbox[1]), self.max_height)
+
+    def test_run_518_title_fits_complete_within_three_lines(self):
+        font, multiline, _spacing, bbox = self._fit(self.RUN_518_TITLE)
+
+        self.assertEqual(" ".join(multiline.split()), self.RUN_518_TITLE)
+        self.assertIn("словаря", multiline)
+        self._assert_within_existing_layout(multiline, bbox)
+        self.assertGreaterEqual(getattr(font, "size", 34), 34)
+
+    def test_short_title_is_not_unnecessarily_changed(self):
+        title = "Развитие словаря"
+        _font, multiline, _spacing, bbox = self._fit(title)
+
+        self.assertEqual(" ".join(multiline.split()), title)
+        self.assertNotIn("…", multiline)
+        self._assert_within_existing_layout(multiline, bbox)
+
+    def test_genuinely_overlong_title_uses_bounded_minimum_font_ellipsis(self):
+        title = " ".join(["Очень длинный демонстрационный заголовок"] * 20)
+        font, multiline, _spacing, bbox = self._fit(title)
+
+        self.assertTrue(multiline.endswith("…"))
+        self.assertEqual(getattr(font, "size", 34), 34)
+        self._assert_within_existing_layout(multiline, bbox)
+
+    def test_sanitize_cover_title_contract_is_unchanged(self):
+        self.assertEqual(sanitize_cover_title(self.RUN_518_TITLE), self.RUN_518_TITLE)
+        self.assertEqual(
+            sanitize_cover_title("Источник: example.org", fallback="Fallback"),
+            "Fallback",
+        )
+        self.assertEqual(sanitize_cover_title("#тег", fallback="Fallback"), "Fallback")
 
 
 class VisualFallbackPolicyTest(unittest.TestCase):

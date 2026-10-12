@@ -2,7 +2,8 @@ name: Logoped Channel Bot v2.9
 
 on:
   schedule:
-    - cron: "30 8 * * *"
+    - cron: "0 8 * * *"
+      timezone: "Asia/Nicosia"
   workflow_dispatch:
     inputs:
       dry_run:

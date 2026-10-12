@@ -1061,6 +1061,40 @@ def _extract_source_line(lines: List[str], fallback_domain: str) -> str:
     return f"Источник: {fallback_domain}"
 
 
+def _public_source_domain(source_domain: str, source_url: str) -> str:
+    display = (source_domain or "").strip()
+    if not display:
+        return display
+    try:
+        parsed = urlparse(source_url or "")
+        default_port = {"https": 443, "http": 80}.get((parsed.scheme or "").lower())
+        if default_port is None or parsed.port != default_port:
+            return display
+        netloc = (parsed.netloc or "").strip()
+        if not netloc or display.casefold() != netloc.casefold():
+            return display
+        host = parsed.hostname or ""
+        if not host:
+            return display
+        if ":" in host and not host.startswith("["):
+            return f"[{host}]"
+        return host
+    except (ValueError, AttributeError):
+        return display
+
+
+def _normalize_public_source_line(source_line: str, source_url: str) -> str:
+    line = (source_line or "").strip()
+    match = re.match(r"^(Источник:\s*)(.+\S)$", line, flags=re.IGNORECASE)
+    if not match:
+        return line
+    display = match.group(2).strip()
+    normalized = _public_source_domain(display, source_url)
+    if normalized == display:
+        return line
+    return f"{match.group(1)}{normalized}"
+
+
 def _extract_link_line(lines: List[str], fallback_url: str) -> str:
     for line in lines:
         st = line.strip()
@@ -1175,7 +1209,10 @@ def finalize_plain_post_for_publication(
         raw_lines.pop()
 
     thematic_tags, no_tag_lines = _extract_thematic_tags_and_clean_lines(raw_lines)
-    source_line = _extract_source_line(no_tag_lines, source_domain)
+    source_line = _normalize_public_source_line(
+        _extract_source_line(no_tag_lines, source_domain),
+        source_url,
+    )
     link_line = _extract_link_line(no_tag_lines, source_url)
     body_lines = _remove_footer_lines(no_tag_lines)
 

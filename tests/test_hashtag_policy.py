@@ -10,7 +10,11 @@ sys.modules.setdefault(
     types.SimpleNamespace(SentenceTransformer=object, util=types.SimpleNamespace()),
 )
 
-from src.publisher.run_publisher import finalize_plain_post_for_publication
+from src.publisher.run_publisher import (
+    finalize_plain_post_for_publication,
+    render_plain_to_telegram_html,
+    safe_domain,
+)
 
 
 class HashtagPolicyTest(unittest.TestCase):
@@ -124,6 +128,58 @@ class HashtagPolicyTest(unittest.TestCase):
             self._hashtags(final),
             ["#речь_в_разных_ситуациях", "#билингвизм"],
         )
+
+    def test_public_source_default_ports_are_display_only(self):
+        cases = (
+            (
+                "https://www.healthychildren.org:443/path",
+                "www.healthychildren.org:443",
+                "www.healthychildren.org",
+            ),
+            ("http://example.org:80/path", "example.org:80", "example.org"),
+            ("https://example.org:8443/path", "example.org:8443", "example.org:8443"),
+            ("http://example.org:8080/path", "example.org:8080", "example.org:8080"),
+            ("https://example.org/path", "example.org", "example.org"),
+        )
+
+        for source_url, source_domain, expected_domain in cases:
+            with self.subTest(source_url=source_url):
+                plain = (
+                    "Заголовок\n\n"
+                    "Основной текст.\n\n"
+                    f"Источник: {source_domain}\n"
+                    f"🔗 {source_url}"
+                )
+                final = finalize_plain_post_for_publication(
+                    plain,
+                    day_key="TU",
+                    source_domain=source_domain,
+                    source_url=source_url,
+                    max_chars=1000,
+                )
+
+                self.assertIn(f"Источник: {expected_domain}\n", final)
+                self.assertIn(f"🔗 {source_url}", final)
+                self.assertEqual(safe_domain(source_url), source_domain)
+
+                html = render_plain_to_telegram_html(final)
+                self.assertIn(f'href="{source_url}"', html)
+                self.assertIn(">Читать оригинальный материал</a>", html)
+
+    def test_public_source_friendly_label_is_not_rewritten(self):
+        source_url = "https://www.healthychildren.org:443/path"
+        final = finalize_plain_post_for_publication(
+            "Заголовок\n\nОсновной текст.\n\nИсточник: HealthyChildren",
+            day_key="TU",
+            source_domain="www.healthychildren.org:443",
+            source_url=source_url,
+            max_chars=1000,
+        )
+
+        self.assertIn("Источник: HealthyChildren", final)
+        self.assertIn(f"🔗 {source_url}", final)
+
+
 
 
 if __name__ == "__main__":

@@ -17,18 +17,11 @@ from src.publisher.dedup_policy import (
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_METHOD_SOURCES = {
-    "logopedy_articles_latest",
-    "logoportal_latest",
-    "kidskey_speech_games",
-    "parents_language_activities",
-    "parents_toddler_language_boost",
-    "hanen_parent_tips",
-    "naeyc_family_communication",
-    "fraser_parent_speech_tips",
-    "parents_sensory_play_language",
-    "parents_baby_language_activities",
-    "asha_public_speech_sound_disorders",
-    "healthychildren_language_development",
+    "asha_preschool_home_language_activities",
+    "asha_communication_milestones_3_to_4",
+    "asha_communication_milestones_4_to_5",
+    "nationwide_birth_to_3_language_activities",
+    "asha_school_readiness_language_activities",
 }
 
 
@@ -148,18 +141,19 @@ class MethodPiggybankPolicyTest(unittest.TestCase):
         self.assertNotEqual(first_sources, ["big", "big", "big"])
 
     def test_method_piggybank_round_robin_includes_new_sources(self):
+        primary_source = sorted(EXPECTED_METHOD_SOURCES)[0]
         candidates = [
-            {"source_id": "logopedy_articles_latest", "link": f"https://big.example/{idx}"}
+            {"source_id": primary_source, "link": f"https://big.example/{idx}"}
             for idx in range(25)
         ] + [
             {"source_id": source_id, "link": f"https://{source_id}.example/1"}
-            for source_id in sorted(EXPECTED_METHOD_SOURCES - {"logopedy_articles_latest"})
+            for source_id in sorted(EXPECTED_METHOD_SOURCES - {primary_source})
         ]
 
         ordered = order_candidates_for_rubric("method_piggybank", candidates, random.Random(123))
         first_sources = [candidate["source_id"] for candidate in ordered[: len(EXPECTED_METHOD_SOURCES)]]
         self.assertEqual(set(first_sources), EXPECTED_METHOD_SOURCES)
-        self.assertEqual(first_sources.count("logopedy_articles_latest"), 1)
+        self.assertEqual(first_sources.count(primary_source), 1)
 
     def test_non_method_piggybank_candidate_order_uses_existing_shuffle(self):
         candidates = [

@@ -10,8 +10,11 @@ from src.publisher.dedup_policy import is_scientific_domain
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDED_TIER1_SOURCE_IDS = {
-    "asha_public_speech_sound_disorders",
-    "healthychildren_language_development",
+    "asha_preschool_home_language_activities",
+    "asha_communication_milestones_3_to_4",
+    "asha_communication_milestones_4_to_5",
+    "nationwide_birth_to_3_language_activities",
+    "asha_school_readiness_language_activities",
 }
 LEGACY_NON_TIER1_DOMAINS = {
     "logopedy.ru",
@@ -113,6 +116,49 @@ class MethodPiggybankTier1SourceRoutingTest(unittest.TestCase):
                 tier1_ids.append(source_id)
 
         self.assertTrue(ADDED_TIER1_SOURCE_IDS.issubset(set(tier1_ids)))
+
+    def test_method_inventory_is_bounded_static_tier1_only(self):
+        rubric = _method_piggybank()
+        sources_cfg, registry = _source_registry()
+        source_ids = rubric["sources"]
+        self.assertEqual(len(source_ids), len(set(source_ids)))
+        self.assertEqual(set(source_ids), ADDED_TIER1_SOURCE_IDS)
+        self.assertEqual(rubric["byweekday"], ["SA"])
+        self.assertEqual(rubric["format"], "pro_friendly")
+        self.assertEqual(rubric["media"], ["image_card"])
+        for source_id in source_ids:
+            with self.subTest(source=source_id):
+                item = registry[source_id]
+                self.assertEqual(item["type"], "static")
+                self.assertEqual(len(item["urls"]), 1)
+                url = item["urls"][0]
+                self.assertEqual(urlparse(url).scheme, "https")
+                self.assertTrue(is_scientific_domain(urlparse(url).hostname, sources_cfg["quality"]["scientific_domains"]))
+
+    def test_dead_and_legacy_methods_sources_cannot_enter_saturday_pool(self):
+        source_ids = set(_method_piggybank()["sources"])
+        self.assertNotIn("logopedy_articles_latest", source_ids)
+        self.assertNotIn("logoportal_latest", source_ids)
+        self.assertNotIn("healthychildren_language_development", source_ids)
+        self.assertNotIn("asha_public_speech_sound_disorders", source_ids)
+        self.assertNotIn("parents_language_activities", source_ids)
+
+    def test_new_methods_urls_are_exact_and_unique(self):
+        _, registry = _source_registry()
+        expected = {
+            "asha_preschool_home_language_activities": "https://www.asha.org/about/press-room/articles/8-speech-and-language-skills-to-practice-with-your-preschooler-at-home/",
+            "asha_communication_milestones_3_to_4": "https://www.asha.org/public/developmental-milestones/communication-milestones-3-to-4-years/",
+            "asha_communication_milestones_4_to_5": "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/",
+            "nationwide_birth_to_3_language_activities": "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/05/speech-and-communication-development-birth-to-3-years",
+            "asha_school_readiness_language_activities": "https://www.asha.org/news/2023/how-to-build-back-to-school-readiness/",
+        }
+        urls = [registry[source_id]["urls"][0] for source_id in expected]
+        self.assertEqual(len(urls), len(set(urls)))
+        for source_id, url in expected.items():
+            self.assertEqual(
+                registry[source_id]["urls"],
+                [url],
+            )
 
 
 if __name__ == "__main__":

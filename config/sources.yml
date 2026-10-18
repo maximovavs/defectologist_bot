@@ -171,6 +171,37 @@ sources:
     urls:
       - "https://www.asha.org/practice-portal/clinical-topics/articulation-and-phonology/"
 
+  # Bounded method-card sources; authority and content gates stay unchanged.
+  - id: asha_preschool_home_language_activities
+    name: "ASHA — Preschool speech and language activities"
+    type: static
+    urls:
+      - "https://www.asha.org/about/press-room/articles/8-speech-and-language-skills-to-practice-with-your-preschooler-at-home/"
+
+  - id: asha_communication_milestones_3_to_4
+    name: "ASHA — Communication milestones 3 to 4 years"
+    type: static
+    urls:
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-3-to-4-years/"
+
+  - id: asha_communication_milestones_4_to_5
+    name: "ASHA — Communication milestones 4 to 5 years"
+    type: static
+    urls:
+      - "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/"
+
+  - id: nationwide_birth_to_3_language_activities
+    name: "Nationwide Children’s — Speech and communication birth to 3 years"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/05/speech-and-communication-development-birth-to-3-years"
+
+  - id: asha_school_readiness_language_activities
+    name: "ASHA — Back-to-school communication readiness"
+    type: static
+    urls:
+      - "https://www.asha.org/news/2023/how-to-build-back-to-school-readiness/"
+
   - id: asha_practice_portal_multilingual_service_delivery
     name: "ASHA — Practice Portal (Multilingual Service Delivery)"
     type: static

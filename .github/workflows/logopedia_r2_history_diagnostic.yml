@@ -2,7 +2,7 @@ name: Logopedia R2 history diagnostic (isolated)
 
 on:
   pull_request:
-    types: [opened]
+    types: [synchronize]
     branches: [main]
     paths: [.github/workflows/logopedia_r2_history_diagnostic.yml]
 
@@ -12,6 +12,9 @@ cache-mode: read
 jobs:
   history:
     if: >-
+      github.event.action == 'synchronize' &&
+      github.event.pull_request.number == 97 &&
+      github.event.pull_request.commits == 2 &&
       github.repository == 'maximovavs/defectologist_bot' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'agent/logopedia-r2-history-diagnostic' &&
@@ -41,20 +44,36 @@ jobs:
 
 
           def get_json(path):
+              # Stable endpoint labels only; never expose paths, response bodies or exception messages.
+              if path == 'git/ref/heads/main':
+                  stage = 'main'
+              elif path.startswith('actions/caches?'):
+                  stage = 'cache'
+              elif path.startswith('actions/workflows/218742009/runs?'):
+                  stage = 'producer'
+              else:
+                  raise ValueError('api_endpoint_unexpected')
               conn = http.client.HTTPSConnection('api.github.com', timeout=15)
               try:
-                  conn.request('GET', '/repos/' + REPO + '/' + path, headers={
-                      'Accept': 'application/vnd.github+json',
-                      'X-GitHub-Api-Version': '2022-11-28',
-                      'User-Agent': 'logopedia-r2-readonly-diagnostic',
-                  })
-                  response = conn.getresponse()
-                  if response.status != 200:
-                      raise ValueError('api_status')
-                  raw = response.read(2_000_001)
+                  try:
+                      conn.request('GET', '/repos/' + REPO + '/' + path, headers={
+                          'Accept': 'application/vnd.github+json',
+                          'X-GitHub-Api-Version': '2022-11-28',
+                          'User-Agent': 'logopedia-r2-readonly-diagnostic',
+                      })
+                      response = conn.getresponse()
+                      if response.status != 200:
+                          status = response.status if response.status in (401, 403, 404, 429, 500, 502, 503) else 'other'
+                          raise ValueError(f'{stage}_http_{status}')
+                      raw = response.read(2_000_001)
+                  except (OSError, http.client.HTTPException):
+                      raise ValueError(f'{stage}_transport_error') from None
                   if len(raw) > 2_000_000:
-                      raise ValueError('api_size')
-                  return json.loads(raw)
+                      raise ValueError(f'{stage}_api_size')
+                  try:
+                      return json.loads(raw)
+                  except (ValueError, UnicodeDecodeError):
+                      raise ValueError(f'{stage}_json_invalid') from None
               finally:
                   conn.close()
 
@@ -91,8 +110,22 @@ jobs:
                   if os.environ.get('ACTIONS_CACHE_MODE') != 'read':
                       raise ValueError('cache_mode_unconfirmed')
                   verify_provenance(get_json)
+              except ValueError as error:
+                  code = str(error)
+                  expected = {'api_endpoint_unexpected', 'cache_mode_unconfirmed', 'main_drift',
+                              'cache_inventory_unbounded', 'cache_absent_or_shadowed',
+                              'cache_identity_drift', 'latest_prod_unproven',
+                              'production_snapshot_not_latest'}
+                  for stage in ('main', 'cache', 'producer'):
+                      expected.update({f'{stage}_http_{status}' for status in
+                                       (401, 403, 404, 429, 500, 502, 503, 'other')})
+                      expected.update({f'{stage}_{suffix}' for suffix in
+                                       ('transport_error', 'api_size', 'json_invalid')})
+                  if code not in expected:
+                      code = 'unexpected_value_error'
+                  raise SystemExit('BLOCKED: provenance_guard:' + code) from None
               except Exception:
-                  raise SystemExit('BLOCKED: provenance_guard') from None
+                  raise SystemExit('BLOCKED: provenance_guard:unexpected_exception') from None
           PY
           python3 -I "$RUNNER_TEMP/r2_history_guard.py"
 

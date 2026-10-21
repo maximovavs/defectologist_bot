@@ -5,6 +5,7 @@ from src.services.llm_generator import (
     _parse_parent_age_range,
     _validate_parent_age_action_fit,
     _validate_parent_age_range_width,
+    _validate_parent_safety_output,
 )
 
 
@@ -129,6 +130,68 @@ class ParentAgePolicyTest(unittest.TestCase):
     def test_parent_editorial_prompt_uses_correct_imperative(self):
         self.assertIn("Не переноси русские звуки", PARENT_EDITORIAL_PROMPT_RULE)
         self.assertNotIn("Не переносись русские звуки", PARENT_EDITORIAL_PROMPT_RULE)
+
+class ParentInducedStartleSafetyTest(unittest.TestCase):
+    def test_g11_real_infant_startle_instruction_is_rejected(self):
+        # Telegram #347: intentional adult sound elicitation, not a milestone.
+        post = (
+            "Разговорный «покажи-улыбнись»\n👶 Возраст: до 3 мес.\n"
+            "🎲 Как играть:\n"
+            "• Сидим рядом, говорим спокойно.\n"
+            "• Меняем тон: говорим громче «БА!», наблюдаем, как малыш вздрагивает.\n"
+            "💡 Что это дает: ребёнок реагирует на голос."
+        )
+        self.assertEqual(
+            _validate_parent_safety_output(post),
+            (False, "parent_induced_startle_instruction"),
+        )
+
+    def test_induced_startle_variations_are_rejected(self):
+        for action in (
+            "Сделайте громкий звук, чтобы ребёнок вздрогнул.",
+            "Сделайте резкий звук, чтобы младенец испугался.",
+            "Хлопните громко, чтобы малыш вздрогнул.",
+            "Стукните резко, наблюдая, как ребенок вздрагивает.",
+            "Скажите «БА» громче, наблюдая, как малыш вздрагивает.",
+        ):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    _validate_parent_safety_output(action),
+                    (False, "parent_induced_startle_instruction"),
+                )
+
+    def test_natural_startle_descriptions_and_explicit_prohibitions_are_allowed(self):
+        for text in (
+            "Младенец иногда вздрагивает от неожиданного громкого звука.",
+            "Понаблюдайте, как малыш реагирует на ваш спокойный голос.",
+            "Не говорите громче «БА», наблюдая, как малыш вздрагивает.",
+            "Избегайте говорить громче «БА», наблюдая, как малыш вздрагивает.",
+            "Нельзя хлопнуть громко, чтобы ребёнок вздрогнул.",
+            "Не создавайте громкий звук, чтобы малыш вздрогнул.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_validate_parent_safety_output(text), (True, "ok"))
+
+    def test_benign_speech_games_are_unchanged(self):
+        for text in (
+            "Пойте колыбельную спокойным голосом, ребёнок может улыбнуться.",
+            "Говорите с малышом, делая паузы и меняя интонацию.",
+            "Позвените тихим колокольчиком и улыбнитесь малышу.",
+            "Разговаривайте громче на фоне шума, не пугая ребёнка.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_validate_parent_safety_output(text), (True, "ok"))
+
+    def test_unsafe_action_cannot_be_excused_by_disclaimer(self):
+        text = (
+            "Говорим громче, наблюдаем, как малыш вздрагивает. "
+            "Это не проверка слуха, а обычная игра."
+        )
+        self.assertEqual(
+            _validate_parent_safety_output(text),
+            (False, "parent_induced_startle_instruction"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

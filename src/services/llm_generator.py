@@ -1849,7 +1849,52 @@ def _validate_parent_title_status_label_output(text: str, evidence_text: str = "
     return True, "ok"
 
 
+# An observed startle in milestones is not an instruction to provoke one.
+# Reject only a parent-directed loud/sudden sound *followed by* a deliberate
+# attempt to elicit or watch the child's startle. Quiet sound games, natural
+# observations, and explicit prohibitions must remain permissible.
+PARENT_INDUCED_STARTLE_ACTION_RE = re.compile(
+    r"\b(?:говор(?:им|ите|и|ит)\s+громч\w*|"
+    r"(?:скаж\w*|произнес\w*)\s+[^\n]{0,30}?\s+громч\w*|"
+    r"(?:сдела\w*|включ\w*|произвед\w*)\s+(?:резк\w*|громк\w*)\s+звук\w*|"
+    r"(?:хлопн\w*|стукн\w*|позвен\w*)\s+(?:\w+\s+){0,3}(?:резк\w*|громк\w*)|"
+    r"(?:крикн\w*|закрич\w*)\s+(?:резк\w*|громк\w*))\b",
+    re.IGNORECASE,
+)
+PARENT_INDUCED_STARTLE_CHILD_RE = re.compile(
+    r"\b(?:малыш\w*|ребен\w*|младен\w*|дет\w*|он|она)"
+    r"(?:\s+\w+){0,4}\s+(?:вздраг\w*|вздрог\w*|испуга\w*|пуга\w*)\b",
+    re.IGNORECASE,
+)
+PARENT_INDUCED_STARTLE_INTENT_RE = re.compile(
+    r"(?:наблюда\w*.{0,35}как|смотр\w*.{0,35}как|увид\w*.{0,35}как|чтобы)",
+    re.IGNORECASE,
+)
+PARENT_INDUCED_STARTLE_PROHIBITION_RE = re.compile(
+    r"(?:\bне\s+|\bнельзя\s+|\bизбегайте\s+|\bне\s+следует\s+|"
+    r"\bне\s+нужно\s+|\bне\s+стоит\s+|\bникогда\s+не\s+)\w*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _has_parent_induced_startle_instruction(text: str) -> bool:
+    for line in _normalize_scan_lines(text):
+        for action in PARENT_INDUCED_STARTLE_ACTION_RE.finditer(line):
+            prefix = line[max(0, action.start() - 45):action.start()]
+            if PARENT_INDUCED_STARTLE_PROHIBITION_RE.search(prefix):
+                continue
+            # Keep action/reaction within the same instruction, not different
+            # bullet points or unrelated sentences in the post.
+            tail = line[action.end():action.end() + 180]
+            outcome = PARENT_INDUCED_STARTLE_CHILD_RE.search(tail)
+            if outcome and PARENT_INDUCED_STARTLE_INTENT_RE.search(tail[:outcome.start()]):
+                return True
+    return False
+
+
 def _validate_parent_safety_output(text: str) -> Tuple[bool, str]:
+    if _has_parent_induced_startle_instruction(text):
+        return False, "parent_induced_startle_instruction"
     blob = _normalize_scan_text(text)
     blanket = _contains_any_fragment(blob, BLANKET_REASSURANCE)
     if blanket:
@@ -2563,8 +2608,11 @@ PARENT_HEARING_LOGOPED_CHECK_RE = re.compile(
 )
 PARENT_HEARING_HOME_OBSERVATION_RE = re.compile(
     r"(?:назов\w*.{0,35}(?:имя|по\s+имени)|позов\w*.{0,35}(?:имя|ребен\w*)|"
-    r"изда\w*.{0,35}(?:звук\w*|шум\w*)|проигра\w*.{0,35}звук\w*)"
-    r".{0,180}(?:понаблюда\w*|реагир\w*|реакц\w*|поворачива\w*|отклик\w*)",
+    r"изда\w*.{0,35}(?:звук\w*|шум\w*)|проигра\w*.{0,35}звук\w*|"
+    r"постуч\w*.{0,40}(?:колокольчик\w*|погремушк\w*)|"
+    r"позвен\w*.{0,40}(?:колокольчик\w*|погремушк\w*))"
+    r".{0,180}(?:понаблюда\w*|наблюда\w*|реагир\w*|реакц\w*|"
+    r"поворачива\w*|поверн\w*|отклик\w*)",
     re.IGNORECASE,
 )
 PARENT_HEARING_NONDIAGNOSTIC_OBSERVATION_RE = re.compile(

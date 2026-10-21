@@ -183,5 +183,63 @@ class ParentHearingGuidanceTest(unittest.TestCase):
         self.assertIn("единичная реакция", PARENT_EDITORIAL_PROMPT_RULE)
 
 
+    def test_g09_real_newborn_name_and_bell_observation_fails_closed(self):
+        # Edited Telegram #321: participle "наблюдая" was not recognized by
+        # the previous hearing-context observation guard.
+        text = (
+            "🧩 Что попробовать сегодня: в тишине мягко позовите малыша по имени "
+            "или постучите лёгким колокольчиком, наблюдая, повернётся ли его "
+            "голова к звуку, улыбнётся или посмотрит в вашу сторону."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(
+                text, evidence_text=self.HEARING_EVIDENCE, topic_id="hearing_and_speech"
+            ),
+            (False, PARENT_HEARING_HOME_OBSERVATION_REASON),
+        )
+
+    def test_g09_observation_without_name_catches_bell_or_rattle(self):
+        for instruction in (
+            "Постучите легким колокольчиком, наблюдая, как малыш отреагирует.",
+            "Позвените погремушкой и посмотрите на реакцию ребёнка.",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertEqual(
+                    _validate_parent_hearing_guidance_output(
+                        instruction, topic_id="hearing_and_speech"
+                    ),
+                    (False, PARENT_HEARING_HOME_OBSERVATION_REASON),
+                )
+
+    def test_g09_disclaimer_restores_allowed_nondiagnostic_observation(self):
+        action = (
+            "Мягко позовите малыша по имени, наблюдая, как он повернётся к вам. "
+            "Это наблюдение не является проверкой слуха."
+        )
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(action, topic_id="hearing_and_speech"),
+            (True, "ok"),
+        )
+
+    def test_normal_sound_interaction_and_hearing_referral_are_not_banned(self):
+        for text in (
+            "Тихо спойте малышу колыбельную, дождитесь его улыбки.",
+            "Во время игры спокойно называйте знакомые игрушки.",
+            "Если есть сомнения в слухе, обратитесь к сурдологу или аудиологу.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _validate_parent_hearing_guidance_output(text, topic_id="hearing_and_speech"),
+                    (True, "ok"),
+                )
+
+    def test_sound_observation_outside_hearing_context_stays_allowed(self):
+        text = "Пойте колыбельную и наблюдайте, как ребёнок реагирует на голос."
+        self.assertEqual(
+            _validate_parent_hearing_guidance_output(text, topic_id="early_communication"),
+            (True, "ok"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

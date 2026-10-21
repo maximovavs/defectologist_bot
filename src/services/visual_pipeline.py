@@ -2532,6 +2532,32 @@ def build_object_only_visual_prompt(
     return f"{compiled} {marker}"
 
 
+HUMAN_SINGING_ACTION_RE = re.compile(
+    r"\b(?:parent|adult|mother|father|mom|dad|caregiver)\b[^.;]{0,40}?\b(?:sings?|is singing|are singing)\b",
+    re.IGNORECASE,
+)
+SINGING_OBJECT_FOCUS_RE = re.compile(
+    r"\b(?:instruments?|drums?|bells?|xylophones?|shakers?|rattles?|tambourines?|maracas|pianos?|guitars?|"
+    r"whistles?|music (?:player|box)|audio player|speakers?|radio|recordings?|headphones?)\b",
+    re.IGNORECASE,
+)
+
+
+def _human_singing_action_requires_text_cover(rubric_id: str, context_hint: str) -> bool:
+    """A still life of instruments cannot depict a parent's singing exchange.
+
+    Decided from the structured brief of the compiled prompt: the action must be
+    an adult singing, and neither the action nor the props may centre on an
+    instrument or sound object (an instrument-naming song keeps its objects).
+    """
+    if (rubric_id or "").strip().lower() != "play_and_speak":
+        return False
+    brief = _parse_compiled_visual_prompt(context_hint, rubric_id=rubric_id)
+    if brief is None or not HUMAN_SINGING_ACTION_RE.search(brief.action):
+        return False
+    return not SINGING_OBJECT_FOCUS_RE.search(" ".join((brief.action, *brief.props)))
+
+
 def _build_object_visual_fallback(
     *,
     safe_title: str,
@@ -2552,10 +2578,15 @@ def _build_object_visual_fallback(
 ) -> Tuple[BytesIO, Dict[str, str]]:
     rubric = (rubric_id or "").strip().lower()
     retry_exhausted = retry_qa is not None or str(trigger or "").startswith("visual_retry_failed:")
-    if rubric == "method_piggybank" and retry_exhausted:
+    singing_requires_text = _human_singing_action_requires_text_cover(rubric, context_hint)
+    if (rubric == "method_piggybank" and retry_exhausted) or singing_requires_text:
         qa_result = retry_qa or first_qa or {}
+        policy_reason = (
+            "human_singing_action_requires_text_cover" if singing_requires_text
+            else "method_piggybank_human_qa_exhausted"
+        )
         print(
-            "[VISUAL][TEXT_FALLBACK] trigger=method_piggybank_human_qa_exhausted "
+            f"[VISUAL][TEXT_FALLBACK] trigger={policy_reason} "
             f"last_reason={_short_log_message(trigger)}",
             flush=True,
         )
@@ -2572,9 +2603,10 @@ def _build_object_visual_fallback(
             "fallback_stage": "text",
             "fallback_trigger": str(trigger or "visual_quality_rejected"),
             "reason": str(trigger or "visual_quality_rejected"),
-            "final_reason": "method_piggybank_object_fallback_not_allowed",
+            "final_reason": ("singing_action_object_fallback_not_allowed" if singing_requires_text
+                             else "method_piggybank_object_fallback_not_allowed"),
             "fallback_reason": str(trigger or "visual_quality_rejected"),
-            "visual_retry_used": "True",
+            "visual_retry_used": str(retry_exhausted) if singing_requires_text else "True",
             "visual_qa": str(qa_result.get("status", "fail")),
             "visual_qa_status": str(qa_result.get("status", "fail")),
             "visual_qa_reason": str(qa_result.get("reason", trigger or "visual_quality_rejected")),
@@ -2583,7 +2615,8 @@ def _build_object_visual_fallback(
             "visual_qa_child_count": str(qa_result.get("child_count", "unknown")),
             "visual_qa_ppe_detected": str(qa_result.get("ppe_detected", "unknown")),
             "visual_qa_text_detected": str(qa_result.get("text_detected", "unknown")),
-            "visual_qa_attempts": "2",
+            "visual_qa_attempts": (str(sum(1 for qa in (first_qa, retry_qa) if qa)) if singing_requires_text
+                                   else "2"),
             "human_qa_first_status": str((first_qa or {}).get("status", "fail")),
             "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
             "human_qa_retry_status": str((retry_qa or {}).get("status", "fail")),

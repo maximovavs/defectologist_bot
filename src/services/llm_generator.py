@@ -4203,6 +4203,130 @@ def _normalize_visual_setting(setting: str, rubric_id: str) -> str:
     return "simple uncluttered play area"
 
 
+# The adult is asked to sing: a verb, never the noun alone, because "включите
+# песенку" means playing a recording. Negation is decided by _step_asks_to_sing.
+SINGING_STEP_RE = re.compile(
+    r"\b(?:спойте|пойте|попойте|напевайте|напойте|пропойте|подпевайте|"
+    r"подпойте|спеть|петь|попеть|споем(?:те)?|попоем(?:те)?|поем вместе)\b"
+)
+# Negation belongs to the singing verb, not to an earlier or later action.
+# In particular "вместо записи спойте" is positive, whereas
+# "вместо того чтобы петь" is negative.
+SINGING_NEGATION_BEFORE_RE = re.compile(
+    r"(?:\bне\s+|\bне\s+(?:надо|нужно|следует|стоит|обязательно|рекомендуется)"
+    r"(?:\s+\w+){0,3}\s+|\bнельзя(?:\s+\w+){0,2}\s+|"
+    r"\bне\s+(?:пытайтесь|начинайте|просите)(?:\s+\w+){0,2}\s+|"
+    r"\bвместо\s+того\s+чтобы\s+)$"
+)
+SINGING_CLAUSE_SPLIT_RE = re.compile(r"[.;:!?()]|\s[—–-]\s")
+SINGING_TRAILING_NEGATION_FILLERS = frozenset({
+    "сегодня", "сейчас", "пожалуй", "все", "же", "совсем", "вовсе", "больше", "пока",
+    "теперь", "вообще", "наверное", "вероятно", "вовсе", "тоже",
+})
+EQUAL_PLAYBACK_ALTERNATIVE_RE = re.compile(
+    r"\b(?:включ\w*|постав\w*|запуст\w*|проигра\w*)\b.{0,65}"
+    r"\b(?:музык\w*|мелоди\w*|запис\w*|песн\w*|песенк\w*|аудио\w*)\b"
+)
+# Playback devices are the alternative to singing, never its subject.
+AUDIO_DEVICE_VISUAL_PROPS = frozenset({"tablet", "computer", "headphones"})
+# Audio playback in the structured visual brief, in its action or its props.
+AUDIO_PLAYBACK_ACTION_RE = re.compile(
+    r"\b(?:press(?:es|ing)? play|music player|audio player|speakers?|radio|"
+    r"(?:play|turn)(?:s|ing)?(?: on)? (?:music|a song|a melody|a recording|the radio|a speaker))\b",
+    re.IGNORECASE,
+)
+AUDIO_PLAYBACK_PROP_RE = re.compile(
+    r"\b(?:music player|audio player|speakers?|radio|phone|tablet|recording)\b",
+    re.IGNORECASE,
+)
+SINGING_VISUAL_ACTION = (
+    "the parent sings a short song to the child while the child listens and responds with a smile or gesture"
+)
+
+
+def _primary_exercise_step(body_text: str) -> str:
+    """The exercise's first concrete step, the step the visual brief depicts.
+
+    Under an action heading this is the heading's step; without one, the first
+    numbered step, so an age or intro line is never mistaken for the exercise.
+    """
+    lines = _sanitize_visual_post_body(body_text).split("\n")
+    headings = re.compile(r"^(?:как играть|как провести|что попробовать|ход игры|упражнение)\b", re.IGNORECASE)
+    if not any(headings.match(re.sub(r"^[^\wА-Яа-яЁё]+", "", line).strip()) for line in lines):
+        for line in lines:
+            numbered = re.match(r"^\s*\d+[.)]\s*(.+)$", line)
+            if numbered:
+                return numbered.group(1).strip()
+    return _extract_first_visual_step(body_text)
+
+
+def _step_asks_to_sing(step: str) -> bool:
+    """Detect a non-negated singing instruction, without treating a noun as a verb."""
+    text = (step or "").lower().replace("ё", "е")
+    for clause in SINGING_CLAUSE_SPLIT_RE.split(text):
+        for match in SINGING_STEP_RE.finditer(clause):
+            prefix = clause[:match.start()]
+            if SINGING_NEGATION_BEFORE_RE.search(prefix):
+                continue
+            # For infinitives, a nearby trailing "не нужно" can negate singing:
+            # "Петь сегодня, пожалуй, не нужно". Do not let "не нужно"
+            # in a separate activity negate an imperative such as "Спойте".
+            verb = match.group(0)
+            if verb in ("петь", "спеть", "попеть"):
+                after = re.findall(r"[a-zа-я]+", clause[match.end():])
+                for pos in range(min(6, len(after)-1)):
+                    if after[pos:pos+2] in (["не", "нужно"], ["не", "надо"],
+                                            ["не", "следует"], ["не", "стоит"]):
+                        if all(word in SINGING_TRAILING_NEGATION_FILLERS for word in after[:pos]):
+                            break
+                else:
+                    return True
+                continue
+            return True
+    return False
+
+
+def _step_offers_equal_audio_alternative(step: str) -> bool:
+    """'Play a melody OR sing' permits either truthful visual; neither is forced."""
+    text = (step or "").lower().replace("ё", "е")
+    choices = re.split(r"\bили\b", text)
+    for left, right in zip(choices, choices[1:]):
+        if (_step_asks_to_sing(left) and EQUAL_PLAYBACK_ALTERNATIVE_RE.search(right)
+                or _step_asks_to_sing(right) and EQUAL_PLAYBACK_ALTERNATIVE_RE.search(left)):
+            return True
+    return False
+
+
+def _primary_step_asks_parent_to_sing(body_text: str, rubric_id: str) -> bool:
+    if (rubric_id or "").strip().lower() != "play_and_speak":
+        return False
+    step = _primary_exercise_step(body_text)
+    return _step_asks_to_sing(step) and not _step_offers_equal_audio_alternative(step)
+
+
+def _align_singing_visual_brief(
+    payload: Dict[str, object], *, body_text: str, rubric_id: str
+) -> Dict[str, object]:
+    """Align a playback brief only with a required, nonoptional singing step.
+
+    Two equally offered choices ("включите мелодию или спойте") are both
+    grounded in the instruction, so preserve either action. The #528-shaped
+    caption is an unverified fixture, not evidence of a published instruction.
+    Roles, age, and other visual safeguards remain unchanged.
+    """
+    if not _primary_step_asks_parent_to_sing(body_text, rubric_id):
+        return payload
+    action = norm_space(str(payload.get("action", "")))
+    raw_props = payload.get("props")
+    props = [norm_space(str(prop)) for prop in raw_props] if isinstance(raw_props, list) else []
+    if not (
+        AUDIO_PLAYBACK_ACTION_RE.search(action)
+        or any(AUDIO_PLAYBACK_PROP_RE.search(prop) for prop in props)
+    ):
+        return payload
+    return {**payload, "action": SINGING_VISUAL_ACTION, "props": []}
+
+
 def _compile_image_prompt_from_payload(
     payload: Dict[str, object],
     *,
@@ -4252,8 +4376,15 @@ def _compile_image_prompt_from_payload(
 
 def _deterministic_visual_prompt(body_text: str, audience: str, rubric_id: str) -> str:
     props = _mentioned_visual_props(body_text)
+    action = _deterministic_visual_action(body_text, rubric_id, props)
+    # The provider-free path enforces required singing, but never overrides
+    # equal playback/singing alternatives; instrument steps retain their props.
+    if _primary_step_asks_parent_to_sing(body_text, rubric_id) and not (
+        set(_mentioned_visual_props(_primary_exercise_step(body_text))) - AUDIO_DEVICE_VISUAL_PROPS
+    ):
+        action, props = SINGING_VISUAL_ACTION, []
     payload: Dict[str, object] = {
-        "action": _deterministic_visual_action(body_text, rubric_id, props),
+        "action": action,
         "setting": (
             "simple speech therapy room"
             if (rubric_id or "").strip().lower() == "method_piggybank"
@@ -4289,6 +4420,8 @@ def build_image_prompt_prompt(
         "Extract one visually distinct action from this educational post. Return JSON only, with exactly these keys:\n"
         '{"action":"one visible action in English","setting":"one simple setting in English","props":["explicit prop"]}\n'
         "The action must describe one observable interaction from the first concrete step. "
+        "When the first concrete step requires the adult to sing, illustrate the adult singing to the child rather than unrelated playback. "
+        "For an explicit equal choice (play a melody OR sing), either supported action is valid. "
         "Do not write an image prompt. Do not choose the number, roles, ages, art style, camera, or negative constraints.\n"
         "Use only props from Allowed props; return at most three. Do not infer typical therapy equipment. "
         "Never include probes, spatulas, tongue depressors, spoons used intraorally, or other oral tools.\n"
@@ -4319,6 +4452,9 @@ async def generate_image_prompt_async(
         payload, parse_reason = _parse_visual_brief_json(raw)
         if payload is None:
             return "", False, parse_reason
+        payload = _align_singing_visual_brief(
+            payload, body_text=body_text, rubric_id=rubric_id
+        )
         compiled, _, compile_reason = _compile_image_prompt_from_payload(
             payload,
             body_text=body_text,

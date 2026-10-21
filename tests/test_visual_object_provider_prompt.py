@@ -733,5 +733,403 @@ class RejectedImageDiagnosticContractTest(unittest.TestCase):
         self.assertIn("gray_std > 20.0", source)
 
 
+# Run #528-shaped fixture: the title (typo kept) and the music-player brief are
+# from the run log; the body is a supplied fixture, not the verified published caption.
+R3B1_RUN_528_TITLE = "Пойём вместе в кухне!"
+R3B1_RUN_528_BODY = (
+    "👶 Возраст: 0-18 месяцев\n\n"
+    "Сегодня будем петь простую песенку, пока готовим ужин.\n\n"
+    "🎲 Как играть:\n"
+    "1. Включите любимую детскую мелодию или спойте сами «Танцуем, мамочка готовит».\n"
+    "2. Смотрите ребёнку в глаза, добавляйте простые жесты – поднимите руку, хлопните ладошами.\n"
+    "3. После каждой фразы делайте короткую паузу, позволяя малышу издать звук, улыбнуться или повернуть голову к вам.\n"
+    "4. Повторите песню 2-3 раза, меняя мелодию или добавляя новое слово («кастрюля», «молоко»).\n\n"
+    "💡 Что это даёт: ребёнок учится различать ритм и интонацию речи, реагирует улыбкой, звуком или взглядом."
+)
+R3B1_MUSIC_PLAYER = {"action": "Parent presses play on a music player", "setting": "home kitchen", "props": []}
+R3B1_INSTRUMENT_NAMING = "the parent sings the name of each instrument to the child"
+
+
+def _r3b1_compiled(action, rubric="play_and_speak", props=()):
+    from src.services.visual_pipeline import VisualBrief, _compile_visual_prompt, build_visual_role_rule
+    age = "1-year-old toddler" if rubric == "play_and_speak" else ""
+    return _compile_visual_prompt(VisualBrief(
+        rubric_id=rubric, role_rule=build_visual_role_rule(rubric, age_descriptor=age), age_descriptor=age,
+        setting="simple uncluttered home play area", action=action, props=tuple(props),
+    ))
+
+
+def _r3b1_image_prompt(title, body_text, payload, rubric="play_and_speak"):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from src.services.llm_generator import generate_image_prompt_async
+    from src.services.visual_pipeline import _parse_compiled_visual_prompt
+    with patch("src.services.llm_generator.groq_chat", AsyncMock(return_value=json.dumps(payload))):
+        compiled, ok, _ = asyncio.run(generate_image_prompt_async(
+            title=title, body_text=body_text, audience="parents", provider="groq",
+            groq_key="offline", gemini_key="", rubric_id=rubric,
+        ))
+    return compiled, ok, _parse_compiled_visual_prompt(compiled, rubric_id=rubric)
+
+
+class R3B1SingingActionTest(unittest.TestCase):
+    def test_run_528_shaped_equal_choice_preserves_music_player(self):
+        # Fixture body is NOT a verified publication: it offers equal choices.
+        compiled, ok, brief = _r3b1_image_prompt(R3B1_RUN_528_TITLE, R3B1_RUN_528_BODY, R3B1_MUSIC_PLAYER)
+        self.assertTrue(ok)
+        self.assertEqual(brief.action, R3B1_MUSIC_PLAYER["action"])
+        self.assertIn("music player", compiled.lower())
+
+    def test_primary_exercise_step_decides_not_title(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION, _align_singing_visual_brief
+        payload = dict(R3B1_MUSIC_PLAYER)
+        sings = "👶 Возраст: 0–18 месяцев\n1. Спойте ребёнку песенку и сделайте паузу.\n2. Если хочется, включите мелодию."
+        self.assertEqual(
+            _align_singing_visual_brief(payload, body_text=sings, rubric_id="play_and_speak")["action"],
+            SINGING_VISUAL_ACTION,
+        )
+        for body in (
+            "Как играть:\n1. Включите мелодию и потанцуйте вместе.\n2. Потом спойте припев.",
+            "Как играть:\n1. Не пойте, а включите запись и слушайте вместе.",
+            "Как играть:\n1. Включите запись барабана.\n2. Спросите, какой инструмент звучит.",
+        ):
+            with self.subTest(body=body):
+                self.assertIs(_align_singing_visual_brief(payload, body_text=body, rubric_id="play_and_speak"), payload)
+
+    def test_structured_brief_without_audio_playback_is_kept(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION, _align_singing_visual_brief
+        body = "Как играть:\n1. Спойте песенку, называя барабан и бубен."
+        for payload in (
+            {"action": R3B1_INSTRUMENT_NAMING, "setting": "home", "props": []},
+            {"action": "Parent sings a song to the child", "setting": "home", "props": []},
+        ):
+            with self.subTest(action=payload["action"]):
+                self.assertIs(_align_singing_visual_brief(payload, body_text=body, rubric_id="play_and_speak"), payload)
+        with_prop = {"action": "the parent holds a phone near the child", "setting": "home", "props": ["phone"]}
+        aligned = _align_singing_visual_brief(with_prop, body_text=body, rubric_id="play_and_speak")
+        self.assertEqual((aligned["action"], aligned["props"]), (SINGING_VISUAL_ACTION, []))
+        self.assertIs(_align_singing_visual_brief(R3B1_MUSIC_PLAYER, body_text=body, rubric_id="method_piggybank"),
+                      R3B1_MUSIC_PLAYER)
+
+
+class R3B1SingingFallbackTest(unittest.TestCase):
+    def _fallback(self, rubric, context_hint, trigger, first_qa=None, retry_qa=None):
+        from src.services.visual_pipeline import _build_object_visual_fallback
+        with patch(
+            "src.services.visual_pipeline.build_fallback_cover_buffer",
+            return_value=BytesIO(b"safe text card"),
+        ) as cover, patch(
+            "src.services.visual_pipeline.download_pollinations_image_with_meta",
+            side_effect=AssertionError("object generator must not be called"),
+        ) as object_call:
+            _, meta = _build_object_visual_fallback(
+                safe_title=R3B1_RUN_528_TITLE, day_key="TU", fallback_title="Логопедия", base_meta={},
+                title=R3B1_RUN_528_TITLE, rubric_id=rubric, pollinations_token="", trigger=trigger,
+                audience="parents", context_hint=context_hint, first_qa=first_qa, retry_qa=retry_qa,
+            )
+        object_call.assert_not_called()
+        cover.assert_called_once()
+        return meta
+
+    def test_structured_singing_action_requires_text_cover(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        from src.services.visual_pipeline import _human_singing_action_requires_text_cover
+        self.assertTrue(_human_singing_action_requires_text_cover(
+            "play_and_speak", _r3b1_compiled(SINGING_VISUAL_ACTION)))
+        for rubric, hint in (
+            ("play_and_speak", _r3b1_compiled(R3B1_INSTRUMENT_NAMING)),
+            ("play_and_speak", _r3b1_compiled("the parent sings while the child shakes a rattle", props=("rattle",))),
+            ("play_and_speak", _r3b1_compiled("the parent shows the child a singing bird toy")),
+            ("play_and_speak", _r3b1_compiled("the parent shows a toy drum and the child taps it")),
+            ("play_and_speak", "Action: the parent sings a short song to the child"),
+            ("method_piggybank", _r3b1_compiled("The speech therapist sings to the child", rubric="method_piggybank")),
+        ):
+            with self.subTest(rubric=rubric, hint=hint[:80]):
+                self.assertFalse(_human_singing_action_requires_text_cover(rubric, hint))
+
+    def test_singing_fallback_never_calls_object_generator(self):
+        meta = self._fallback(
+            "play_and_speak", _r3b1_compiled("the parent sings a short song to the child"), "object_contains_text",
+            first_qa={"status": "fail", "reason": "wrong_character_roles"},
+            retry_qa={"status": "fail", "reason": "object_contains_text"},
+        )
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["final_reason"], "singing_action_object_fallback_not_allowed")
+        self.assertEqual(meta["object_generation_attempts"], "0")
+        self.assertEqual((meta["visual_retry_used"], meta["visual_qa_attempts"]), ("True", "2"))
+
+    def test_singing_generation_failure_reports_actual_attempts(self):
+        meta = self._fallback(
+            "play_and_speak", _r3b1_compiled("the parent sings a short song to the child"), "generation failed")
+        self.assertEqual(meta["final_reason"], "singing_action_object_fallback_not_allowed")
+        self.assertEqual((meta["visual_retry_used"], meta["visual_qa_attempts"]), ("False", "0"))
+
+    def test_method_piggybank_fallback_metadata_is_unchanged(self):
+        meta = self._fallback(
+            "method_piggybank", _r3b1_compiled("The speech therapist sings to the child", rubric="method_piggybank"),
+            "visual_retry_failed:wrong_character_roles", first_qa={"status": "fail", "reason": "wrong_character_roles"},
+        )
+        self.assertEqual(meta["final_reason"], "method_piggybank_object_fallback_not_allowed")
+        self.assertEqual((meta["visual_retry_used"], meta["visual_qa_attempts"]), ("True", "2"))
+
+    def test_post_visual_ladder_keeps_attempt_budget(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        object_pass = {"status": "pass", "pass": True, "reason": "ok", "people_count": 0, "adult_count": 0,
+                       "child_count": 0, "ppe_detected": False, "text_detected": False,
+                       "illustration_style_match": True, "object_topic_match": True}
+        for action, expected_mode, expected_objects in (
+            (SINGING_VISUAL_ACTION, "text_fallback", 0),
+            (R3B1_INSTRUMENT_NAMING, "ai_object_fallback", 1),
+        ):
+            qa_results = iter([
+                {"status": "fail", "pass": False, "reason": "wrong_character_roles",
+                 "people_count": 2, "adult_count": 0, "child_count": 2},
+                {"status": "fail", "pass": False, "reason": "object_contains_text",
+                 "people_count": 2, "adult_count": 1, "child_count": 1},
+                object_pass,
+            ])
+            prompts = []
+
+            def download(prompt, token=""):
+                prompts.append(prompt)
+                return BytesIO(b"image"), {"attempts_used": "1", "final_reason": "ok"}
+
+            with self.subTest(action=action), patch(
+                "src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download,
+            ), patch(
+                "src.services.visual_pipeline.build_fallback_cover_buffer", return_value=BytesIO(b"safe text card"),
+            ):
+                _, meta = build_post_visual(
+                    title=R3B1_RUN_528_TITLE, day_key="TU", image_prompt=_r3b1_compiled(action),
+                    rubric_id="play_and_speak", visual_qa_fn=lambda *_a, **_k: next(qa_results),
+                )
+                self.assertEqual(meta["mode"], expected_mode)
+                self.assertEqual(len(prompts), 2 + expected_objects)
+                self.assertEqual(meta["object_generation_attempts"], str(expected_objects))
+
+
+R3B1_NEGATED_STEPS = (
+    "Не надо петь, включите музыку.",
+    "Сейчас не следует петь: включите запись.",
+    "Не пойте, а включите запись.",
+    "Не  пойте, а включите запись.",
+    "Вместо того чтобы петь, включите запись.",
+)
+
+
+def _r3b1_body(first_step, rest="2. Сделайте паузу и дождитесь ответа малыша."):
+    return f"👶 Возраст: 0-18 месяцев\n\n🎲 Как играть:\n1. {first_step}\n{rest}"
+
+
+def _r3b1_deterministic(body, rubric="play_and_speak"):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from src.services.llm_generator import generate_image_prompt_async
+    from src.services.visual_pipeline import _parse_compiled_visual_prompt
+    provider = AsyncMock(side_effect=AssertionError("no provider call"))
+    with patch("src.services.llm_generator.groq_chat", provider), patch(
+        "src.services.llm_generator.gemini_generate", provider,
+    ):
+        compiled, ok, reason = asyncio.run(generate_image_prompt_async(
+            title="Игра", body_text=body, audience="parents", provider="groq",
+            groq_key="", gemini_key="", rubric_id=rubric,
+        ))
+    provider.assert_not_called()
+    return compiled, ok, reason, _parse_compiled_visual_prompt(compiled, rubric_id=rubric)
+
+
+class R3B1SingingStepSemanticsTest(unittest.TestCase):
+    def test_negated_singing_is_not_a_singing_step(self):
+        from src.services.llm_generator import _step_asks_to_sing
+        for step in R3B1_NEGATED_STEPS + (
+            "Можно не петь: просто слушайте запись вместе.",
+            "Нельзя петь громко рядом с плитой.",
+            "Включите запись звуков животных и угадайте, кто это.",
+        ):
+            with self.subTest(step=step):
+                self.assertFalse(_step_asks_to_sing(step))
+
+    def test_positive_and_optional_singing_steps(self):
+        from src.services.llm_generator import _step_asks_to_sing
+        for step in (
+            "Спойте ребёнку короткую песню.",
+            "Включите любимую детскую мелодию или спойте сами «Танцуем, мамочка готовит».",
+            "Не включайте музыку, а спойте сами.",
+            "Спойте песенку и не торопитесь.",
+            "Не забудьте спеть ребёнку короткую песенку.",
+            "Не стесняйтесь петь, даже если нет слуха.",
+        ):
+            with self.subTest(step=step):
+                self.assertTrue(_step_asks_to_sing(step))
+
+    def test_negated_singing_keeps_music_player_brief(self):
+        from src.services.llm_generator import _align_singing_visual_brief
+        for step in R3B1_NEGATED_STEPS:
+            with self.subTest(step=step):
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak",
+                ), R3B1_MUSIC_PLAYER)
+
+    def test_audio_game_without_singing_keeps_brief(self):
+        from src.services.llm_generator import _align_singing_visual_brief
+        body = _r3b1_body("Включите запись звуков животных и спросите, кто это.")
+        self.assertIs(_align_singing_visual_brief(
+            R3B1_MUSIC_PLAYER, body_text=body, rubric_id="play_and_speak"), R3B1_MUSIC_PLAYER)
+
+    def test_optional_alternative_keeps_non_audio_brief(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION, _align_singing_visual_brief
+        body = _r3b1_body("Включите мелодию или спойте сами.")
+        dancing = {"action": "the parent and the child clap hands together", "setting": "home", "props": []}
+        self.assertIs(_align_singing_visual_brief(dancing, body_text=body, rubric_id="play_and_speak"), dancing)
+        self.assertIs(_align_singing_visual_brief(
+            R3B1_MUSIC_PLAYER, body_text=body, rubric_id="play_and_speak"), R3B1_MUSIC_PLAYER)
+
+
+class R3B1DeterministicFallbackTest(unittest.TestCase):
+    def test_provider_unavailable_run_528_falls_back_to_singing(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        from src.services.visual_pipeline import _human_singing_action_requires_text_cover
+        compiled, ok, reason, brief = _r3b1_deterministic(
+            _r3b1_body("Спойте ребёнку короткую песню."))
+        self.assertTrue(ok)
+        self.assertTrue(reason.startswith("ok:deterministic_fallback:"))
+        self.assertEqual(brief.action, SINGING_VISUAL_ACTION)
+        self.assertEqual(brief.props, ())
+        self.assertIn("allowed props: none", compiled)
+        self.assertNotIn("music player", compiled.lower())
+        self.assertTrue(compiled.startswith(
+            "Exactly one adult parent and exactly one 1-year-old toddler"))
+        self.assertTrue(_human_singing_action_requires_text_cover("play_and_speak", compiled))
+
+    def test_provider_exception_falls_back_to_singing(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from src.services.llm_generator import SINGING_VISUAL_ACTION, generate_image_prompt_async
+        from src.services.visual_pipeline import _parse_compiled_visual_prompt
+        groq = AsyncMock(side_effect=RuntimeError("provider down"))
+        with patch("src.services.llm_generator.groq_chat", groq):
+            compiled, ok, reason = asyncio.run(generate_image_prompt_async(
+                title="Игра", body_text=_r3b1_body("Спойте ребёнку короткую песню."), audience="parents",
+                provider="groq", groq_key="offline", gemini_key="", rubric_id="play_and_speak",
+            ))
+        self.assertEqual(groq.await_count, 1)
+        self.assertTrue(ok)
+        self.assertTrue(reason.startswith("ok:deterministic_fallback:groq_image_prompt_failed"))
+        self.assertEqual(_parse_compiled_visual_prompt(compiled, rubric_id="play_and_speak").action,
+                         SINGING_VISUAL_ACTION)
+
+    def test_deterministic_negated_or_audio_steps_are_not_singing(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        for step in R3B1_NEGATED_STEPS + ("Включите запись звуков животных и спросите, кто это.",):
+            with self.subTest(step=step):
+                compiled, ok, _, brief = _r3b1_deterministic(_r3b1_body(step))
+                self.assertTrue(ok)
+                self.assertNotEqual(brief.action, SINGING_VISUAL_ACTION)
+                self.assertNotIn("sings", compiled)
+
+    def test_deterministic_instrument_song_keeps_its_object(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        _, ok, _, brief = _r3b1_deterministic(_r3b1_body("Спойте песенку и постучите в барабан."))
+        self.assertTrue(ok)
+        self.assertNotEqual(brief.action, SINGING_VISUAL_ACTION)
+        self.assertIn("drum", brief.props)
+
+    def test_deterministic_singing_step_drops_unrelated_later_props(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        body = _r3b1_body("Спойте ребёнку короткую песню.", "2. Потом покатите мяч и назовите его.")
+        _, ok, _, brief = _r3b1_deterministic(body)
+        self.assertTrue(ok)
+        self.assertEqual((brief.action, brief.props), (SINGING_VISUAL_ACTION, ()))
+
+    def test_other_rubrics_are_not_turned_into_singing(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION, _deterministic_visual_prompt
+        body = _r3b1_body("Спойте ребёнку короткую песню.")
+        for rubric, audience in (("tip_of_day", "parents"), ("age_norms", "parents"),
+                                 ("method_piggybank", "pros")):
+            with self.subTest(rubric=rubric):
+                prompt = _deterministic_visual_prompt(body, audience, rubric)
+                self.assertTrue(prompt)
+                self.assertNotIn(SINGING_VISUAL_ACTION, prompt)
+
+    def test_r4_instead_of_recording_is_affirmative_singing(self):
+        from src.services.llm_generator import _step_asks_to_sing
+        self.assertTrue(_step_asks_to_sing("Вместо записи спойте ребёнку короткую песню"))
+
+    def test_r4_instead_of_music_is_affirmative_singing(self):
+        from src.services.llm_generator import _step_asks_to_sing
+        self.assertTrue(_step_asks_to_sing("Вместо музыки пойте ребёнку колыбельную"))
+
+    def test_r4_trailing_negation_suppresses_singing(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief
+        step = "Петь сегодня, пожалуй, не нужно, включите мелодию"
+        self.assertFalse(_step_asks_to_sing(step))
+        self.assertIs(_align_singing_visual_brief(
+            R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak"),
+            R3B1_MUSIC_PLAYER)
+
+    def test_r4_popoyte_positive_imperative(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief, SINGING_VISUAL_ACTION
+        step = "Попойте вместе с ребёнком"
+        self.assertTrue(_step_asks_to_sing(step))
+        self.assertEqual(_align_singing_visual_brief(
+            R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak")["action"],
+            SINGING_VISUAL_ACTION)
+
+    def test_r4_equal_audio_or_singing_both_orders_remain_valid(self):
+        from src.services.llm_generator import _align_singing_visual_brief, _primary_step_asks_parent_to_sing
+        from src.services.llm_generator import SINGING_VISUAL_ACTION
+        for step in ("Включите мелодию или спойте сами", "Спойте сами или включите запись"):
+            with self.subTest(step=step):
+                body = _r3b1_body(step)
+                self.assertFalse(_primary_step_asks_parent_to_sing(body, "play_and_speak"))
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=body, rubric_id="play_and_speak"), R3B1_MUSIC_PLAYER)
+                _, ok, _, brief = _r3b1_deterministic(body)
+                self.assertTrue(ok)
+                self.assertNotEqual(brief.action, SINGING_VISUAL_ACTION)
+
+    def test_r4_negative_and_positive_singing_control(self):
+        from src.services.llm_generator import _step_asks_to_sing
+        for step in ("Не надо петь, включите музыку", "Не пойте, включите запись",
+                     "Вместо того чтобы петь, включите запись", "Сейчас не следует петь: включите запись"):
+            with self.subTest(step=step): self.assertFalse(_step_asks_to_sing(step))
+        for step in ("Не забудьте спеть песенку", "Не включайте музыку, а спойте сами",
+                     "Спойте песенку, не торопитесь", "Спойте ребёнку песню, а при необходимости включите запись"):
+            with self.subTest(step=step): self.assertTrue(_step_asks_to_sing(step))
+
+    def test_r5_negative_governing_verbs_preserve_music_player(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief
+        steps = (
+            "Не пытайтесь петь, включите запись.",
+            "Не начинайте петь, пока не включите запись.",
+            "Не просите ребёнка петь, включите запись.",
+        )
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertFalse(_step_asks_to_sing(step))
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak"),
+                    R3B1_MUSIC_PLAYER)
+
+    def test_r5_extended_negation_modifiers_preserve_music_player(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief
+        step = "Не нужно сейчас слишком громко петь, включите мелодию."
+        self.assertFalse(_step_asks_to_sing(step))
+        self.assertIs(_align_singing_visual_brief(
+            R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak"),
+            R3B1_MUSIC_PLAYER)
+
+    def test_r5_negative_other_action_does_not_suppress_singing(self):
+        from src.services.llm_generator import _step_asks_to_sing, _primary_step_asks_parent_to_sing
+        for step in (
+            "Не пытайтесь петь громко, лучше спойте тихо.",
+            "Не нужно включать музыку, а спойте сами.",
+            "Не забудьте спеть песенку.",
+            "Не бойтесь петь.",
+        ):
+            with self.subTest(step=step):
+                self.assertTrue(_step_asks_to_sing(step))
+                self.assertTrue(_primary_step_asks_parent_to_sing(_r3b1_body(step), "play_and_speak"))
+
 if __name__ == "__main__":
     unittest.main()

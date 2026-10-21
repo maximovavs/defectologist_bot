@@ -1131,5 +1131,99 @@ class R3B1DeterministicFallbackTest(unittest.TestCase):
                 self.assertTrue(_step_asks_to_sing(step))
                 self.assertTrue(_primary_step_asks_parent_to_sing(_r3b1_body(step), "play_and_speak"))
 
+
+class R3B1MainLineFollowUpTest(unittest.TestCase):
+    def test_dash_separated_negation_keeps_music_player(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief
+        for step in (
+            "Петь — не надо, включите запись.",
+            "Петь - не нужно, включите музыку.",
+            "Петь – не стоит, включите мелодию.",
+            "Спеть — не следует: включите запись.",
+            "Петь сегодня — пожалуй, не надо, включите запись.",
+        ):
+            with self.subTest(step=step):
+                self.assertFalse(_step_asks_to_sing(step))
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak"),
+                    R3B1_MUSIC_PLAYER)
+
+    def test_dash_or_comma_aside_keeps_positive_singing(self):
+        from src.services.llm_generator import SINGING_VISUAL_ACTION, _align_singing_visual_brief
+        for step in (
+            "Спойте, не надо громко, тихонько.",
+            "Пойте — не нужно идеально.",
+            "Напевайте, не надо громко.",
+            "Спойте — не нужно включать запись.",
+            "Петь — не нужно стесняться.",
+        ):
+            with self.subTest(step=step):
+                self.assertEqual(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak")["action"],
+                    SINGING_VISUAL_ACTION)
+
+    def test_equal_playback_or_singing_choice_is_not_forced(self):
+        from src.services.llm_generator import _align_singing_visual_brief, _primary_step_asks_parent_to_sing
+        for step in ("Включите любимую детскую мелодию или спойте сами.", "Включите мелодию — или спойте сами."):
+            with self.subTest(step=step):
+                body = _r3b1_body(step)
+                self.assertFalse(_primary_step_asks_parent_to_sing(body, "play_and_speak"))
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=body, rubric_id="play_and_speak"), R3B1_MUSIC_PLAYER)
+
+    def test_incidental_instrument_does_not_keep_object_fallback(self):
+        from src.services.visual_pipeline import _human_singing_action_requires_text_cover
+        for action, props in (
+            ("the parent sings to the child while a bell rests on the shelf", ("bell",)),
+            ("the parent sings while holding the child's hands, a drum nearby", ()),
+            ("the parent sings to the child using gestures, a bell on the table", ()),
+            ("the parent sings and plays peekaboo while a drum rests nearby", ()),
+            ("the parent sings a short song to the child", ("rattle",)),
+            ("the parent sings to the child while a radio sits on a shelf", ("radio",)),
+        ):
+            with self.subTest(action=action):
+                self.assertTrue(_human_singing_action_requires_text_cover(
+                    "play_and_speak", _r3b1_compiled(action, props=props)))
+
+    def test_instrument_games_keep_object_fallback(self):
+        from src.services.visual_pipeline import _human_singing_action_requires_text_cover
+        for action, props in (
+            (R3B1_INSTRUMENT_NAMING, ()),
+            ("the parent sings while the child shakes a rattle", ("rattle",)),
+            ("the parent sings and shows the child a toy drum", ()),
+            ("the parent sings while the child taps a xylophone with both hands", ()),
+            ("the parent sings while the child listens to a bell", ("bell",)),
+        ):
+            with self.subTest(action=action):
+                self.assertFalse(_human_singing_action_requires_text_cover(
+                    "play_and_speak", _r3b1_compiled(action, props=props)))
+
+    def test_incidental_bell_ladder_uses_text_card_within_attempt_budget(self):
+        qa_results = iter([
+            {"status": "fail", "pass": False, "reason": "wrong_character_roles",
+             "people_count": 2, "adult_count": 0, "child_count": 2},
+            {"status": "fail", "pass": False, "reason": "object_contains_text",
+             "people_count": 2, "adult_count": 1, "child_count": 1},
+        ])
+        prompts = []
+
+        def download(prompt, token=""):
+            prompts.append(prompt)
+            return BytesIO(b"image"), {"attempts_used": "1", "final_reason": "ok"}
+
+        with patch("src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download), \
+                patch("src.services.visual_pipeline.build_fallback_cover_buffer",
+                      return_value=BytesIO(b"safe text card")):
+            _, meta = build_post_visual(
+                title="Поём вместе", day_key="TU", rubric_id="play_and_speak",
+                image_prompt=_r3b1_compiled("the parent sings to the child while a bell rests on the shelf",
+                                            props=("bell",)),
+                visual_qa_fn=lambda *_a, **_k: next(qa_results),
+            )
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["final_reason"], "singing_action_object_fallback_not_allowed")
+        self.assertEqual((len(prompts), meta["object_generation_attempts"]), (2, "0"))
+
+
 if __name__ == "__main__":
     unittest.main()

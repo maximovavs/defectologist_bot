@@ -2536,7 +2536,16 @@ HUMAN_SINGING_ACTION_RE = re.compile(
     r"\b(?:parent|adult|mother|father|mom|dad|caregiver)\b[^.;]{0,40}?\b(?:sings?|is singing|are singing)\b",
     re.IGNORECASE,
 )
+# An instrument or sound object is exercise material only when the action
+# handles it: named, shown, tapped, shaken, played, listened to. The match may
+# not cross a clause or reach a merely present object ("a bell rests on the
+# shelf", "holding the child's hands, a drum nearby").
 SINGING_OBJECT_FOCUS_RE = re.compile(
+    r"\b(?:names?|naming|shows?|showing|points? to|pointing to|taps?|tapping|plays?|playing|"
+    r"shakes?|shaking|holds?|holding|picks? up|picking up|chooses?|choosing|identifies?|identifying|"
+    r"listens? to|listening to|uses?|using|rings?|ringing|strikes?|striking|beats?|beating)\b"
+    r"(?:(?!\b(?:and|while|hands?|gestures?|lies|lying|rests?|resting|sits?|sitting|stands?|standing|"
+    r"nearby)\b)[^,.;]){0,60}?"
     r"\b(?:instruments?|drums?|bells?|xylophones?|shakers?|rattles?|tambourines?|maracas|pianos?|guitars?|"
     r"whistles?|music (?:player|box)|audio player|speakers?|radio|recordings?|headphones?)\b",
     re.IGNORECASE,
@@ -2547,15 +2556,16 @@ def _human_singing_action_requires_text_cover(rubric_id: str, context_hint: str)
     """A still life of instruments cannot depict a parent's singing exchange.
 
     Decided from the structured brief of the compiled prompt: the action must be
-    an adult singing, and neither the action nor the props may centre on an
-    instrument or sound object (an instrument-naming song keeps its objects).
+    an adult singing, and the action must not handle an instrument or sound
+    object (an instrument-naming song keeps its objects). An incidental object,
+    or one listed only among the props, is not exercise material.
     """
     if (rubric_id or "").strip().lower() != "play_and_speak":
         return False
     brief = _parse_compiled_visual_prompt(context_hint, rubric_id=rubric_id)
     if brief is None or not HUMAN_SINGING_ACTION_RE.search(brief.action):
         return False
-    return not SINGING_OBJECT_FOCUS_RE.search(" ".join((brief.action, *brief.props)))
+    return not SINGING_OBJECT_FOCUS_RE.search(brief.action)
 
 
 def _build_object_visual_fallback(

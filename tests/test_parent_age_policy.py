@@ -193,5 +193,63 @@ class ParentInducedStartleSafetyTest(unittest.TestCase):
         )
 
 
+
+class ParentInducedStartleP11RegressionTest(unittest.TestCase):
+    """Minimal pairs at the *existing* G11 safety seam after PR #99."""
+
+    def test_high_risk_order_and_explicit_instructions(self):
+        risky = (
+            "Встаньте за спиной малыша и неожиданно громко хлопните в ладоши, чтобы он вздрогнул.",
+            "Специально напугайте малыша резким звуком, чтобы он вздрогнул.",
+            "Громко хлопните за спиной ребёнка, чтобы он испугался.",
+            "Попросите взрослого внезапно закричать рядом с малышом, чтобы тот вздрогнул.",
+            "Напугайте младенца внезапным звуком.",
+            "Громко ударьте в барабан. Ребёнок должен вздрогнуть — это цель упражнения.",
+            "Резко крикните малышу на ухо, чтобы он вздрогнул.",
+            "Предложите маме напугать ребёнка внезапным шумом.",
+            "Чтобы малыш вздрогнул, громко крикните за его спиной.",
+            "Напугайте малыша хлопком, если он не смотрит на вас.",
+            "Пугать малыша внезапными громкими звуками полезно для развития слуха.",
+            "Включите запись крика у уха младенца, чтобы он испугался.",
+        )
+        for text in risky:
+            with self.subTest(text=text):
+                self.assertEqual(_validate_parent_safety_output(text),
+                                 (False, "parent_induced_startle_instruction"))
+
+    def test_prohibitions_quotes_and_normal_sound_play_not_blocked(self):
+        safe = (
+            "Не пугайте ребёнка громкими хлопками, чтобы он вздрогнул.",
+            "Никогда не пугайте младенца громкими звуками — выбирайте спокойные игры.",
+            "Пугать малыша внезапными громкими звуками не полезно.",
+            "🔴 Миф: Напугайте ребёнка громким хлопком, чтобы он вздрогнул.\n🟢 Факт: Нарочно пугать малыша не нужно.",
+            "Ошибочно советуют напугать ребёнка громким звуком — это небезопасно.",
+            "Покажите, как тихо звучит погремушка, пусть ребёнок сам попробует.",
+            "Спойте малышу песенку, немного меняя громкость голоса без резких звуков.",
+            "Хлопайте ладошками в ритм любимой песенки, не делайте резких звуков.",
+            "Малыш вздрогнул от случайного хлопка. Успокойте его.",
+            "Не нужно неожиданно кричать на ухо младенцу, чтобы он испугался.",
+            "При слове «напугайте» остановитесь: никогда не пугайте ребёнка резким звуком.",
+            "Понаблюдайте за реакцией малыша на спокойный голос во время игры.",
+        )
+        for text in safe:
+            with self.subTest(text=text):
+                self.assertEqual(_validate_parent_safety_output(text), (True, "ok"))
+
+    def test_adversarial_contrast_with_warning_earlier_in_post(self):
+        safe = "Не надо пугать ребёнка громкими звуками. Давайте играть в спокойные игры."
+        unsafe = safe + " Затем внезапно громко хлопните за спиной малыша, чтобы он вздрогнул."
+        self.assertEqual(_validate_parent_safety_output(safe), (True, "ok"))
+        self.assertEqual(_validate_parent_safety_output(unsafe),
+                         (False, "parent_induced_startle_instruction"))
+
+    def test_child_age_does_not_exempt_induced_startle(self):
+        for age in ("0–3 месяца", "4–6 месяцев", "7–12 месяцев", "1–2 года", "3–5 лет"):
+            with self.subTest(age=age):
+                text = f"👶 Возраст: {age}\n🎲 Как играть: специально напугайте малыша резким хлопком."
+                self.assertEqual(_validate_parent_safety_output(text),
+                                 (False, "parent_induced_startle_instruction"))
+
+
 if __name__ == "__main__":
     unittest.main()

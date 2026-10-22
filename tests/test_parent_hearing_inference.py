@@ -7,6 +7,7 @@ from src.services.llm_generator import (
     _parent_content_repair_instruction,
     _validate_parent_hearing_guidance_output,
     _validate_parent_hearing_inference_output,
+    _validate_parent_safety_output,
 )
 
 
@@ -239,6 +240,32 @@ class ParentHearingGuidanceTest(unittest.TestCase):
             _validate_parent_hearing_guidance_output(text, topic_id="early_communication"),
             (True, "ok"),
         )
+
+
+
+class ParentG09G11BoundaryTest(unittest.TestCase):
+    def test_existing_hearing_guidance_keeps_its_own_reason(self):
+        text = "Позвените погремушкой и посмотрите на реакцию ребёнка."
+        self.assertEqual(_validate_parent_hearing_guidance_output(
+            text, topic_id="hearing_and_speech"),
+            (False, PARENT_HEARING_HOME_OBSERVATION_REASON))
+        self.assertEqual(_validate_parent_safety_output(text), (True, "ok"))
+
+    def test_non_diagnostic_hearing_observation_and_song_remain_allowed(self):
+        text = ("Мягко позовите малыша по имени, наблюдая, как он повернётся к вам. "
+                "Это наблюдение не является проверкой слуха.")
+        self.assertEqual(_validate_parent_hearing_guidance_output(
+            text, topic_id="hearing_and_speech"), (True, "ok"))
+        self.assertEqual(_validate_parent_safety_output(text), (True, "ok"))
+        self.assertEqual(_validate_parent_safety_output(
+            "Негромко пойте песню и предложите малышу хлопать в ритм."),
+            (True, "ok"))
+
+    def test_safety_still_rejects_staged_acoustic_fright_despite_disclaimer(self):
+        text = ("Специально напугайте малыша громким хлопком, чтобы он вздрогнул. "
+                "Это не домашняя проверка слуха.")
+        self.assertEqual(_validate_parent_safety_output(text),
+                         (False, "parent_induced_startle_instruction"))
 
 
 if __name__ == "__main__":

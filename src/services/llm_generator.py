@@ -1849,46 +1849,146 @@ def _validate_parent_title_status_label_output(text: str, evidence_text: str = "
     return True, "ok"
 
 
-# An observed startle in milestones is not an instruction to provoke one.
-# Reject only a parent-directed loud/sudden sound *followed by* a deliberate
-# attempt to elicit or watch the child's startle. Quiet sound games, natural
-# observations, and explicit prohibitions must remain permissible.
-PARENT_INDUCED_STARTLE_ACTION_RE = re.compile(
-    r"\b(?:говор(?:им|ите|и|ит)\s+громч\w*|"
-    r"(?:скаж\w*|произнес\w*)\s+[^\n]{0,30}?\s+громч\w*|"
-    r"(?:сдела\w*|включ\w*|произвед\w*)\s+(?:резк\w*|громк\w*)\s+звук\w*|"
-    r"(?:хлопн\w*|стукн\w*|позвен\w*)\s+(?:\w+\s+){0,3}(?:резк\w*|громк\w*)|"
-    r"(?:крикн\w*|закрич\w*)\s+(?:резк\w*|громк\w*))\b",
+# P1: narrow parent-facing acoustic startle policy.  A developmental milestone
+# (spontaneously startling at loud sound) is not an instruction to create it.
+_PARENT_STARTLE_TARGET_RE = re.compile(
+    r"\b(?:ребен\w*|малыш\w*|младен\w*|детей|детям|ребят\w*|крох\w*)\b",
     re.IGNORECASE,
 )
-PARENT_INDUCED_STARTLE_CHILD_RE = re.compile(
-    r"\b(?:малыш\w*|ребен\w*|младен\w*|дет\w*|он|она)"
-    r"(?:\s+\w+){0,4}\s+(?:вздраг\w*|вздрог\w*|испуга\w*|пуга\w*)\b",
+_PARENT_STARTLE_SOUND_RE = re.compile(
+    r"\b(?:звук\w*|шум\w*|громк\w*|громч\w*|резк\w*|хлоп\w*|стук\w*|"
+    r"гудк\w*|сирен\w*|крик\w*|крич\w*|закрич\w*|"
+    r"свист\w*|погремушк\w*|барабан\w*)\b",
     re.IGNORECASE,
 )
-PARENT_INDUCED_STARTLE_INTENT_RE = re.compile(
-    r"(?:наблюда\w*.{0,35}как|смотр\w*.{0,35}как|увид\w*.{0,35}как|чтобы)",
+_PARENT_STARTLE_DIRECT_RE = re.compile(
+    r"\b(?:напугай\w*|испугай\w*|пугай\w*|вспугни\w*|"
+    r"(?:специально|намеренно|попробуйте|попробуй|предложите|нужно|надо|следует|"
+    r"полезно|рекомендуется|советуем)\s+(?:\w+\s+){0,5}"
+    r"(?:напугать|испугать|пугать))\b",
     re.IGNORECASE,
 )
-PARENT_INDUCED_STARTLE_PROHIBITION_RE = re.compile(
-    r"(?:\bне\s+|\bнельзя\s+|\bизбегайте\s+|\bне\s+следует\s+|"
-    r"\bне\s+нужно\s+|\bне\s+стоит\s+|\bникогда\s+не\s+)\w*\s*$",
+_PARENT_STARTLE_ENDORSE_RE = re.compile(
+    r"\b(?:пугать|напугать|испугать)\b.{0,100}?\b(?:полезно|рекомендуется)\b",
+    re.IGNORECASE,
+)
+_PARENT_STARTLE_SOUND_ACTION_RE = re.compile(
+    r"\b(?:хлопни\w*|хлопай\w*|хлопните|стукни\w*|стучи\w*|постучи\w*|"
+    r"включи\w*|издай\w*|создай\w*|сделай\w*|сдела\w*|"
+    r"ударь\w*|ударьте|встряхни\w*|встряхните|"
+    r"крикни\w*|крикните|закричи\w*|закричите|закричать|"
+    r"свистни\w*|свистну\w*|свистните|произнеси\w*|произнесите|"
+    r"скаж\w*|говор\w*|позвен\w*|"
+    r"попроси\w*|попробуй\w*|попробуйте|устро\w*)\b",
+    re.IGNORECASE,
+)
+_PARENT_STARTLE_ABRUPT_RE = re.compile(
+    r"\b(?:неожиданн\w*|внезапн\w*|резк\w*|громк\w*|громч\w*|"
+    r"позади|за\s+спиной|у\s+уха|около\s+уха|возле\s+уха)\b",
+    re.IGNORECASE,
+)
+_PARENT_STARTLE_EFFECT_RE = re.compile(
+    r"\b(?:вздрог\w*|вздрагива\w*|испуга\w*|напуга\w*|подпрыг\w*|испуг)\b",
+    re.IGNORECASE,
+)
+_PARENT_STARTLE_PURPOSE_RE = re.compile(
+    r"(?:\b(?:чтобы|для\s+того\s+чтобы|добейтесь|вызовите)\b|"
+    r"\bнаблюда\w*.{0,35}как\b).{0,105}?"
+    r"\b(?:вздрог\w*|вздрагива\w*|испуга\w*|напуга\w*|подпрыг\w*)\b",
+    re.IGNORECASE,
+)
+_PARENT_STARTLE_NEGATED_ACTION_RE = re.compile(
+    r"(?:\bне\s+(?:(?:надо|нужно|следует|стоит|рекомендуется|пытайтесь|пытайся)\s+)?"
+    r"(?:специально\s+|намеренно\s+)?|"
+    r"\bнельзя\s+(?:\w+\s+){0,3}|"
+    r"\bизбегай\w*\s+(?:\w+\s+){0,2})$",
+    re.IGNORECASE,
+)
+_PARENT_STARTLE_NEGATED_EFFECT_RE = re.compile(r"\bне\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
+_PARENT_STARTLE_EXPLICIT_WARNING_RE = re.compile(
+    r"\b(?:ошибочно\s+советуют|не\s+(?:старайтесь|советуйте|рекомендуйте)|никогда\s+не|"
+    r"ни\s+в\s+коем\s+случае\s+не|не\s+слушайте\s+совет)\b",
     re.IGNORECASE,
 )
 
 
 def _has_parent_induced_startle_instruction(text: str) -> bool:
-    for line in _normalize_scan_lines(text):
-        for action in PARENT_INDUCED_STARTLE_ACTION_RE.finditer(line):
-            prefix = line[max(0, action.start() - 45):action.start()]
-            if PARENT_INDUCED_STARTLE_PROHIBITION_RE.search(prefix):
-                continue
-            # Keep action/reaction within the same instruction, not different
-            # bullet points or unrelated sentences in the post.
-            tail = line[action.end():action.end() + 180]
-            outcome = PARENT_INDUCED_STARTLE_CHILD_RE.search(tail)
-            if outcome and PARENT_INDUCED_STARTLE_INTENT_RE.search(tail[:outcome.start()]):
+    def has_unnegated_sound_action(segment: str) -> bool:
+        for match in _PARENT_STARTLE_SOUND_ACTION_RE.finditer(segment):
+            prefix = segment[max(0, match.start() - 85):match.start()]
+            if not _PARENT_STARTLE_NEGATED_ACTION_RE.search(prefix):
                 return True
+        return False
+
+    previous = ""
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if re.match(r"^🔴\s*Миф\s*[:：]", line, re.IGNORECASE):
+            previous = ""
+            continue  # Quoted myth is not a recommendation to parents.
+        if line.lower().startswith(("источник:", "🔗", "#")):
+            previous = ""
+            continue
+        # Keep one adjacent sentence of context when the noun ("малыш") and
+        # the dangerous command occupy successive sentences or lines.
+        for raw_segment in re.split(r"(?<=[.!?])\s+|[;]+", line):
+            segment = raw_segment.lower().replace("ё", "е").strip()
+            if not segment:
+                continue
+            target_here = bool(_PARENT_STARTLE_TARGET_RE.search(segment))
+            target_before = bool(_PARENT_STARTLE_TARGET_RE.search(previous))
+            acoustic = bool(_PARENT_STARTLE_SOUND_RE.search(segment))
+            if (target_here and _PARENT_STARTLE_EFFECT_RE.search(segment)
+                    and re.search(r"\b(?:должен|должна|должно|цель|наблюда\w*)\b", segment)
+                    and _PARENT_STARTLE_SOUND_RE.search(previous)
+                    and _PARENT_STARTLE_ABRUPT_RE.search(previous)
+                    and has_unnegated_sound_action(previous)):
+                return True
+            if acoustic and (target_here or target_before):
+                for action in _PARENT_STARTLE_DIRECT_RE.finditer(segment):
+                    prefix = segment[max(0, action.start()-85):action.start()]
+                    if _PARENT_STARTLE_NEGATED_ACTION_RE.search(prefix):
+                        continue
+                    if (_PARENT_STARTLE_EXPLICIT_WARNING_RE.search(prefix)
+                            or re.search(r"\bпри\s+слове\s+«?$", prefix)):
+                        continue
+                    return True
+
+                endorsed = _PARENT_STARTLE_ENDORSE_RE.search(segment)
+                if endorsed and not _PARENT_STARTLE_EXPLICIT_WARNING_RE.search(segment):
+                    praise = re.search(r"\b(?:полезно|рекомендуется)\b", endorsed.group())
+                    if praise:
+                        at = endorsed.start() + praise.start()
+                        if not re.search(r"\bне\s+$", segment[max(0, at-10):at]):
+                            return True
+                abrupt = bool(_PARENT_STARTLE_ABRUPT_RE.search(segment))
+                near_ear = bool(re.search(r"\b(?:у|около|возле)\s+уха\b", segment))
+                effect = _PARENT_STARTLE_EFFECT_RE.search(segment)
+                purpose = _PARENT_STARTLE_PURPOSE_RE.search(segment)
+                # An intentional acoustic surprise is unsafe when explicitly
+                # aimed at fright/startle, not when clapping rhythmically.
+                if (has_unnegated_sound_action(segment)
+                        and re.search(r"\bчтобы\s+вызвать\s+испуг\b", segment)
+                        and not _PARENT_STARTLE_EXPLICIT_WARNING_RE.search(segment)):
+                    return True
+                if has_unnegated_sound_action(segment) and (abrupt or
+                        re.search(r"\b(?:подкрад\w*|нарочно|намеренно)\b", segment)):
+                    # Purposeful sharp sound next to the child's ear is not a
+                    # development game even if the author omits "вздрогнул".
+                    if near_ear and re.search(r"\b(?:хлоп\w*|крик\w*|звук\w*)\b", segment):
+                        if not _PARENT_STARTLE_EXPLICIT_WARNING_RE.search(segment):
+                            return True
+                    if re.search(r"\bчтобы\s+вызвать\s+испуг\b", segment):
+                        return True
+                    if purpose:
+                        if effect and not _PARENT_STARTLE_NEGATED_EFFECT_RE.search(
+                                segment[max(0,effect.start()-24):effect.start()]):
+                            if not _PARENT_STARTLE_EXPLICIT_WARNING_RE.search(segment):
+                                return True
+                    elif effect and re.search(r"\b(?:подкрад\w*|устро\w*\s+[^.]*испуг)\b", segment):
+                        if not _PARENT_STARTLE_EXPLICIT_WARNING_RE.search(segment):
+                            return True
+            previous = segment
     return False
 
 

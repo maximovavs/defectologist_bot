@@ -1162,6 +1162,53 @@ class R3B1MainLineFollowUpTest(unittest.TestCase):
                     R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak")["action"],
                     SINGING_VISUAL_ACTION)
 
+    def test_d1_dash_manner_and_duration_minimal_pairs(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief, SINGING_VISUAL_ACTION
+        for manner, prohibition in (
+            ("Петь — не надо громко, лучше тихо.", "Петь — не надо, включите запись."),
+            ("Попеть — не надо долго.", "Попеть — не надо."),
+            ("Спеть — не нужно идеально.", "Спеть — не нужно — включите запись."),
+            ("Петь — не надо громко — лучше тихо.", "Петь — не надо — включите запись."),
+            ("Петь — не нужно долго: минуты хватит.", "Петь — не нужно завтра."),
+            ("Петь — не надо очень громко.", "Петь — не надо сегодня."),
+            ("Петь - не надо слишком громко.", "Петь — не надо вообще."),
+            ("Попеть – не стоит подолгу.", "Попеть — не стоит никогда."),
+        ):
+            with self.subTest(manner=manner, prohibition=prohibition):
+                self.assertTrue(_step_asks_to_sing(manner))
+                self.assertEqual(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(manner), rubric_id="play_and_speak")["action"],
+                    SINGING_VISUAL_ACTION)
+                self.assertFalse(_step_asks_to_sing(prohibition))
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(prohibition), rubric_id="play_and_speak"),
+                    R3B1_MUSIC_PLAYER)
+
+    def test_d1_dash_prohibitions_with_quotes_times_and_repeated_negation(self):
+        from src.services.llm_generator import _step_asks_to_sing, _align_singing_visual_brief
+        for step in (
+            "Петь — не надо — включите запись.",
+            "Петь — не нужно — просто включите музыку.",
+            "Петь — не надо… включите запись.",
+            "Петь — не надо (лучше включите запись).",
+            "Петь — не надо» — включите запись.",
+            "Петь — не надо и не нужно, включите запись.",
+            "Петь — не надо сегодня, включите запись.",
+            "Петь — не надо вообще, включите запись.",
+            "Петь — не надо совсем.",
+            "Петь — не нужно завтра.",
+            "Петь — не надо ещё.",
+            "Петь — не нужно никогда.",
+            "Петь — не нужно ровно сейчас.",
+            "Петь — не стоит на этой неделе.",
+            "Петь сегодня — пожалуй, не надо, включите запись.",
+        ):
+            with self.subTest(step=step):
+                self.assertFalse(_step_asks_to_sing(step))
+                self.assertIs(_align_singing_visual_brief(
+                    R3B1_MUSIC_PLAYER, body_text=_r3b1_body(step), rubric_id="play_and_speak"),
+                    R3B1_MUSIC_PLAYER)
+
     def test_equal_playback_or_singing_choice_is_not_forced(self):
         from src.services.llm_generator import _align_singing_visual_brief, _primary_step_asks_parent_to_sing
         for step in ("Включите любимую детскую мелодию или спойте сами.", "Включите мелодию — или спойте сами."):

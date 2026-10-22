@@ -4230,6 +4230,13 @@ SINGING_DASH_NEGATION_RE = re.compile(
     r"^\s[—–-]\s+(?:(?:" + "|".join(sorted(SINGING_TRAILING_NEGATION_FILLERS)) + r")[\s,]+)*"
     r"не\s+(?:нужно|надо|следует|стоит)\b(?!\s+[а-я]+(?:ть|ться|ти|тись)\b)"
 )
+# An explicit volume/tempo/duration limit is not a ban on singing itself.
+# Keep this intentionally narrow; unknown following words stay under the
+# existing fail-closed prohibition rule, including dates and "и не".
+SINGING_DASH_MANNER_LIMIT_RE = re.compile(
+    r"^\s+(?:(?:очень|слишком|чересчур|так|настолько)\s+)*"
+    r"(?:громко|долго|идеально|быстро|резко|тихо|медленно|подолгу)\b"
+)
 EQUAL_PLAYBACK_ALTERNATIVE_RE = re.compile(
     r"\b(?:включ\w*|постав\w*|запуст\w*|проигра\w*)\b.{0,65}"
     r"\b(?:музык\w*|мелоди\w*|запис\w*|песн\w*|песенк\w*|аудио\w*)\b"
@@ -4282,8 +4289,11 @@ def _step_asks_to_sing(step: str) -> bool:
             verb = match.group(0)
             if verb in ("петь", "спеть", "попеть"):
                 after = re.findall(r"[a-zа-я]+", clause[match.end():])
+                dash_tail = text[clause_end:]
+                dash_negation = SINGING_DASH_NEGATION_RE.match(dash_tail)
                 if (all(word in SINGING_TRAILING_NEGATION_FILLERS for word in after)
-                        and SINGING_DASH_NEGATION_RE.match(text[clause_end:])):
+                        and dash_negation
+                        and not SINGING_DASH_MANNER_LIMIT_RE.match(dash_tail[dash_negation.end():])):
                     continue
                 for pos in range(min(6, len(after)-1)):
                     if after[pos:pos+2] in (["не", "нужно"], ["не", "надо"],

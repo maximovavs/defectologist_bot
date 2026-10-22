@@ -375,6 +375,7 @@ MYTH_FACT_FAMILY_PATTERNS = {
         r"\bподготов\w* к чтени\w*\b", r"\bпредчтени\w*\b", r"\bчтени\w*\b",
         r"\bpreliteracy\b", r"\bemergent literacy\b", r"\bearly literacy\b", r"\breading readiness\b", r"\bprint awareness\b",
         r"\bshared reading\b", r"\bbooks?\b", r"\bкниг\w*\b",
+        r"\bчит\w*\b", r"\breading\b",
     ),
     "vocabulary_phrase": (
         r"\bсловар\w*\b", r"\bфразов\w* реч\w*\b", r"\bдва слова\b",

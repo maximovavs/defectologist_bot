@@ -2249,6 +2249,11 @@ OBJECT_SCENE_CATEGORIES = {
     "hearing_sounds_music": (
         "toy drum, small bell, wooden rhythm instruments, simple sound-wave shapes without text"
     ),
+    # A broad hearing title must not introduce unmentioned bells/drums. These
+    # single-prop scenes are permitted only after action AND props agree.
+    "hearing_sound_toy_car": "one small plain wooden toy car with smooth unmarked surfaces",
+    "hearing_sound_drum": "one small plain toy drum with no label or lettering",
+    "hearing_sound_bell": "one simple unmarked small bell",
     "articulation_speech": "tabletop mirror with no human reflection, picture cards, wooden blocks",
     "games_everyday_communication": "basket, ball, wooden blocks, picture cards",
     "bilingual_languages": "two differently colored children’s books, small globe, two empty speech-bubble shapes without text",
@@ -2568,6 +2573,101 @@ def _human_singing_action_requires_text_cover(rubric_id: str, context_hint: str)
     return not SINGING_OBJECT_FOCUS_RE.search(brief.action)
 
 
+# Only broad, non-musical question_week titles are scoped. The same headline
+# can cover household noises, a drum, or a non-sound exercise; title alone is
+# never sufficient evidence for a particular object scene.
+QUESTION_WEEK_BROAD_SOUND_TITLE_RE = re.compile(
+    r"(?:слыш|слуш|звук|шум|\bsounds?\b|\blisten|\bhear)", re.IGNORECASE
+)
+QUESTION_WEEK_MUSIC_TITLE_RE = re.compile(
+    r"(?:музык|мелод|песн|петь|пой|ритм|колокольчик|барабан|"
+    r"\bmusic\b|\bmelod|\bsong|\bsing|\brhythm|\bbell\b|\bdrum\b)",
+    re.IGNORECASE,
+)
+# Behavioural obedience is not auditory perception, even when a title also
+# says "услышал" in a figurative sense. Keep its pre-existing fallback route.
+QUESTION_WEEK_OBEDIENCE_TITLE_RE = re.compile(
+    r"\b(?:слушается|слушаются|слушаться|слушался|слушалась|слушались)\b",
+    re.IGNORECASE,
+)
+QUESTION_WEEK_SOUND_ACTION_RE = re.compile(
+    r"\b(?:listen(?:s|ing)?|hear(?:s|ing)?|sounds?|noises?|imitat(?:e|es|ing)|"
+    r"taps?|tapping|beats?|beating|bangs?|banging|rings?|ringing|rattl(?:e|es|ing)|ticking|vroom|beeps?)\b",
+    re.IGNORECASE,
+)
+QUESTION_WEEK_SOUND_PROP_PATTERNS = (
+    ("toy car", "hearing_sound_toy_car", r"toy\s+cars?"),
+    ("drum", "hearing_sound_drum", r"drums?"),
+    ("bell", "hearing_sound_bell", r"bells?"),
+)
+QUESTION_WEEK_SOUND_OBJECT_VERBS = (
+    r"\b(?:rolls?|rolling|pushes?|pushing|shows?|showing|points? to|pointing to|"
+    r"taps?|tapping|beats?|beating|bangs?|banging|rings?|ringing|shakes?|shaking|listens? to|listening to|"
+    r"hears?|hearing|plays?|playing)\b"
+)
+# Never reach from a generic action over an unrelated clause or a merely
+# present prop ("while a drum rests nearby", "the toy car on the shelf").
+QUESTION_WEEK_SOUND_OBJECT_BARRIER = (
+    r"\b(?:and|while|hands?|gestures?|lies|lying|rests?|resting|"
+    r"sits?|sitting|stands?|standing|nearby)\b"
+)
+
+
+def _question_week_sound_object_scene(
+    title: str, rubric_id: str, context_hint: str
+) -> tuple[str, bool]:
+    """Return (specific scene, fail_closed) for broad question_week sound titles.
+
+    A compiled human visual brief is a necessary (not sufficient) proxy for
+    the parent exercise: an active material must be in the action AND the
+    checked props. Other sounds such as water/clock cannot be safely replaced
+    with an invented car/drum scene, so they use the existing text card.
+    """
+    if (rubric_id or "").strip().lower() != "question_week":
+        return "", False
+    title_value = (title or "").lower().replace("ё", "е")
+    if not QUESTION_WEEK_BROAD_SOUND_TITLE_RE.search(title_value):
+        return "", False
+    if QUESTION_WEEK_MUSIC_TITLE_RE.search(title_value):
+        return "", False  # explicit instrument/song titles keep existing policy
+    if QUESTION_WEEK_OBEDIENCE_TITLE_RE.search(title_value):
+        return "", False  # compliance/obedience is not a sound-recognition task
+    # Only intervene when the legacy classifier would substitute instruments.
+    # Preserve every other question_week object category unchanged.
+    if _object_scene_category(title, rubric_id, context_hint=context_hint) != "hearing_sounds_music":
+        return "", False
+
+    brief = _parse_compiled_visual_prompt(context_hint, rubric_id=rubric_id)
+    if brief is None:
+        return "", True
+    action = (brief.action or "").lower()
+    props = {str(prop).strip().lower() for prop in brief.props}
+    if not QUESTION_WEEK_SOUND_ACTION_RE.search(action):
+        return "", True
+
+    # Check every supported object mentioned in the action; do not silently
+    # select one of two different materials when a single-prop still life
+    # cannot represent both. Props alone never establish active use.
+    mentioned = [
+        (name, scene, pattern) for name, scene, pattern in QUESTION_WEEK_SOUND_PROP_PATTERNS
+        if re.search(r"\b" + pattern + r"\b", action)
+    ]
+    if len(mentioned) != 1:
+        return "", True
+    name, scene, pattern = mentioned[0]
+    if name not in props:
+        return "", True
+    focus = re.compile(
+        QUESTION_WEEK_SOUND_OBJECT_VERBS
+        + r"(?:(?!" + QUESTION_WEEK_SOUND_OBJECT_BARRIER + r")[^,.;]){0,60}?"
+        + r"\b" + pattern + r"\b",
+        re.IGNORECASE,
+    )
+    if not focus.search(action):
+        return "", True
+    return scene, False
+
+
 def _build_object_visual_fallback(
     *,
     safe_title: str,
@@ -2589,11 +2689,13 @@ def _build_object_visual_fallback(
     rubric = (rubric_id or "").strip().lower()
     retry_exhausted = retry_qa is not None or str(trigger or "").startswith("visual_retry_failed:")
     singing_requires_text = _human_singing_action_requires_text_cover(rubric, context_hint)
-    if (rubric == "method_piggybank" and retry_exhausted) or singing_requires_text:
+    sound_category, sound_requires_text = _question_week_sound_object_scene(title, rubric, context_hint)
+    if (rubric == "method_piggybank" and retry_exhausted) or singing_requires_text or sound_requires_text:
         qa_result = retry_qa or first_qa or {}
         policy_reason = (
             "human_singing_action_requires_text_cover" if singing_requires_text
-            else "method_piggybank_human_qa_exhausted"
+            else ("question_week_sound_object_ungrounded" if sound_requires_text
+                  else "method_piggybank_human_qa_exhausted")
         )
         print(
             f"[VISUAL][TEXT_FALLBACK] trigger={policy_reason} "
@@ -2614,9 +2716,10 @@ def _build_object_visual_fallback(
             "fallback_trigger": str(trigger or "visual_quality_rejected"),
             "reason": str(trigger or "visual_quality_rejected"),
             "final_reason": ("singing_action_object_fallback_not_allowed" if singing_requires_text
-                             else "method_piggybank_object_fallback_not_allowed"),
+                             else ("question_week_sound_object_ungrounded" if sound_requires_text
+                                   else "method_piggybank_object_fallback_not_allowed")),
             "fallback_reason": str(trigger or "visual_quality_rejected"),
-            "visual_retry_used": str(retry_exhausted) if singing_requires_text else "True",
+            "visual_retry_used": str(retry_exhausted) if (singing_requires_text or sound_requires_text) else "True",
             "visual_qa": str(qa_result.get("status", "fail")),
             "visual_qa_status": str(qa_result.get("status", "fail")),
             "visual_qa_reason": str(qa_result.get("reason", trigger or "visual_quality_rejected")),
@@ -2625,8 +2728,8 @@ def _build_object_visual_fallback(
             "visual_qa_child_count": str(qa_result.get("child_count", "unknown")),
             "visual_qa_ppe_detected": str(qa_result.get("ppe_detected", "unknown")),
             "visual_qa_text_detected": str(qa_result.get("text_detected", "unknown")),
-            "visual_qa_attempts": (str(sum(1 for qa in (first_qa, retry_qa) if qa)) if singing_requires_text
-                                   else "2"),
+            "visual_qa_attempts": (str(sum(1 for qa in (first_qa, retry_qa) if qa))
+                                   if (singing_requires_text or sound_requires_text) else "2"),
             "human_qa_first_status": str((first_qa or {}).get("status", "fail")),
             "human_qa_first_reason": str((first_qa or {}).get("reason", "")),
             "human_qa_retry_status": str((retry_qa or {}).get("status", "fail")),
@@ -2651,7 +2754,7 @@ def _build_object_visual_fallback(
             "object_qa_style_match": "unknown",
         }
 
-    category = _object_scene_category(title, rubric_id, context_hint=context_hint)
+    category = sound_category or _object_scene_category(title, rubric_id, context_hint=context_hint)
     key_result = retry_qa or first_qa or {}
     qa_fn = visual_qa_fn or evaluate_visual_quality
     last_object_qa: Dict[str, object] = {}

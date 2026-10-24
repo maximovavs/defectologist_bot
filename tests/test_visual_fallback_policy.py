@@ -1436,6 +1436,202 @@ class VisualFallbackPolicyTest(unittest.TestCase):
             with self.subTest(title=title, rubric_id=rubric_id):
                 self.assertEqual(_object_scene_category(title, rubric_id), expected)
 
+    def _question_week_sound_brief(self, action, props):
+        return _compile_visual_prompt(VisualBrief(
+            rubric_id="question_week",
+            role_rule=build_visual_role_rule("question_week", age_descriptor="2-year-old toddler"),
+            age_descriptor="2-year-old toddler",
+            setting="simple uncluttered home play area",
+            action=action,
+            props=tuple(props),
+        ))
+
+    def test_question_week_sound_selection_uses_action_and_props_not_title(self):
+        title = "Ребёнок слышит звуки вокруг"
+        cases = (
+            ("parent taps a drum while the child listens", ("drum",), "hearing_sound_drum", False),
+            ("parent rings a bell while the child listens", ("bell",), "hearing_sound_bell", False),
+            ("parent beats a drum while the child listens", ("drum",), "hearing_sound_drum", False),
+            ("child bangs a drum and listens to the sound", ("drum",), "hearing_sound_drum", False),
+            ("parent rolls a toy car while the child imitates the engine sound", ("toy car",), "hearing_sound_toy_car", False),
+            ("child listens to running water", ("water",), "", True),
+            ("child listens to a ticking clock", (), "", True),
+            ("parent points to a picture card", ("picture cards",), "", True),
+            ("parent rolls a toy car", ("toy car",), "", True),
+            ("parent taps a drum while the child listens", (), "", True),
+            ("parent holds the child's hands while a drum rests nearby", ("drum",), "", True),
+            ("parent taps a drum while the child listens to a bell", ("drum", "bell"), "", True),
+        )
+        for action, props, category, must_text in cases:
+            with self.subTest(action=action, props=props):
+                prompt = self._question_week_sound_brief(action, props)
+                self.assertEqual(
+                    visual_pipeline._question_week_sound_object_scene(title, "question_week", prompt),
+                    (category, must_text),
+                )
+
+    def test_question_week_sound_missing_and_legacy_context_fail_closed(self):
+        title = "Ребёнок слышит звуки вокруг"
+        for context in ("", "Action: parent rolls a toy car", "toy car"):
+            self.assertEqual(
+                visual_pipeline._question_week_sound_object_scene(title, "question_week", context),
+                ("", True),
+            )
+        self.assertEqual(
+            visual_pipeline._question_week_sound_object_scene(
+                "Как ребёнок слышит музыку", "question_week", ""), ("", False),
+        )
+        self.assertEqual(
+            visual_pipeline._question_week_sound_object_scene(
+                title, "tip_of_day", ""), ("", False),
+        )
+        self.assertEqual(
+            visual_pipeline._question_week_sound_object_scene(
+                "Игра с мячом", "question_week", ""), ("", False),
+        )
+
+    def test_question_week_sound_without_verifiable_props_uses_zero_object_attempts(self):
+        title = "Ребёнок слышит звуки вокруг"
+        prompt = self._question_week_sound_brief("child listens to running water", ("water",))
+        calls = []
+
+        def download(*, prompt, token):
+            calls.append(prompt)
+            return BytesIO(b"mock"), {"attempts_used": "1"}
+
+        def qa(*_args, **kwargs):
+            if kwargs.get("rubric_id") == "question_week":
+                return {"status": "fail", "pass": False, "reason": "action_mismatch",
+                        "people_count": 2, "adult_count": 1, "child_count": 1,
+                        "ppe_detected": False, "text_detected": False,
+                        "illustration_style_match": True, "character_roles_match": True,
+                        "action_match": False}
+            return {**_object_pass(), "object_topic_match": True}
+
+        with patch("src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download):
+            _, meta = build_post_visual(
+                title=title, day_key="2026-10-23", image_prompt=prompt,
+                rubric_id="question_week", visual_qa_fn=qa,
+            )
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["final_reason"], "question_week_sound_object_ungrounded")
+        self.assertEqual(meta["object_generation_attempts"], "0")
+        self.assertEqual(meta["object_qa_attempts"], "0")
+        self.assertEqual(len(calls), 2)  # human + bounded retry, no object requests
+
+    def test_question_week_sound_grounded_object_qa_and_attempt_budget(self):
+        title = "Ребёнок слышит звуки вокруг"
+        prompt = self._question_week_sound_brief(
+            "parent rolls a toy car while the child imitates the engine sound", ("toy car",))
+        calls, qa_calls = [], []
+
+        def download(*, prompt, token):
+            calls.append(prompt)
+            return BytesIO(b"mock"), {"attempts_used": "1"}
+
+        def qa(*_args, **kwargs):
+            qa_calls.append(kwargs)
+            if kwargs.get("rubric_id") == "question_week":
+                return {"status": "fail", "pass": False, "reason": "action_mismatch",
+                        "people_count": 2, "adult_count": 1, "child_count": 1,
+                        "ppe_detected": False, "text_detected": False,
+                        "illustration_style_match": True, "character_roles_match": True,
+                        "action_match": False}
+            return {**_object_pass(), "object_topic_match": False}
+
+        with patch("src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download):
+            _, meta = build_post_visual(
+                title=title, day_key="2026-10-23", image_prompt=prompt,
+                rubric_id="question_week", visual_qa_fn=qa,
+            )
+        self.assertEqual(len(calls), 4)  # two human + two objects, never a fifth
+        self.assertEqual(meta["mode"], "text_fallback")
+        self.assertEqual(meta["object_generation_attempts"], "2")
+        self.assertEqual(meta["object_qa_reason"], "object_topic_mismatch")
+        self.assertEqual(len(qa_calls), 4)
+        object_qa = [call["expected_prompt"] for call in qa_calls if call.get("rubric_id") == ""]
+        self.assertEqual(len(object_qa), 2)
+        self.assertTrue(all("wooden toy car" in brief for brief in object_qa))
+        self.assertTrue(all("toy drum" not in brief and "small bell" not in brief for brief in object_qa))
+
+    def test_question_week_sound_object_prompt_contains_only_focused_prop(self):
+        for category, include, exclude in (
+            ("hearing_sound_toy_car", "toy car", "toy drum"),
+            ("hearing_sound_drum", "toy drum", "small bell"),
+            ("hearing_sound_bell", "small bell", "toy drum"),
+        ):
+            with self.subTest(category=category):
+                prompt = build_object_provider_prompt(category)
+                self.assertIn(include, prompt)
+                self.assertNotIn(exclude, prompt)
+                self.assertLessEqual(len(prompt), visual_pipeline.OBJECT_PROVIDER_PROMPT_MAX_CHARS)
+
+    def test_question_week_sound_v3_preserves_nonhearing_categories(self):
+        # v2 incorrectly made these unrelated title categories use a text card.
+        cases = (
+            ("Когда ребёнок начнёт выговаривать звук Р?",
+             "parent and child look into a mirror and practise sounds", ("mirror",), "default"),
+            ("Почему ребёнок путает звуки в словах",
+             "parent shows picture cards while child names the pictures", ("picture cards",),
+             "books_vocab_phrases_stories"),
+            ("Малыш боится громкого шума",
+             "parent hugs the child on the sofa", (), "default"),
+            ("Звукоподражания: когда малыш начнёт повторять",
+             "parent shows a toy car while child imitates vroom", ("toy car",), "default"),
+            ("Ребёнок не слушается: как говорить, чтобы услышал",
+             "parent talks calmly with child on the sofa", (), "hearing_sounds_music"),
+        )
+        for title, action, props, legacy_category in cases:
+            with self.subTest(title=title):
+                prompt = self._question_week_sound_brief(action, props)
+                self.assertEqual(
+                    _object_scene_category(title, "question_week", context_hint=prompt),
+                    legacy_category,
+                )
+                self.assertEqual(
+                    visual_pipeline._question_week_sound_object_scene(title, "question_week", prompt),
+                    ("", False),
+                )
+
+    def test_question_week_sound_v3_preserves_nonhearing_end_to_end(self):
+        cases = (
+            ("Когда ребёнок начнёт выговаривать звук Р?",
+             "parent and child look into a mirror and practise sounds", ("mirror",), "default"),
+            ("Почему ребёнок путает звуки в словах",
+             "parent shows picture cards while child names the pictures", ("picture cards",),
+             "books_vocab_phrases_stories"),
+            ("Малыш боится громкого шума",
+             "parent hugs the child on the sofa", (), "default"),
+            ("Ребёнок не слушается: как говорить, чтобы услышал",
+             "parent talks calmly with child on the sofa", (), "hearing_sounds_music"),
+        )
+        def qa(*_args, **kwargs):
+            if kwargs.get("rubric_id") == "question_week":
+                return {"status": "fail", "pass": False, "reason": "action_mismatch",
+                        "people_count": 2, "adult_count": 1, "child_count": 1,
+                        "ppe_detected": False, "text_detected": False,
+                        "illustration_style_match": True, "character_roles_match": True,
+                        "action_match": False}
+            return {**_object_pass(), "object_topic_match": True}
+
+        for title, action, props, legacy_category in cases:
+            with self.subTest(title=title):
+                calls = []
+                def download(*, prompt, token):
+                    calls.append(prompt)
+                    return BytesIO(b"mock"), {"attempts_used": "1"}
+                with patch("src.services.visual_pipeline.download_pollinations_image_with_meta",
+                           side_effect=download):
+                    _, meta = build_post_visual(
+                        title=title, day_key="2026-10-23",
+                        image_prompt=self._question_week_sound_brief(action, props),
+                        rubric_id="question_week", visual_qa_fn=qa,
+                    )
+                self.assertEqual(meta["mode"], "ai_object_fallback")
+                self.assertEqual(meta["object_scene_category"], legacy_category)
+                self.assertEqual(meta["object_generation_attempts"], "1")
+                self.assertEqual(len(calls), 3)  # 2 human + 1 successful object
+
     def test_household_category_can_use_safe_brief_context_without_leaking_it(self):
         self.assertEqual(
             _object_scene_category("Новые слова", "method_piggybank", "placing a T-shirt into the washing machine"),

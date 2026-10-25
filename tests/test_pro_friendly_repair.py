@@ -164,6 +164,43 @@ class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
         for rule in GENERAL_NO_DATA_RULES:
             self.assertNotIn(rule, repair)
 
+    def test_prevalidated_repair_requires_grounded_sections_for_saturday_failures(self):
+        base_prompt = llm.build_generation_prompt(
+            day_key="SA",
+            rubric_title="Суббота — Методическая копилка",
+            rubric_format="pro_friendly",
+            audience="pros",
+            title_suffix="",
+            source_domain="example.org",
+            source_url="https://example.org/source",
+            evidence_text=EVIDENCE,
+            disclaimer="",
+            hashtags=[],
+            max_chars=1200,
+            evidence_prevalidated=True,
+        )
+        headings = (
+            "👩‍⚕️ Аудитория: специалисты", "🎯 Цель:", "🧰 Материалы:",
+            "🔁 Как провести:", "✅ На что смотреть:", "💡 Вариант усложнения:",
+        )
+        for reason in (
+            "pro_too_abstract", "no_data_in_source",
+            "pro_missing_method_card_heading", "pro_missing_observation_criterion",
+        ):
+            with self.subTest(reason=reason):
+                prompt = llm.build_pro_friendly_repair_prompt(
+                    base_prompt, reason, evidence_prevalidated=True,
+                )
+                section_line = prompt.split("Use exact section headers, in order: ", 1)[1].split("\n", 1)[0]
+                positions = [section_line.find(heading) for heading in headings]
+                self.assertTrue(all(position >= 0 for position in positions))
+                self.assertEqual(positions, sorted(positions))
+                self.assertIn("immediate observable child response", prompt)
+                self.assertIn("never invent new objects or task levels", prompt)
+                self.assertIn(SAFETY_NO_DATA_RULE, prompt)
+                for rule in GENERAL_NO_DATA_RULES:
+                    self.assertNotIn(rule, prompt)
+
     async def test_gemini_pro_invalid_output_gets_one_valid_repair(self):
         responses = [MISSING_GOAL_CARD, VALID_CARD]
 
@@ -205,6 +242,85 @@ class ProFriendlyRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Игра с коротким словом", out)
         self.assertEqual(note, f"ok:gemini_retry:{llm.GEMINI_MODELS[0]}")
         self.assertEqual(gemini_mock.call_count, 2)
+
+
+    async def test_prevalidated_groq_no_data_retry_recovers_without_unsupported_details(self):
+        prompts = []
+
+        async def fake_groq(prompt, api_key):
+            prompts.append(prompt)
+            return "НЕТ_ДАННЫХ" if len(prompts) == 1 else VALID_CARD
+
+        with patch.object(llm, "groq_chat", side_effect=fake_groq):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Суббота — Методическая копилка",
+                rubric_format="pro_friendly", audience="pros", title_suffix="",
+                source_domain="example.org", source_url="https://example.org/source",
+                evidence_text=EVIDENCE, disclaimer="", hashtags=[],
+                provider="groq", groq_key="offline-groq", gemini_key="",
+                max_chars=1200, day_key="SA", evidence_prevalidated=True,
+            )
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "ok:groq_retry")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("Use exact section headers, in order:", prompts[1])
+        self.assertIn("do not invent response recording", prompts[1])
+        self.assertIn("🔁 Как провести:", out)
+
+    async def test_prevalidated_auto_groq_to_gemini_repair_offline(self):
+        groq_prompts, gemini_prompts = [], []
+
+        async def fake_groq(prompt, api_key):
+            groq_prompts.append(prompt)
+            return "НЕТ_ДАННЫХ"
+
+        async def fake_gemini(prompt, api_key):
+            gemini_prompts.append(prompt)
+            return MISSING_GOAL_CARD if len(gemini_prompts) == 1 else VALID_CARD
+
+        with patch.object(llm, "groq_chat", side_effect=fake_groq), patch.object(
+            llm, "gemini_generate", side_effect=fake_gemini
+        ):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Суббота — Методическая копилка",
+                rubric_format="pro_friendly", audience="pros", title_suffix="",
+                source_domain="example.org", source_url="https://example.org/source",
+                evidence_text=EVIDENCE, disclaimer="", hashtags=[],
+                provider="auto", groq_key="offline-groq", gemini_key="offline-gemini",
+                max_chars=1200, day_key="SA", evidence_prevalidated=True,
+            )
+        self.assertTrue(ok, note)
+        self.assertIn("ok:gemini_retry", note)
+        self.assertEqual(len(groq_prompts), 2)
+        self.assertEqual(len(gemini_prompts), 2)
+        self.assertIn("Use exact section headers, in order:", gemini_prompts[1])
+        self.assertIn("✅ На что смотреть:", out)
+
+    async def test_prevalidated_repair_still_rejects_risky_manual_instructions(self):
+        unsafe = VALID_CARD.replace(
+            "1. Назовите короткое слово.",
+            "1. Введите логопедический зонд под язык ребёнка.",
+        )
+        calls = 0
+
+        async def fake_groq(prompt, api_key):
+            nonlocal calls
+            calls += 1
+            return "НЕТ_ДАННЫХ" if calls == 1 else unsafe
+
+        with patch.object(llm, "groq_chat", side_effect=fake_groq):
+            out, ok, note = await llm.generate_post_plain_from_evidence_async(
+                rubric_title="Суббота — Методическая копилка",
+                rubric_format="pro_friendly", audience="pros", title_suffix="",
+                source_domain="example.org", source_url="https://example.org/source",
+                evidence_text=EVIDENCE, disclaimer="", hashtags=[],
+                provider="groq", groq_key="offline-groq", gemini_key="",
+                max_chars=1200, day_key="SA", evidence_prevalidated=True,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(out, "")
+        self.assertEqual(note, "invalid_groq_retry:pro_risky_manual_technique")
+        self.assertEqual(calls, 2)
 
 
 if __name__ == "__main__":

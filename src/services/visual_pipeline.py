@@ -2584,11 +2584,15 @@ QUESTION_WEEK_MUSIC_TITLE_RE = re.compile(
     r"\bmusic\b|\bmelod|\bsong|\bsing|\brhythm|\bbell\b|\bdrum\b)",
     re.IGNORECASE,
 )
-# Behavioural obedience is not auditory perception, even when a title also
-# says "услышал" in a figurative sense. Keep its pre-existing fallback route.
+# Obedience is behavioral, not auditory perception. Never reuse the
+# legacy instrument fallback for this kind of question-week title.
 QUESTION_WEEK_OBEDIENCE_TITLE_RE = re.compile(
     r"\b(?:слушается|слушаются|слушаться|слушался|слушалась|слушались)\b",
     re.IGNORECASE,
+)
+# Other ways to describe non-compliance must not be treated as hearing games.
+QUESTION_WEEK_BEHAVIOR_NOT_LISTENING_RE = re.compile(
+    r"\bне\s+слуша(?:ет|ют|л|ла|ли|ть|ешь|ем|ете)\b", re.IGNORECASE,
 )
 QUESTION_WEEK_SOUND_ACTION_RE = re.compile(
     r"\b(?:listen(?:s|ing)?|hear(?:s|ing)?|sounds?|noises?|imitat(?:e|es|ing)|"
@@ -2611,6 +2615,32 @@ QUESTION_WEEK_SOUND_OBJECT_BARRIER = (
     r"\b(?:and|while|hands?|gestures?|lies|lying|rests?|resting|"
     r"sits?|sitting|stands?|standing|nearby)\b"
 )
+# A mentioned object is not an affirmative action if its controlling verb is
+# negated. Check the clause directly before each candidate focus, not the
+# entire action: a later affirmative step can still establish the material.
+QUESTION_WEEK_NEGATED_OBJECT_FOCUS_RE = re.compile(
+    r"\b(?:not(?!\s+only\b)|never|without|cannot|can't|don't|doesn't|didn't|"
+    r"won't|wouldn't|shouldn't|mustn't|isn't|aren't|wasn't|weren't|"
+    r"avoid(?:s|ed|ing)?|refus(?:e|es|ed|ing)|refrain(?:s|ed|ing)?)\b"
+    r"[^,.;]{0,65}$",
+    re.IGNORECASE,
+)
+# These other unperformed-action cues must govern the actual focus verb,
+# not an unrelated earlier activity ("parent stops walking as child taps").
+QUESTION_WEEK_UNPERFORMED_FOCUS_RE = re.compile(
+    r"\b(?:"
+    # A subject modifier belongs to 'no one / nobody', not to a later
+    # affirmative action ('no one waits while the parent taps a drum').
+    r"(?:no\s+(?:one|body|parent|child|adult)|nobody|no-one|neither)"
+    r"(?:\s+(?:else|here)|\s+at\s+home)?|"
+    r"instead\s+of|rather\s+than|"
+    # 'stops all tapping' means no tapping; 'stops to listen' means hearing.
+    r"(?:stops?|stopped|stopping|ceases?|ceased|ceasing|quits?|quit|quitting)"
+    r"(?:\s+all)?|"
+    r"(?:hardly|barely|seldom|rarely|scarcely)(?:\s+if\s+ever)?"
+    r")\b(?:\s+(?:ever|even|[a-z]+ly)){0,2}\s*$",
+    re.IGNORECASE,
+)
 
 
 def _question_week_sound_object_scene(
@@ -2628,14 +2658,15 @@ def _question_week_sound_object_scene(
     title_value = (title or "").lower().replace("ё", "е")
     if not QUESTION_WEEK_BROAD_SOUND_TITLE_RE.search(title_value):
         return "", False
-    if QUESTION_WEEK_MUSIC_TITLE_RE.search(title_value):
-        return "", False  # explicit instrument/song titles keep existing policy
-    if QUESTION_WEEK_OBEDIENCE_TITLE_RE.search(title_value):
-        return "", False  # compliance/obedience is not a sound-recognition task
-    # Only intervene when the legacy classifier would substitute instruments.
-    # Preserve every other question_week object category unchanged.
+    # Only intervene where the legacy classifier would substitute instruments.
+    # All other categories and rubrics keep their original routing.
     if _object_scene_category(title, rubric_id, context_hint=context_hint) != "hearing_sounds_music":
         return "", False
+    if (QUESTION_WEEK_OBEDIENCE_TITLE_RE.search(title_value)
+            or QUESTION_WEEK_BEHAVIOR_NOT_LISTENING_RE.search(title_value)):
+        return "", True  # no instrumental still life for non-compliance
+    if QUESTION_WEEK_MUSIC_TITLE_RE.search(title_value):
+        return "", False  # explicit instrument/song titles keep existing policy
 
     brief = _parse_compiled_visual_prompt(context_hint, rubric_id=rubric_id)
     if brief is None:
@@ -2657,15 +2688,24 @@ def _question_week_sound_object_scene(
     name, scene, pattern = mentioned[0]
     if name not in props:
         return "", True
+    # Use an overlapping lookahead: "stops playing to listen to a drum" has
+    # an unperformed "playing" step but an affirmative "listen to a drum".
+    # Without overlap the earlier verb consumes the whole phrase, concealing
+    # the later positive sound action and causing a false text cover.
     focus = re.compile(
-        QUESTION_WEEK_SOUND_OBJECT_VERBS
+        r"(?=(" + QUESTION_WEEK_SOUND_OBJECT_VERBS
         + r"(?:(?!" + QUESTION_WEEK_SOUND_OBJECT_BARRIER + r")[^,.;]){0,60}?"
-        + r"\b" + pattern + r"\b",
+        + r"\b" + pattern + r"\b))",
         re.IGNORECASE,
     )
-    if not focus.search(action):
-        return "", True
-    return scene, False
+    for match in focus.finditer(action):
+        # A negator affects only its own focus. In "does not tap a drum,
+        # but taps a drum", the latter is still a supported positive action.
+        clause = re.split(r"[,.;:]|\b(?:and|but|while|then)\b", action[:match.start()])[-1]
+        if not (QUESTION_WEEK_NEGATED_OBJECT_FOCUS_RE.search(clause)
+                or QUESTION_WEEK_UNPERFORMED_FOCUS_RE.search(clause)):
+            return scene, False
+    return "", True
 
 
 def _build_object_visual_fallback(

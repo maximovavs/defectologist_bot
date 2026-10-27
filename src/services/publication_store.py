@@ -24,6 +24,10 @@ _DELIVERY_ORIGINAL_TG_REQUEST = None
 _DELIVERY_ORIGINAL_SEND_POST_WITH_VISUAL = None
 _ACTIVE_DELIVERY_STORE: Optional["PublicationStore"] = None
 _ACTIVE_DELIVERY_ATTEMPT_KEY = ""
+# Hard-OFF, not environment-controlled; a separate offline adapter tests the protocol.
+_R6U_UNIFIED_DELIVERY_HOOK_ENABLED = False
+# R6-V local-only fixture test. NEVER enabled by environment or production config.
+_R6V_TEST_ONLY_HANDOFF_ENABLED = False
 
 _PUBLISHER_HISTORY_NAMES = frozenset({
     "publication_history.sqlite3",
@@ -428,6 +432,10 @@ class PublicationStore:
             return payload
 
         def send_post_with_durable_state(chat_id, photo_buffer, plain_post, html_full_post):
+            # R6-U: never let a new pre-reservation coexist with the legacy hook.
+            # This guard has no runtime ON surface; offline tests use a separate fixture.
+            if _R6U_UNIFIED_DELIVERY_HOOK_ENABLED:
+                raise PublicationDeliveryStateBlocked("r6u_shared_hook_not_wired_stop_before_send")
             global _ACTIVE_DELIVERY_ATTEMPT_KEY
 
             store = _ACTIVE_DELIVERY_STORE
@@ -437,13 +445,26 @@ class PublicationStore:
                 )
 
             body_hash = hashlib.sha256((plain_post or "").encode("utf-8")).hexdigest()
-            attempt_key = hashlib.sha256(
-                f"{chat_id}\0{body_hash}".encode("utf-8")
-            ).hexdigest()
+            # R6-V: the fixture path consumes an already durable reservation.
+            # The legacy ON/OFF publisher uses its original attempt key and begin.
+            r6v_fixture = _R6V_TEST_ONLY_HANDOFF_ENABLED
+            if r6v_fixture:
+                handoff = sys.modules.get('src.services.safe03_r6v_delivery_handoff_offline')
+                if handoff is None:
+                    raise PublicationDeliveryStateBlocked('r6v_fixture_not_preloaded')
+                attempt_key, lifecycle = handoff.preflight(store, chat_id, plain_post)
+            else:
+                lifecycle = None
+                attempt_key = hashlib.sha256(
+                    f"{chat_id}\0{body_hash}".encode("utf-8")
+                ).hexdigest()
             ambiguous_type = getattr(publisher, "TelegramDeliveryOutcomeAmbiguous", RuntimeError)
 
             try:
-                store.begin_delivery_attempt(attempt_key, body_hash)
+                if r6v_fixture:
+                    handoff.claim(lifecycle, attempt_key, chat_id, plain_post)
+                else:
+                    store.begin_delivery_attempt(attempt_key, body_hash)
             except Exception as state_error:
                 raise ambiguous_type(
                     "telegram_delivery_outcome_ambiguous:delivery_state_begin_failed"
@@ -457,9 +478,12 @@ class PublicationStore:
             except Exception as send_error:
                 if isinstance(send_error, ambiguous_type):
                     try:
-                        store.mark_delivery_ambiguous(
-                            attempt_key, send_error.__class__.__name__
-                        )
+                        if r6v_fixture:
+                            handoff.quarantine(lifecycle, attempt_key)
+                        else:
+                            store.mark_delivery_ambiguous(
+                                attempt_key, send_error.__class__.__name__
+                            )
                     except Exception:
                         # begin_delivery_attempt committed before Telegram mutation;
                         # keeping "pending" still quarantines the next run.
@@ -467,7 +491,14 @@ class PublicationStore:
                     raise
 
                 try:
+                    if r6v_fixture:
+                        handoff.quarantine(lifecycle, attempt_key)
+                        raise ambiguous_type(
+                            "telegram_delivery_outcome_ambiguous:fixture_unclassified_send_error"
+                        ) from send_error
                     store.clear_delivery_attempt(attempt_key)
+                except ambiguous_type:
+                    raise
                 except Exception as state_error:
                     raise ambiguous_type(
                         "telegram_delivery_outcome_ambiguous:"
@@ -476,7 +507,10 @@ class PublicationStore:
                 raise
             else:
                 try:
-                    store.mark_delivery_confirmed(attempt_key)
+                    if r6v_fixture:
+                        handoff.reconcile_mock_ack(store, lifecycle, attempt_key)
+                    else:
+                        store.mark_delivery_confirmed(attempt_key)
                 except Exception as state_error:
                     raise ambiguous_type(
                         "telegram_delivery_outcome_ambiguous:delivery_state_confirm_failed"
@@ -484,6 +518,8 @@ class PublicationStore:
                 return result
             finally:
                 _ACTIVE_DELIVERY_ATTEMPT_KEY = ""
+                if r6v_fixture:
+                    store._r6v_test_attempt_key = ""
 
         publisher.tg_request = tg_request_with_delivery_receipts
         publisher.send_post_with_visual = send_post_with_durable_state

@@ -1,0 +1,59 @@
+{
+  "stage": "SAFE03_R6-M",
+  "status": "DRAFT_OFFLINE_ONLY_NO_POST",
+  "source_catalog_sha256": "0557614596b05b17b3a44b94421e0970b665daaca5858b8db8a865da7b4d1a9d",
+  "source_stage": "R6-H frozen five-record catalog",
+  "clinical_basis": {
+    "warning_button_batteries": "https://www.poison.org/battery/guideline",
+    "warning_small_magnets": "https://www.rch.org.au/clinicalguide/guideline_index/Foreign_body_ingestion/"
+  },
+  "approvals": {},
+  "trusted_sources": {},
+  "candidates": [
+    {
+      "catalog_id": "warning_button_batteries",
+      "version": 4,
+      "kind": "warning",
+      "age_min_months": 0,
+      "age_max_months": null,
+      "object_id": "button_battery",
+      "action": "warn_no_child_access",
+      "actor": "adult_caregiver",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "no_child_access",
+        "no_handling_exercise"
+      ],
+      "text": "Не используйте кнопочные батарейки в играх с детьми. Храните их вне доступа ребёнка.\n\nПри подозрении на проглатывание кнопочной батарейки немедленно обращайтесь за экстренной медицинской помощью, даже если симптомов нет. Не вызывайте рвоту и не ждите ухудшения состояния. Не давайте ребёнку ничего есть или пить, кроме описанного ниже исключения.\n\nЕсли батарейка может быть литиевой (или её тип неизвестен, но она точно не из слухового аппарата), ребёнку исполнилось 12 месяцев, предполагаемое проглатывание произошло менее 12 часов назад, ребёнок способен безопасно глотать, у него нет аллергии на мёд и мёд уже есть под рукой, по пути в больницу можно дать 10 мл (2 чайные ложки) мёда каждые 10 минут, максимум 6 доз. Не давайте мёд при рвоте или нарушении глотания. Не задерживайте выезд ради мёда: он не заменяет экстренную медицинскую помощь. При сомнениях в соблюдении условий исключения ничего не давайте внутрь и немедленно обращайтесь за помощью.",
+      "text_sha256": "502488755f3279c9af0612b1710092d0c0d8192a5d0eb1953a48a87d97cb684c",
+      "entry_sha256": "adaa80ebd6cd4707615e190fad1f75876eb2f0bcba740bf6f5fd1b2ae4e71f29",
+      "metadata_approval": "UNAPPROVED_NEW_DRAFT_REQUIRES_PEDIATRICIAN_REVIEW",
+      "text_adjudication": "UNREVIEWED_V_NEXT",
+      "reported_reviewer": "",
+      "reported_reviewer_role": ""
+    },
+    {
+      "catalog_id": "warning_small_magnets",
+      "version": 3,
+      "kind": "warning",
+      "age_min_months": 0,
+      "age_max_months": null,
+      "object_id": "small_magnet",
+      "action": "warn_no_child_access",
+      "actor": "adult_caregiver",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "no_child_access",
+        "no_handling_exercise"
+      ],
+      "text": "Не используйте мелкие магниты для речевых игр с детьми. Храните их вне доступа ребёнка.\n\nПроглатывание нескольких магнитов или магнита вместе с металлическим предметом может привести к тяжёлому повреждению кишечника, в том числе со смертельным исходом.\n\nПри подозрении на проглатывание магнита срочно обращайтесь за медицинской помощью, даже если ребёнок чувствует себя нормально. Для оценки необходимо рентгенологическое обследование; дальнейшие действия определит врач. Не ждите появления симптомов.",
+      "text_sha256": "81516094e7e0ff5184c522505a2a3a96460ee3bef23d6fa1b0d45abc660ea341",
+      "entry_sha256": "120a28f67e7f97faadb453d9d5d08c233e8fef5ae1de2d111b8ae5a72399b275",
+      "metadata_approval": "UNAPPROVED_NEW_DRAFT_REQUIRES_PEDIATRICIAN_REVIEW",
+      "text_adjudication": "UNREVIEWED_V_NEXT",
+      "reported_reviewer": "",
+      "reported_reviewer_role": ""
+    }
+  ],
+  "disclaimer": "No clinical approval; no publication authorization; not imported into production"
+}

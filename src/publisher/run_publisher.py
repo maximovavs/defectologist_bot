@@ -65,6 +65,12 @@ from src.services.llm_generator import (
     validate_pro_evidence_for_generation,
 )
 from src.services.publication_store import PublicationStore
+
+# SAFE03 R6-T: reviewed local integration seam. Hard OFF in production.
+# Never enable until the existing delivery hook and reservation share one lifecycle.
+_R6T_SHARED_RESERVATION_PRODUCTION_ENABLED = False
+# R6-U: a future shared lifecycle needs one delivery-hook owner; never allow live ON.
+_R6U_UNIFIED_DELIVERY_PRODUCTION_ENABLED = False
 from src.services.poll_builder import PollSpec, build_poll_spec
 from src.services.engagement_builder import (
     EngagementSpec,
@@ -3448,6 +3454,13 @@ async def amain() -> None:
                     target_chat_id = _resolve_publish_chat_id()
                     if not target_chat_id:
                         raise RuntimeError("Resolved target chat id is empty")
+                    # R6-T: OFF leaves the historical path untouched.  Should a
+                    # future change flip this constant before the delivery
+                    # hook is integrated, fail closed BEFORE any Telegram call.
+                    if _R6T_SHARED_RESERVATION_PRODUCTION_ENABLED:
+                        raise RuntimeError("r6t_unwired_delivery_hook_must_stop_before_send")
+                    if _R6U_UNIFIED_DELIVERY_PRODUCTION_ENABLED:
+                        raise RuntimeError("r6u_shared_lifecycle_not_wired_stop_before_send")
                     try:
                         post_message_id = send_post_with_visual(
                             target_chat_id,

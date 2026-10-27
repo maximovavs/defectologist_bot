@@ -3,7 +3,7 @@ import json
 import hashlib
 from dataclasses import replace
 from pathlib import Path
-import pytest
+import unittest
 from src.services import safe03_r6d_offline_acceptance as a
 
 FROZEN=Path(__file__).resolve().parents[1]/'SAFE03_R6D_FROZEN_CANDIDATES.json'
@@ -64,14 +64,17 @@ def test_warning_age_bound_corrected_and_exercises_still_bounded():
             assert a._test_fixture_only_render(proposed(e,age),FAKE_FIXTURE_REGISTRY).decision=='NO_POST'
 
 
-@pytest.mark.parametrize('field,bad',[('text','new text'),('version',999),('kind','warning'),('object_id','button_battery'),('action','unsafe'),('actor','unsafe'),('recipient','child'),('constraints',['unreviewed'])])
-def test_no_drift_in_core_fields(field,bad):
-    for e in a.CATALOG.values():
-        p=proposed(e)
-        if p[field]==bad:
-            continue
-        p[field]=bad
-        assert a._test_fixture_only_render(p,FAKE_FIXTURE_REGISTRY).decision=='NO_POST'
+def test_no_drift_in_core_fields():
+    for field, bad in (('text', 'new text'), ('version', 999), ('kind', 'warning'),
+                       ('object_id', 'button_battery'), ('action', 'unsafe'),
+                       ('actor', 'unsafe'), ('recipient', 'child'),
+                       ('constraints', ['unreviewed'])):
+        for e in a.CATALOG.values():
+            p=proposed(e)
+            if p[field]==bad:
+                continue
+            p[field]=bad
+            assert a._test_fixture_only_render(p,FAKE_FIXTURE_REGISTRY).decision=='NO_POST', (field, e.catalog_id)
 
 
 def test_untrusted_flags_and_missing_keys_and_unknown_ids():
@@ -179,3 +182,12 @@ def test_legacy_unstructured_and_none_rejected():
     for x in [None,False,[],{},'Текст',{'text':'Катаем мяч'}, {'age_months':12,'approved':True}]:
         assert a.render(x).decision=='NO_POST'
         assert a._test_fixture_only_render(x,FAKE_FIXTURE_REGISTRY).decision=='NO_POST'
+
+
+def load_tests(loader, tests, pattern):
+    """Run all R6-D proof functions under the SAFE03 unittest-only CI runner."""
+    suite = unittest.TestSuite()
+    for name, value in sorted(globals().items()):
+        if name.startswith("test_") and callable(value):
+            suite.addTest(unittest.FunctionTestCase(value, description=name))
+    return suite

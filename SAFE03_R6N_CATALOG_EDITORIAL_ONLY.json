@@ -1,0 +1,137 @@
+{
+  "stage": "SAFE03_R6N",
+  "mode": "OFFLINE_ONLY_NO_POST",
+  "base_main": "0e96a0ae494f1b8c80d098f65d7c8c824712c8b0",
+  "frozen_catalog_sha256": "0557614596b05b17b3a44b94421e0970b665daaca5858b8db8a865da7b4d1a9d",
+  "r6m_candidate_sha256": "922a8408d1bb79884c963960f4c5f01cc98d63d7ea6577c1deaff9ed3774ec9b",
+  "editorial_status": "OWNER_RELAYED_CLINICAL_CONSULTATION",
+  "communication_channel": "USER_RELAYED_NOT_DIRECTLY_VERIFIED",
+  "editorial_receipts": [
+    {
+      "catalog_id": "warning_button_batteries",
+      "version": 4,
+      "report_date": "2026-10-26",
+      "reported_reviewer": "Михаил Дмитриев",
+      "reported_role": "врач-педиатр, специалист по детской безопасности",
+      "evidence_grade": "USER_ATTESTED_CLINICAL_OK",
+      "entry_sha256": "adaa80ebd6cd4707615e190fad1f75876eb2f0bcba740bf6f5fd1b2ae4e71f29",
+      "text_sha256": "502488755f3279c9af0612b1710092d0c0d8192a5d0eb1953a48a87d97cb684c",
+      "reported_answer": "ДА",
+      "independent_identity_verified": false,
+      "independent_signature_verified": false
+    },
+    {
+      "catalog_id": "warning_small_magnets",
+      "version": 3,
+      "report_date": "2026-10-26",
+      "reported_reviewer": "Михаил Дмитриев",
+      "reported_role": "врач-педиатр, специалист по детской безопасности",
+      "evidence_grade": "USER_ATTESTED_CLINICAL_OK",
+      "entry_sha256": "120a28f67e7f97faadb453d9d5d08c233e8fef5ae1de2d111b8ae5a72399b275",
+      "text_sha256": "81516094e7e0ff5184c522505a2a3a96460ee3bef23d6fa1b0d45abc660ea341",
+      "reported_answer": "ДА",
+      "independent_identity_verified": false,
+      "independent_signature_verified": false
+    }
+  ],
+  "source_research": [
+    {
+      "catalog_id": "warning_button_batteries",
+      "url": "https://www.poison.org/battery/guideline",
+      "grounding": "honey criteria, urgent evaluation and hearing aid unknown-cell qualifier",
+      "independently_enrolled": false
+    },
+    {
+      "catalog_id": "warning_small_magnets",
+      "url": "https://www.rch.org.au/clinicalguide/guideline_index/Foreign_body_ingestion/",
+      "grounding": "magnets high risk, imaging required",
+      "independently_enrolled": false
+    }
+  ],
+  "entries": [
+    {
+      "catalog_id": "picture_naming_24_48",
+      "version": 2,
+      "kind": "exercise",
+      "age_min_months": 24,
+      "age_max_months": 48,
+      "object_id": "large_picture_card",
+      "action": "point_to_picture",
+      "actor": "child",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "adult_present",
+        "no_detachable_small_parts"
+      ],
+      "text": "Покажите ребёнку крупную картинку без съёмных деталей. Предложите указать на знакомый предмет и назовите его вместе.\n\nОтвет жестом — полноценный способ общения. Поддерживайте любые попытки взаимодействия, не требуйте обязательного произнесения слова. Если у ребёнка есть особенности зрения или моторики, адаптируйте материал: используйте подходящие контрастные изображения и удобное расположение предметов."
+    },
+    {
+      "catalog_id": "soft_ball_roll_36_60",
+      "version": 2,
+      "kind": "exercise",
+      "age_min_months": 36,
+      "age_max_months": 60,
+      "object_id": "large_soft_ball",
+      "action": "roll_ball",
+      "actor": "child",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "adult_present",
+        "no_detachable_small_parts"
+      ],
+      "text": "Взрослый и ребёнок по очереди катят друг другу крупный мягкий мяч без съёмных мелких деталей.\n\nИгра добровольная. Подбирайте расстояние и движение с учётом возможностей ребёнка. Наша цель — учиться взаимодействовать по очереди, а не оценивать спортивные способности. Не требуйте обязательного взгляда в глаза."
+    },
+    {
+      "catalog_id": "clap_rhythm_24_48",
+      "version": 2,
+      "kind": "exercise",
+      "age_min_months": 24,
+      "age_max_months": 48,
+      "object_id": "hands",
+      "action": "clap_rhythm",
+      "actor": "adult_caregiver",
+      "recipient": "child_observer",
+      "constraints": [
+        "adult_present",
+        "stop_if_distressed"
+      ],
+      "text": "Взрослый негромко хлопает в ладоши два раза и делает паузу. Предложите ребёнку повторить, если он хочет.\n\nНе хлопайте резко или рядом с ушами ребёнка. Прекратите игру при дискомфорте. Это упражнение не является проверкой слуха. Если ребёнок регулярно слабо реагирует на обычные звуки, необходимо обратиться к сурдологу для оценки слуха."
+    },
+    {
+      "catalog_id": "warning_small_magnets",
+      "version": 3,
+      "kind": "warning",
+      "age_min_months": 0,
+      "age_max_months": null,
+      "object_id": "small_magnet",
+      "action": "warn_no_child_access",
+      "actor": "adult_caregiver",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "no_child_access",
+        "no_handling_exercise"
+      ],
+      "text": "Не используйте мелкие магниты для речевых игр с детьми. Храните их вне доступа ребёнка.\n\nПроглатывание нескольких магнитов или магнита вместе с металлическим предметом может привести к тяжёлому повреждению кишечника, в том числе со смертельным исходом.\n\nПри подозрении на проглатывание магнита срочно обращайтесь за медицинской помощью, даже если ребёнок чувствует себя нормально. Для оценки необходимо рентгенологическое обследование; дальнейшие действия определит врач. Не ждите появления симптомов."
+    },
+    {
+      "catalog_id": "warning_button_batteries",
+      "version": 4,
+      "kind": "warning",
+      "age_min_months": 0,
+      "age_max_months": null,
+      "object_id": "button_battery",
+      "action": "warn_no_child_access",
+      "actor": "adult_caregiver",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "no_child_access",
+        "no_handling_exercise"
+      ],
+      "text": "Не используйте кнопочные батарейки в играх с детьми. Храните их вне доступа ребёнка.\n\nПри подозрении на проглатывание кнопочной батарейки немедленно обращайтесь за экстренной медицинской помощью, даже если симптомов нет. Не вызывайте рвоту и не ждите ухудшения состояния. Не давайте ребёнку ничего есть или пить, кроме описанного ниже исключения.\n\nЕсли батарейка может быть литиевой (или её тип неизвестен, но она точно не из слухового аппарата), ребёнку исполнилось 12 месяцев, предполагаемое проглатывание произошло менее 12 часов назад, ребёнок способен безопасно глотать, у него нет аллергии на мёд и мёд уже есть под рукой, по пути в больницу можно дать 10 мл (2 чайные ложки) мёда каждые 10 минут, максимум 6 доз. Не давайте мёд при рвоте или нарушении глотания. Не задерживайте выезд ради мёда: он не заменяет экстренную медицинскую помощь. При сомнениях в соблюдении условий исключения ничего не давайте внутрь и немедленно обращайтесь за помощью."
+    }
+  ],
+  "trusted_approvals": {},
+  "trusted_sources": {},
+  "production_access": "NO_POST",
+  "legacy_route": "UNCHANGED"
+}

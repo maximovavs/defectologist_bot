@@ -1,0 +1,120 @@
+{
+  "stage": "SAFE03 R6-D disconnected local candidate",
+  "baseline_main": "0be1eaf58fb22871e5f233452a2482e1cda9ede0",
+  "baseline_tree": "26700273642cfd76f79d75cb854b36e66fff1609",
+  "provenance": "USER_RELAYED; independent reviewer identity/signature and digest-specific metadata approval absent",
+  "policy": "NO_POST; approvals registry remains EMPTY; do not use to publish or auto-integrate",
+  "metadata_delta": "Warnings age_max_months 216 -> null (= no upper bound), pending explicit metadata approval",
+  "entries": [
+    {
+      "catalog_id": "picture_naming_24_48",
+      "version": 2,
+      "kind": "exercise",
+      "age_min_months": 24,
+      "age_max_months": 48,
+      "object_id": "large_picture_card",
+      "action": "point_to_picture",
+      "actor": "child",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "adult_present",
+        "no_detachable_small_parts"
+      ],
+      "text": "Покажите ребёнку крупную картинку без съёмных деталей. Предложите указать на знакомый предмет и назовите его вместе.\n\nОтвет жестом — полноценный способ общения. Поддерживайте любые попытки взаимодействия, не требуйте обязательного произнесения слова. Если у ребёнка есть особенности зрения или моторики, адаптируйте материал: используйте подходящие контрастные изображения и удобное расположение предметов.",
+      "text_sha256": "7a487a28a2aa03101352ab41a1f5d9bbaf0edc53b022f9a884f22e7b4c8b0987",
+      "entry_sha256": "293495eb0e150caa98e96064dca19de6396ad82f597f462f0021ac90797dad88",
+      "metadata_approval": "PENDING_VERIFIED_METADATA_APPROVAL",
+      "text_adjudication": "YES_USER_RELAYED_NOT_INDEPENDENTLY_AUTHENTICATED",
+      "reported_reviewer": "Елена Максимова",
+      "reported_reviewer_role": "логопед-дефектолог"
+    },
+    {
+      "catalog_id": "soft_ball_roll_36_60",
+      "version": 2,
+      "kind": "exercise",
+      "age_min_months": 36,
+      "age_max_months": 60,
+      "object_id": "large_soft_ball",
+      "action": "roll_ball",
+      "actor": "child",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "adult_present",
+        "no_detachable_small_parts"
+      ],
+      "text": "Взрослый и ребёнок по очереди катят друг другу крупный мягкий мяч без съёмных мелких деталей.\n\nИгра добровольная. Подбирайте расстояние и движение с учётом возможностей ребёнка. Наша цель — учиться взаимодействовать по очереди, а не оценивать спортивные способности. Не требуйте обязательного взгляда в глаза.",
+      "text_sha256": "3a6f1b155df0f1b23572473fa6edde8b825b5794c3fb25e9c82f0b25862f3c4a",
+      "entry_sha256": "411cc12958f86b8abdb5eba5a84172a648429961b287962c6f0ae57f204741fb",
+      "metadata_approval": "PENDING_VERIFIED_METADATA_APPROVAL",
+      "text_adjudication": "YES_USER_RELAYED_NOT_INDEPENDENTLY_AUTHENTICATED",
+      "reported_reviewer": "Елена Максимова",
+      "reported_reviewer_role": "логопед-дефектолог"
+    },
+    {
+      "catalog_id": "clap_rhythm_24_48",
+      "version": 2,
+      "kind": "exercise",
+      "age_min_months": 24,
+      "age_max_months": 48,
+      "object_id": "hands",
+      "action": "clap_rhythm",
+      "actor": "adult_caregiver",
+      "recipient": "child_observer",
+      "constraints": [
+        "adult_present",
+        "stop_if_distressed"
+      ],
+      "text": "Взрослый негромко хлопает в ладоши два раза и делает паузу. Предложите ребёнку повторить, если он хочет.\n\nНе хлопайте резко или рядом с ушами ребёнка. Прекратите игру при дискомфорте. Это упражнение не является проверкой слуха. Если ребёнок регулярно слабо реагирует на обычные звуки, необходимо обратиться к сурдологу для оценки слуха.",
+      "text_sha256": "28a7239a0030cc58dcfe73b54e5bf8db9503be1a92223de9b6d21d1981275ee8",
+      "entry_sha256": "ca829102814455650f2403da13b462bbce28ca363574f9a71a45db94d1120076",
+      "metadata_approval": "PENDING_VERIFIED_METADATA_APPROVAL",
+      "text_adjudication": "YES_USER_RELAYED_NOT_INDEPENDENTLY_AUTHENTICATED",
+      "reported_reviewer": "Анна Ковальчук",
+      "reported_reviewer_role": "врач-сурдолог"
+    },
+    {
+      "catalog_id": "warning_small_magnets",
+      "version": 2,
+      "kind": "warning",
+      "age_min_months": 0,
+      "age_max_months": null,
+      "object_id": "small_magnet",
+      "action": "warn_no_child_access",
+      "actor": "adult_caregiver",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "no_child_access",
+        "no_handling_exercise"
+      ],
+      "text": "Не используйте мелкие магниты для речевых игр с детьми. Храните их вне доступа ребёнка.\n\nПроглатывание нескольких магнитов или магнита вместе с металлическим предметом может привести к тяжёлому повреждению кишечника, в том числе со смертельным исходом.\n\nПри подозрении на проглатывание магнита срочно обращайтесь за медицинской помощью, даже если ребёнок чувствует себя нормально. Врач определит необходимость рентгенологического обследования. Не ждите появления симптомов.",
+      "text_sha256": "3db42d72f7c909e9957711caa4224cd95ac7c194fe67ea7ee1a197d9a3607e0f",
+      "entry_sha256": "8d46923aaee40e60acdcebb463bf61fb7d70e5a75b876d86ca3fd31ef884e73e",
+      "metadata_approval": "PENDING_VERIFIED_METADATA_APPROVAL",
+      "text_adjudication": "YES_USER_RELAYED_NOT_INDEPENDENTLY_AUTHENTICATED",
+      "reported_reviewer": "Михаил Дмитриев",
+      "reported_reviewer_role": "педиатр, специалист по детской безопасности"
+    },
+    {
+      "catalog_id": "warning_button_batteries",
+      "version": 3,
+      "kind": "warning",
+      "age_min_months": 0,
+      "age_max_months": null,
+      "object_id": "button_battery",
+      "action": "warn_no_child_access",
+      "actor": "adult_caregiver",
+      "recipient": "adult_caregiver",
+      "constraints": [
+        "no_child_access",
+        "no_handling_exercise"
+      ],
+      "text": "Не используйте кнопочные батарейки в играх с детьми. Храните их вне доступа ребёнка.\n\nПри подозрении на проглатывание кнопочной батарейки немедленно обращайтесь за экстренной медицинской помощью, даже если симптомов нет. Не вызывайте рвоту и не ждите ухудшения состояния. Не давайте ребёнку ничего есть или пить, кроме описанного ниже исключения.\n\nЕсли батарейка может быть литиевой (или её тип неизвестен), ребёнку исполнилось 12 месяцев, предполагаемое проглатывание произошло менее 12 часов назад, ребёнок способен безопасно глотать, у него нет аллергии на мёд и мёд уже есть под рукой, по пути в больницу можно дать 10 мл (2 чайные ложки) мёда каждые 10 минут, максимум 6 доз. Не давайте мёд при рвоте или нарушении глотания. Не задерживайте выезд ради мёда: он не заменяет экстренную медицинскую помощь. При сомнениях в соблюдении условий исключения ничего не давайте внутрь и немедленно обращайтесь за помощью.",
+      "text_sha256": "5a1719b117a19bd1e4703025a7864cb6234e9eab598581d3e744cd545c34d8dc",
+      "entry_sha256": "1d1a4dda5a9d1a0aa0e4b9b59c24fdaaf37583e0d3070f5656254ba6e14d5f9b",
+      "metadata_approval": "PENDING_VERIFIED_METADATA_APPROVAL",
+      "text_adjudication": "YES_USER_RELAYED_NOT_INDEPENDENTLY_AUTHENTICATED",
+      "reported_reviewer": "Михаил Дмитриев",
+      "reported_reviewer_role": "педиатр, специалист по детской безопасности"
+    }
+  ]
+}

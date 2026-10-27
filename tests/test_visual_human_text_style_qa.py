@@ -1,4 +1,5 @@
 from io import BytesIO
+import hashlib
 import json
 import os
 import unittest
@@ -7,6 +8,12 @@ from unittest.mock import Mock, patch
 from src.services.visual_pipeline import (
     VISUAL_QA_HARD_REASONS,
     VISUAL_STYLE_RETRY_MARKER,
+    VISUAL_TEXT_RETRY_MARKER,
+    VisualBrief,
+    _compile_visual_prompt,
+    _build_visual_qa_expected_brief,
+    build_visual_role_rule,
+    _text_safe_object_retry_category,
     VISUAL_STYLE_TAIL,
     _enforce_object_visual_qa,
     _parse_visual_qa_response,
@@ -368,6 +375,114 @@ class HumanTextUiStyleVisualQaTest(unittest.TestCase):
                 self.assertEqual(meta["visual_qa_attempts"], "2")
                 self.assertEqual(meta["object_generation_attempts"], "2")
                 self.assertEqual(meta["final_reason"], "object_fallback_rejected")
+
+
+    def test_p4_exact_run_535_text_reasons_have_distinct_provider_and_seed(self):
+        scene = VisualBrief(
+            rubric_id="play_and_speak",
+            role_rule=build_visual_role_rule("play_and_speak", "toddler"),
+            age_descriptor="toddler",
+            setting="simple uncluttered home play area",
+            action="Parent takes a simple picture book with bright pictures and places it on their lap",
+            props=("book",),
+        )
+        initial = _compile_visual_prompt(scene)
+        provider_initial = _prepare_pollinations_prompt(initial)
+        seed = lambda p: int(hashlib.sha256(" ".join(p.split()).strip().encode("utf-8")).hexdigest()[:8], 16) % 2147483647
+        self.assertEqual(len(initial), 900)
+        self.assertEqual(len(provider_initial), 1109)
+        self.assertEqual(seed(initial), 297740815)
+        expected = _build_visual_qa_expected_brief(initial, "play_and_speak")
+        for reason in ("object_contains_text", "human_text_detected"):
+            with self.subTest(reason=reason):
+                retry = build_visual_retry_prompt(initial, rubric_id="play_and_speak", qa_reason=reason)
+                provider_retry = _prepare_pollinations_prompt(retry)
+                self.assertNotEqual(retry, initial)
+                self.assertIn(VISUAL_TEXT_RETRY_MARKER, retry)
+                self.assertNotIn(VISUAL_TEXT_RETRY_MARKER, provider_retry)
+                self.assertNotEqual(provider_initial, provider_retry)
+                self.assertNotEqual(seed(initial), seed(retry))
+                self.assertEqual(len(retry), 913)
+                self.assertEqual(len(provider_retry), 1237)
+                self.assertEqual(seed(retry), 1752573554)
+                self.assertEqual(_build_visual_qa_expected_brief(retry, "play_and_speak"), expected)
+                self.assertTrue(retry.startswith(scene.role_rule))
+                self.assertIn("allowed props: book.", retry)
+
+    def test_p4_actual_build_seam_emits_distinct_human_retry_on_text(self):
+        qa = iter([{"status": "fail", **_human_qa(**{"pass": False, "reason": "object_contains_text"})},
+                   {"status": "pass", **_human_qa()}])
+        prompts = []
+        def download(*, prompt, token):
+            prompts.append(prompt)
+            return BytesIO(("image-" + str(len(prompts))).encode()), {"attempts_used": "1"}
+        with patch("src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download):
+            buffer, meta = build_post_visual(
+                title="Игра «Где мишка?»", day_key="2026-10-27", image_prompt=(
+                    "Parent takes a simple picture book with bright pictures and places it on their lap"
+                ), rubric_id="play_and_speak", audience="parents", visual_qa_fn=lambda *_args, **_kw: next(qa),
+            )
+        self.assertEqual(len(prompts), 2)
+        self.assertNotEqual(prompts[0], prompts[1])
+        self.assertNotEqual(_prepare_pollinations_prompt(prompts[0]), _prepare_pollinations_prompt(prompts[1]))
+        self.assertIn(VISUAL_TEXT_RETRY_MARKER, prompts[1])
+        self.assertEqual(buffer.getvalue(), b"image-2")
+        self.assertEqual(meta["mode"], "ai_human_retry")
+        self.assertEqual(meta["object_generation_status"], "not_run")
+        self.assertEqual(meta["visual_qa_attempts"], "2")
+
+    def test_p4_text_retries_preserve_four_attempt_fail_closed_ladder(self):
+        for first_reason in ("object_contains_text", "human_text_detected"):
+            with self.subTest(reason=first_reason):
+                qa = iter([
+                    {"status": "fail", **_human_qa(**{"pass": False, "reason": first_reason})},
+                    {"status": "fail", **_human_qa(**{"pass": False, "reason": "human_text_detected"})},
+                    _object_qa(text_detected=True),
+                    _object_qa(illustration_style_match=False),
+                ])
+                prompts = []
+                def download(*, prompt, token):
+                    prompts.append(prompt)
+                    return BytesIO(("image-" + str(len(prompts))).encode()), {"attempts_used":"1"}
+                with patch("src.services.visual_pipeline.download_pollinations_image_with_meta", side_effect=download), patch(
+                    "src.services.visual_pipeline.build_fallback_cover_buffer", return_value=BytesIO(b"text-cover")
+                ) as fallback:
+                    buffer, meta=build_post_visual(
+                        title="Игра «Где мишка?»",day_key="2026-10-27",
+                        image_prompt="Parent takes a simple picture book with bright pictures and places it on their lap",
+                        rubric_id="play_and_speak",audience="parents",visual_qa_fn=lambda *_args,**_kw:next(qa),
+                    )
+                self.assertEqual(buffer.getvalue(),b"text-cover")
+                self.assertEqual(len(prompts),4)
+                self.assertNotEqual(prompts[0],prompts[1])
+                self.assertEqual(meta["mode"],"text_fallback")
+                self.assertEqual(meta["object_generation_attempts"],"2")
+                self.assertEqual(meta["object_scene_category"],"text_safe_objects")
+                self.assertEqual(meta["object_qa_reason"],"object_style_mismatch")
+                fallback.assert_called_once()
+
+    def test_p4_nontext_retry_routes_not_retyped(self):
+        original = _compile_visual_prompt(VisualBrief(
+            rubric_id="play_and_speak",role_rule=build_visual_role_rule("play_and_speak","toddler"),
+            age_descriptor="toddler",setting="simple uncluttered home play area",
+            action="Parent takes a simple picture book with bright pictures and places it on their lap",props=("book",)
+        ))
+        for reason in ("unexpected_ppe","too_many_people","action_mismatch","style_mismatch","human_ui_artifact_detected","unknown"):
+            with self.subTest(reason=reason):
+                prompt=build_visual_retry_prompt(original,rubric_id="play_and_speak",qa_reason=reason)
+                self.assertNotIn(VISUAL_TEXT_RETRY_MARKER,prompt)
+        self.assertEqual(_text_safe_object_retry_category("games_everyday_communication","object_contains_text"),"text_safe_objects")
+        self.assertFalse(_text_safe_object_retry_category("games_everyday_communication","object_style_mismatch"))
+
+    def test_p4_existing_visual_hard_reasons_are_not_relaxed(self):
+        for payload,reason in ((_human_qa(text_detected=True),"human_text_detected"),
+                               (_human_qa(ui_artifact_detected=True),"human_ui_artifact_detected"),
+                               (_human_qa(illustration_style_match=False),"style_mismatch"),
+                               (_human_qa(ppe_detected=True),"unexpected_ppe")):
+            with self.subTest(reason=reason):
+                result,_=self._production_result(payload)
+                self.assertEqual(result["status"],"fail")
+                self.assertEqual(result["reason"],reason)
 
 
 if __name__ == "__main__":

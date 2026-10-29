@@ -1,0 +1,2 @@
+# Offline R3-A R2 H1 tests ONLY. Do not add to production requirements.
+cryptography>=44,<51

@@ -1,0 +1,105 @@
+name: R3-A R3 expert card security (offline)
+
+# Isolated research PR gate, not a publisher route or source/clinical approval.
+# No push, schedule, manual dispatch, provider/Telegram calls or write permissions.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "research/r3a_r3_approved_card_contract.py"
+      - "research/r3a_r2_final_post_contract.py"
+      - "evidence/source_admission_20261027_historical_UNVERIFIED.json"
+      - "tests/test_r3a_r3_*.py"
+      - "tools/r3a_r3_adversarial_probe.py"
+      - ".github/workflows/r3a_r3_research_pr_checks.yml"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  GEMINI_API_KEY: ""
+  GROQ_API_KEY: ""
+  TELEGRAM_BOT_TOKEN: ""
+  TELEGRAM_CHAT_ID: ""
+
+jobs:
+  r3a-r3-expert-card-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout research source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install isolated research cryptography only
+        run: |
+          python -m pip install --disable-pip-version-check \
+            -r research/r3a_r2_offline_requirements.txt \
+            "cryptography==50.0.2"
+
+      - name: Compile isolated R3 and R2 files
+        run: |
+          python -m py_compile \
+            research/r3a_r2_final_post_contract.py \
+            research/r3a_r3_approved_card_contract.py \
+            tests/test_r3a_r3_approved_card_contract.py \
+            tests/test_r3a_r3_security_regressions.py \
+            tools/r3a_r3_adversarial_probe.py
+
+      - name: Run 86 unique R3 tests and preserve 65 R2 tests
+        env:
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import unittest
+          def flatten(suite):
+              for case in suite:
+                  if isinstance(case, unittest.TestSuite):
+                      yield from flatten(case)
+                  else:
+                      yield case
+          for pattern, expected in (("test_r3a_r3_*.py", 86),
+                                    ("test_r3a_r2_*.py", 65)):
+              suite = unittest.defaultTestLoader.discover("tests", pattern=pattern)
+              ids = [case.id() for case in flatten(suite)]
+              if len(ids) != expected or len(set(ids)) != expected:
+                  raise SystemExit(f"Incomplete or duplicate test discovery {pattern}: {len(ids)}, unique {len(set(ids))}, expected {expected}")
+              outcome = unittest.TextTestRunner(verbosity=2).run(suite)
+              print(f"{pattern} count={len(ids)} unique={len(set(ids))} passed={outcome.wasSuccessful()}")
+              if not outcome.wasSuccessful():
+                  raise SystemExit(1)
+          PY
+
+      - name: Run 1512 adversarial text and signed-payload mutations
+        env:
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          process = subprocess.run(
+              [sys.executable, "tools/r3a_r3_adversarial_probe.py"],
+              capture_output=True, text=True, check=False,
+          )
+          print(process.stdout)
+          if process.stderr:
+              print(process.stderr, file=sys.stderr)
+          if process.returncode != 0 or not all(s in process.stdout for s in (
+              "1000 final-text mutations, false_ACCEPT=0",
+              "512 signed-payload mutations, false_ACCEPT=0",
+              "default production admission=DENY",
+          )):
+              raise SystemExit("R3 negative probe failed")
+          PY

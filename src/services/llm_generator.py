@@ -4942,10 +4942,16 @@ def build_bilingual_parents_repair_prompt(
     previous_output: str = "",
     topic_id: str = "",
     topic_title: str = "",
+    evidence_text: str = "",
 ) -> str:
     reason = (reason or "").strip()
     if not _should_repair_bilingual_parents_reason(reason):
         return ""
+
+    age_hint = (
+        question_week_allowed_age_instruction(evidence_text)
+        if reason == "parent_age_not_grounded" else ""
+    )
 
     previous_note = (
         "\n\nПРЕДЫДУЩИЙ ВАРИАНТ:\n" + previous_output.strip()
@@ -4958,6 +4964,7 @@ def build_bilingual_parents_repair_prompt(
         + previous_note
         + "\n\nПОВТОРИ bilingual_parents пост. Предыдущий вариант не прошёл строгую валидацию.\n"
         + f"Точная причина валидации: {reason}\n"
+        + (age_hint + "\n" if age_hint else "")
         + "Сохрани заголовок и строку 👶 Возраст:. "
         + "Сохрани точный блок 🌍 Что помогает в двуязычной семье:. "
         + "В этом блоке дай 2–4 конкретных семейных действия, основанных только на EVIDENCE. "
@@ -5322,6 +5329,7 @@ async def generate_post_plain_from_evidence_async(
                     previous_output=out,
                     topic_id=topic_id,
                     topic_title=topic_title,
+                    evidence_text=ev,
                 )
             elif is_thematic_format:
                 repair_prompt = build_thematic_parents_repair_prompt(
@@ -5416,6 +5424,7 @@ async def generate_post_plain_from_evidence_async(
                     previous_output=out,
                     topic_id=topic_id,
                     topic_title=topic_title,
+                    evidence_text=ev,
                 )
                 if gemini_repair_prompt:
                     out2 = postprocess(await _text_provider_call("gemini", gemini_repair_prompt, gemini_key, repair=True))

@@ -103,6 +103,26 @@ class BilingualValidationReasonTest(unittest.TestCase):
         self.assertIn("Не используй Markdown", prompt)
         self.assertEqual(llm.build_bilingual_parents_repair_prompt("BASE", "unknown"), "")
 
+    def test_age_repair_hint_uses_only_existing_evidence_ranges(self):
+        prompt = llm.build_bilingual_parents_repair_prompt(
+            "BASE", "parent_age_not_grounded", evidence_text=EVIDENCE,
+        )
+        self.assertIn("3-6 лет", prompt)
+        self.assertNotIn("2-3 года", prompt)
+        self.assertEqual(
+            llm._validate_parent_age_evidence_output("👶 Возраст: 3–6 лет", EVIDENCE),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._validate_parent_age_evidence_output("👶 Возраст: 2–3 года", EVIDENCE),
+            (False, "parent_age_not_grounded"),
+        )
+        no_anchor = llm.build_bilingual_parents_repair_prompt(
+            "BASE", "parent_age_not_grounded",
+            evidence_text="Families can discuss picture books during play.",
+        )
+        self.assertNotIn("EVIDENCE допускает ровно такие варианты возраста", no_anchor)
+
 
 class BilingualRepairTest(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_gemini_bilingual_output_gets_exactly_one_valid_repair(self):

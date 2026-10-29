@@ -1,0 +1,115 @@
+name: R3-A R2 H2 research security (offline)
+
+# Research-only PR validation: not a publisher activation or clinical approval.
+# No push, schedule, workflow_dispatch, providers, Telegram, or write permissions.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "research/r3a_r2_final_post_contract.py"
+      - "research/r3a_r2_offline_requirements.txt"
+      - "tests/test_r3a_r2_*.py"
+      - "tools/r3a_r2_mutation_probe.py"
+      - "evidence/source_admission_20261027_historical_UNVERIFIED.json"
+      - ".github/workflows/r3a_r2_research_pr_checks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  r3a-r2-security-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out PR research files
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install isolated research dependency (not production requirements)
+        run: |
+          python -m pip install --disable-pip-version-check \
+            -r research/r3a_r2_offline_requirements.txt \
+            "cryptography==50.0.2"
+
+      - name: Compile isolated security contract and tests
+        run: |
+          python -m py_compile \
+            research/r3a_r2_final_post_contract.py \
+            tests/test_r3a_r2_final_post_contract.py \
+            tests/test_r3a_r2_historical_inventory.py \
+            tests/test_r3a_r2_signed_binding_adversarial.py \
+            tests/test_r3a_r2_ed25519_subgroup.py \
+            tools/r3a_r2_mutation_probe.py
+
+      - name: Run all 65 H2 security tests (unique test IDs)
+        env:
+          GEMINI_API_KEY: ""
+          GROQ_API_KEY: ""
+          TELEGRAM_BOT_TOKEN: ""
+          TELEGRAM_CHAT_ID: ""
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover(
+              start_dir="tests", pattern="test_r3a_r2_*.py"
+          )
+          def flatten(node):
+              for item in node:
+                  if isinstance(item, unittest.TestSuite):
+                      yield from flatten(item)
+                  else:
+                      yield item
+
+          ids = [case.id() for case in flatten(suite)]
+          if len(ids) < 65 or len(ids) != len(set(ids)):
+              raise SystemExit(
+                  f"Security test discovery incomplete or duplicated: {len(ids)} total, "
+                  f"{len(set(ids))} unique; require >=65"
+              )
+          outcome = unittest.TextTestRunner(verbosity=2).run(suite)
+          print(f"R3-A R2 H2 discovered={len(ids)} unique={len(set(ids))}")
+          raise SystemExit(0 if outcome.wasSuccessful() else 1)
+          PY
+
+      - name: Confirm 23 security mutations are detected
+        env:
+          GEMINI_API_KEY: ""
+          GROQ_API_KEY: ""
+          TELEGRAM_BOT_TOKEN: ""
+          TELEGRAM_CHAT_ID: ""
+          HTTP_PROXY: "http://127.0.0.1:9"
+          HTTPS_PROXY: "http://127.0.0.1:9"
+          ALL_PROXY: "http://127.0.0.1:9"
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          process = subprocess.run(
+              [sys.executable, "tools/r3a_r2_mutation_probe.py"],
+              capture_output=True, text=True, check=False,
+          )
+          if process.stderr:
+              print(process.stderr, file=sys.stderr)
+          if process.returncode != 0:
+              print(process.stdout)
+              raise SystemExit(f"Mutation probe failed: {process.returncode}")
+          report = json.loads(process.stdout)
+          count, detected = report.get("count"), report.get("detected")
+          print(f"R3-A R2 H2 mutation probes: {detected}/{count} detected")
+          if (count, detected) != (23, 23):
+              raise SystemExit("Expected exactly 23/23 security mutations detected")
+          PY

@@ -3867,6 +3867,16 @@ def _build_generation_prompt_raw(
         )
 
     if dk == "FR" or rf == "question_week":
+        # Reuse the age anchors already required by the existing validator.
+        allowed_ages = sorted(_extract_evidence_age_ranges(evidence_text))
+        age_guidance = (
+            "Для строки «👶 Возраст:» выбери один возраст из EVIDENCE: "
+            + "; ".join(_format_allowed_age_tuple(*age) for age in allowed_ages)
+            + ". Не объединяй, не сужай и не расширяй интервалы. "
+            "Действие и наблюдение должны относиться к выбранному возрасту.\n"
+            if allowed_ages else
+            "Числовой возраст в EVIDENCE не распознан: не придумывай его.\n"
+        )
         template = (
             "Первая строка — короткий заголовок-ответ по сути вопроса, а не название рубрики.\n"
             "👶 Возраст: укажи диапазон\n"
@@ -3888,6 +3898,8 @@ def _build_generation_prompt_raw(
             + "Цель: не короткая справка, а полноценный Telegram Q&A-пост примерно 350–800 символов.\n"
             + "\nШАБЛОН:\n"
             + template
+            + "\nВОЗРАСТ ПО EVIDENCE:\n"
+            + age_guidance
             + "\nEVIDENCE:\n"
             + evidence_text.strip()
             + "\n"

@@ -303,6 +303,18 @@ sources:
       - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/language-delay.aspx"
       - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/Language-Development-2-Year-Olds.aspx"
 
+  - id: healthychildren_shared_reading_12_14_months
+    name: "HealthyChildren — Shared reading, 12–14 months"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/ages-stages/toddler/Pages/How-to-Share-Books-with-Your-12-to-14-Month-Old.aspx"
+
+  - id: healthychildren_shared_reading_preschool_4_years
+    name: "HealthyChildren — Shared reading, 4 years"
+    type: static
+    urls:
+      - "https://www.healthychildren.org/English/ages-stages/preschool/Pages/How-to-Share-Books-with-Your-Preschooler.aspx"
+
   - id: healthychildren_school_readiness_storytelling
     name: "HealthyChildren — School readiness storytelling"
     type: static

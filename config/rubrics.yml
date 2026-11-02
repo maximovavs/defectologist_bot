@@ -55,6 +55,8 @@ audiences:
           - "parents_toddler_language_boost"
           - "parents_sensory_play_language"
           - "parents_baby_language_activities"
+          - "healthychildren_shared_reading_12_14_months"
+          - "healthychildren_shared_reading_preschool_4_years"
         format: "tip_of_day"
         media: ["image_card"]
 

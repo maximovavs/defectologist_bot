@@ -186,6 +186,14 @@ OBJECT_PROVIDER_STYLE = (
     "not photorealistic, 16:9 landscape."
 )
 
+# A style-specific second object attempt after an exact object_style_mismatch.
+# Keep the same objects, category, exclusions and two-attempt budget.
+OBJECT_PROVIDER_STYLE_RETRY = (
+    "Clearly a hand-painted 2D watercolor-and-gouache editorial illustration, not product photography: "
+    "visible brushstrokes, watercolor pigment washes on matte paper grain, soft painted edges and simplified "
+    "gouache-painted object surfaces; warm muted pastels, gentle daylight, clean child-friendly 16:9 composition."
+)
+
 OBJECT_PROVIDER_NEGATIVES = (
     "No people, no face, no hands, no human body, no text, no letters, no numbers, no watermark, "
     "no PPE, no medical or industrial gear."
@@ -425,7 +433,7 @@ def _prepare_pollinations_prompt(prompt: str) -> str:
             scene_match = re.search(r"Scene category:\s*([a-z_]+)", cleaned)
             category = scene_match.group(1) if scene_match else "default"
             variation_id = ""
-        return build_object_provider_prompt(category, variation_id)
+        return build_object_provider_prompt(category, variation_id, style_retry=style_retry)
 
     provider_style = POLLINATIONS_STYLE_RETRY_TAIL if style_retry else POLLINATIONS_GENERATION_STYLE_TAIL
     # Provider-only: emphasises the action the scene already names, adds nothing.
@@ -2499,7 +2507,7 @@ def _object_provider_composition(category: str, variation_id: str) -> str:
     return pool[index]
 
 
-def build_object_provider_prompt(category: str, variation_id: str = "") -> str:
+def build_object_provider_prompt(category: str, variation_id: str = "", *, style_retry: bool = False) -> str:
     """Build the short object-only prompt actually sent to the image provider.
 
     Keeps the channel style and the hard object-only constraints, and stays well
@@ -2512,7 +2520,7 @@ def build_object_provider_prompt(category: str, variation_id: str = "") -> str:
     composition = _object_provider_composition(resolved, variation_id)
 
     def _assemble(scene: str) -> str:
-        parts = [OBJECT_PROVIDER_STYLE, scene]
+        parts = [OBJECT_PROVIDER_STYLE_RETRY if style_retry else OBJECT_PROVIDER_STYLE, scene]
         if guard:
             parts.append(guard)
         parts.append(OBJECT_PROVIDER_NEGATIVES)
@@ -2846,6 +2854,8 @@ def _build_object_visual_fallback(
             context_hint=context_hint,
             category_override=attempt_category,
         )
+        if object_attempt == 2 and last_object_qa.get("reason") == "object_style_mismatch":
+            object_prompt = f"{object_prompt} {VISUAL_STYLE_RETRY_MARKER}"
         provider_prompt_len = len(_prepare_pollinations_prompt(object_prompt))
         print(
             f"[VISUAL][OBJECT_FALLBACK] attempt={object_attempt} trigger={_short_log_message(trigger)} "

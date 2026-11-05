@@ -4,6 +4,9 @@ from unittest.mock import patch
 
 from src.services.visual_pipeline import (
     VISUAL_QA_HARD_REASONS,
+    VISUAL_STYLE_RETRY_MARKER,
+    OBJECT_PROVIDER_PROMPT_MAX_CHARS,
+    _prepare_pollinations_prompt,
     VisualBrief,
     _compile_visual_prompt,
     _enforce_object_visual_qa,
@@ -127,6 +130,14 @@ class ObjectStyleVisualQaTest(unittest.TestCase):
 
         # human -> human retry -> object #1 -> object #2 -> text fallback
         self.assertEqual(len(downloads), 4)
+        self.assertNotIn(VISUAL_STYLE_RETRY_MARKER, downloads[2])
+        self.assertIn(VISUAL_STYLE_RETRY_MARKER, downloads[3])
+        provider_retry = _prepare_pollinations_prompt(downloads[3])
+        self.assertIn("visible brushstrokes", provider_retry)
+        self.assertIn("children’s book", provider_retry)
+        self.assertIn("No people", provider_retry)
+        self.assertNotIn(VISUAL_STYLE_RETRY_MARKER, provider_retry)
+        self.assertLessEqual(len(provider_retry), OBJECT_PROVIDER_PROMPT_MAX_CHARS)
         self.assertNotIn(buffer.getvalue(), {b"image-1", b"image-2", b"image-3", b"image-4"})
         self.assertEqual(meta["mode"], "text_fallback")
         self.assertEqual(meta["fallback_stage"], "text")
@@ -177,6 +188,7 @@ class ObjectStyleVisualQaTest(unittest.TestCase):
             )
 
         self.assertEqual(len(downloads), 3)
+        self.assertNotIn(VISUAL_STYLE_RETRY_MARKER, downloads[2])
         self.assertEqual(buffer.getvalue(), b"image-3")
         self.assertEqual(meta["mode"], "ai_object_fallback")
         self.assertEqual(meta["object_generation_attempts"], "1")

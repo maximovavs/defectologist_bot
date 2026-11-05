@@ -603,6 +603,40 @@ class VisualPromptPolicyTest(unittest.TestCase):
         self.assertIn("empty setting without reflections, portraits, silhouettes", retry)
         self.assertNotIn("background people", retry)
 
+    def test_method_ppe_retry_keeps_original_action_for_qa(self):
+        # Reproduces the first rejection in natural run #539.
+        action = "The adult opens a book to a page showing a picture"
+        initial = _compile_visual_prompt(
+            VisualBrief(
+                rubric_id="method_piggybank",
+                role_rule=build_visual_role_rule("method_piggybank"),
+                age_descriptor="clearly younger child",
+                setting="simple uncluttered speech therapy room",
+                action=action,
+                props=("book", "picture"),
+            )
+        )
+        retry = build_visual_retry_prompt(
+            initial, rubric_id="method_piggybank", qa_reason="unexpected_ppe"
+        )
+        before = _parse_compiled_visual_prompt(initial, rubric_id="method_piggybank")
+        after = _parse_compiled_visual_prompt(retry, rubric_id="method_piggybank")
+        self.assertIsNotNone(before)
+        self.assertIsNotNone(after)
+        self.assertEqual(after.action, before.action)
+        self.assertEqual(after.role_rule, before.role_rule)
+        self.assertEqual(after.props, before.props)
+        self.assertEqual(after.age_descriptor, before.age_descriptor)
+        self.assertIn("ordinary casual indoor clothing", after.setting)
+        self.assertIn("ordinary casual indoor clothing", _prepare_pollinations_prompt(retry))
+        self.assertEqual(
+            _build_visual_qa_expected_brief(initial, "method_piggybank"),
+            _build_visual_qa_expected_brief(retry, "method_piggybank"),
+        )
+        self.assertEqual(
+            _validate_compiled_visual_prompt(retry, "method_piggybank"), (True, "ok")
+        )
+
     def test_action_mismatch_retry_repeats_exact_expected_action(self):
         action = "the parent models a polite request while the toddler points to a toy"
         base = _compile_visual_prompt(

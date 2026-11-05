@@ -1418,8 +1418,6 @@ def build_visual_retry_prompt(
         correction = "Keep normal body width and a non-panoramic composition"
     elif reason == "deformed_hands":
         correction = "Keep hands simple and naturally posed, away from the camera and outside the main focal point"
-    elif reason == "unexpected_ppe":
-        correction = "Keep the scene in ordinary casual indoor clothing and a normal home or educational environment without medical or industrial context or equipment"
     elif reason in {
         "too_many_people",
         "duplicate_figure",
@@ -1438,6 +1436,12 @@ def build_visual_retry_prompt(
     else:
         retry_action = action
 
+    # #539: a PPE correction belongs to the scene, not the expected action.
+    # Keep the educational action byte-identical for the retry QA brief.
+    retry_setting = brief.setting
+    if reason == "unexpected_ppe":
+        retry_setting = f"{brief.setting}, ordinary casual indoor clothing"
+
     # Role problems are corrected in the role rule; style problems are corrected
     # in the provider style tail. Neither rewrites the educational action.
     retry_role_rule = brief.role_rule
@@ -1448,7 +1452,7 @@ def build_visual_retry_prompt(
         rubric_id=brief.rubric_id,
         role_rule=retry_role_rule,
         age_descriptor=brief.age_descriptor,
-        setting=brief.setting,
+        setting=retry_setting,
         action=retry_action,
         props=brief.props[:3],
     )

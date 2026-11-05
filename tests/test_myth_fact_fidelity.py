@@ -257,6 +257,81 @@ class MythFactClaimValidationTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, expected)
 
+    def test_aac_myth_needs_direct_speech_refutation(self):
+        claim = "🔴 Миф: AAC will keep my child from talking."
+        cases = (
+            ("A common myth is that gestures do not support early communication.", False),
+            ("A common myth is that gestures do not support early communication. "
+             "AAC devices can be expensive and speech tools vary.", False),
+            ("AAC prevents speech. A common myth is that gestures do not "
+             "support early communication.", False),
+            ("A common myth is that gestures do not support early communication. "
+             "AAC does not prevent sensory overload, while speech develops.", False),
+            ("AAC does not prevent sensory overload and speech is evolving. "
+             "A common myth is that gestures replace early communication.", False),
+            ("AAC keeps children from talking — that is not a myth. "
+             "Early communication includes gestures.", False),
+            ("A common myth is that AAC keeps children from talking — "
+             "that is not a myth. Early communication includes gestures.", False),
+            ("A common myth is that AAC prevents speech, "
+             "but this is not actually a myth. Early communication includes gestures.", False),
+            ("A common myth is that AAC prevents speech. "
+             "That is not a myth. Early communication includes gestures.", False),
+            ("A common myth is that AAC prevents speech. AAC does not "
+             "prevent speech development. Early communication includes gestures.", True),
+            ("A common myth is that AAC delays speech. There is no evidence "
+             "that AAC delays speech. Early communication includes gestures.", True),
+        )
+        for evidence, expected_ok in cases:
+            with self.subTest(evidence=evidence):
+                self.assertEqual(
+                    llm._validate_myth_fact_output(claim, evidence, "early_communication"),
+                    (expected_ok, "ok" if expected_ok else "myth_claim_not_grounded"),
+                )
+        aac_only = (
+            "A common myth is that AAC prevents speech. "
+            "AAC does not prevent speech development."
+        )
+        # A direct refutation also clears the pre-generation gate without "myth".
+        direct = "AAC does not prevent speech development."
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(direct, "early_communication"),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._validate_myth_fact_output(claim, direct, "early_communication"),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._validate_myth_fact_output(
+                claim, "A common myth is that AAC prevents speech.", "early_communication"
+            ),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm.validate_myth_fact_evidence_for_generation(aac_only, "early_communication"),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._validate_myth_fact_output(claim, aac_only, "early_communication"),
+            (True, "ok"),
+        )
+        self.assertEqual(
+            llm._validate_myth_fact_output(
+                "🔴 Миф: AAC does not prevent speech.", aac_only, "early_communication"
+            ),
+            (False, "myth_topic_mismatch"),
+        )
+        self.assertEqual(
+            llm._validate_myth_fact_output(
+                "🔴 Миф: Использование АДК мешает ребенку говорить.",
+                "Миф: ранняя коммуникация не включает жесты. "
+                "Использование АДК не мешает ребенку говорить.",
+                "early_communication",
+            ),
+            (True, "ok"),
+        )
+
     def test_grounded_bilingual_myth_passes(self):
         self.assertEqual(
             llm._validate_myth_fact_output(VALID_BILINGUAL_CARD, BILINGUAL_EVIDENCE, "bilingualism"),

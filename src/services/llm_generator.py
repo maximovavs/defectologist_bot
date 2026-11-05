@@ -334,6 +334,63 @@ MYTH_FACT_REFUTATION_PATTERNS = (
     r"\bне обязательно\b",
 )
 
+MYTH_FACT_AAC_TALKING_CLAIM_PATTERN = (
+    r"^(?:(?:using|use of|использовани\w*|применени\w*)\s+)?"
+    r"(?:aac|адк|аак)\s+(?:will\s+)?"
+    r"(?:keep\s+(?:my\s+)?child\s+from\s+talking|"
+    r"меша\w*\s+(?:ребенку\s+)?(?:начать\s+)?говор\w*|"
+    r"не\s+да\w*\s+(?:ребенку\s+)?говор\w*)\s*[.!?]?$"
+)
+# Claim-specific evidence: a direct refutation of AAC blocking oral speech.
+# An unrelated "myth" marker or co-occurrence of AAC and speech is insufficient.
+MYTH_FACT_AAC_TALKING_REFUTATION_PATTERNS = (
+    # Negative operator must govern the speech outcome, not an unrelated object.
+    r"\b(?:using\s+|use\s+of\s+)?(?:aac|augmentative and alternative communication)\s+"
+    r"(?:does\s+not|doesn't|will\s+not|won't|cannot|can't)\s+"
+    r"(?:prevent|stop|delay|hinder|inhibit|block)\s+"
+    r"(?:speech(?:\s+development)?|(?:a\s+|the\s+|my\s+|your\s+)?"
+    r"child(?:ren)?\s+from\s+(?:talking|speaking)|talking|speaking)\b",
+    r"\b(?:using\s+|use\s+of\s+)?(?:aac|augmentative and alternative communication)\s+"
+    r"(?:does\s+not|doesn't|will\s+not|won't|cannot|can't)\s+"
+    r"keep\s+(?:a\s+|the\s+|my\s+|your\s+)?child(?:ren)?\s+from\s+(?:talking|speaking)\b",
+    r"\b(?:there\s+is\s+)?no\s+(?:scientific\s+)?evidence\s+that\s+"
+    r"(?:using\s+|use\s+of\s+)?(?:aac|augmentative and alternative communication)\s+"
+    r"(?:will\s+)?(?:prevent|prevents|stop|stops|delay|delays|hinder|hinders|block|blocks)\s+"
+    r"(?:speech(?:\s+development)?|(?:a\s+|the\s+|my\s+|your\s+)?"
+    r"child(?:ren)?\s+from\s+(?:talking|speaking)|talking|speaking)\b",
+    # A myth label only qualifies when it directly introduces this exact AAC claim.
+    r"\b(?:a\s+(?:common\s+)?myth\s+is\s+that|it\s+is\s+a\s+myth\s+that)\s+"
+    r"(?:using\s+|use\s+of\s+)?(?:aac|augmentative and alternative communication)\s+"
+    r"(?:will\s+)?(?:prevent|prevents|stop|stops|delay|delays|keep|keeps)\s+"
+    r"(?:speech(?:\s+development)?|(?:a\s+|the\s+|my\s+|your\s+)?"
+    r"child(?:ren)?\s+from\s+(?:talking|speaking)|talking|speaking)\b",
+    r"\b(?:использовани\w*\s+|применени\w*\s+)?"
+    r"(?:адк|аак|(?:альтернативн\w*|дополнительн\w*)\s+и\s+"
+    r"(?:дополнительн\w*|альтернативн\w*)\s+коммуникаци\w*)\s+"
+    r"не\s+(?:меша\w*|препятству\w*|задержива\w*|тормоз\w*)\s+"
+    r"(?:(?:ребенку|детям)\s+)?"
+    r"(?:говор\w*|развитию\s+реч\w*|речевому\s+развитию)\b",
+)
+
+
+def _myth_fact_has_aac_talking_refutation(evidence_text: str) -> bool:
+    blob = _normalize_scan_text(evidence_text)
+    sentences = re.split(r"(?<=[.!?])\s+", blob)
+    # Do not turn a rejected 'myth' label into evidence refuting the AAC claim.
+    contradiction = re.compile(
+        r"\b(?:this|that|it)\s+(?:is|was)\s+not\s+"
+        r"(?:(?:actually|really)\s+)?a\s+myth\b"
+    )
+    for i, sentence in enumerate(sentences):
+        if contradiction.search(sentence):
+            continue
+        if i + 1 < len(sentences) and contradiction.match(sentences[i + 1]):
+            continue
+        if any(re.search(p, sentence, flags=re.IGNORECASE)
+               for p in MYTH_FACT_AAC_TALKING_REFUTATION_PATTERNS):
+            return True
+    return False
+
 MYTH_FACT_FAMILY_PATTERNS = {
     "bilingualism": (
         r"\bбилингв\w*\b", r"\bдвуязыч\w*\b", r"\bдва язык\w*\b", r"\bдвух язык\w*\b",
@@ -365,6 +422,7 @@ MYTH_FACT_FAMILY_PATTERNS = {
     "early_communication": (
         r"\bранн\w* коммуникац\w*\b", r"\bсовместн\w* внимани\w*\b", r"\bуказательн\w* жест\w*\b",
         r"\bearly communication\b", r"\bjoint attention\b", r"\bgestures?\b", r"\bfirst words?\b",
+        MYTH_FACT_AAC_TALKING_CLAIM_PATTERN,
     ),
     "everyday_communication": (
         r"\bповседневн\w* общени\w*\b", r"\bежедневн\w* ситуац\w*\b",
@@ -433,14 +491,19 @@ def validate_myth_fact_evidence_for_generation(
     evidence_text: str,
     topic_id: str = "",
 ) -> Tuple[bool, str]:
-    if not _myth_fact_has_refutation_anchor(evidence_text):
+    has_aac_refutation = (
+        (topic_id or "").strip().lower() == "early_communication"
+        and _myth_fact_has_aac_talking_refutation(evidence_text)
+    )
+    if not (_myth_fact_has_refutation_anchor(evidence_text) or has_aac_refutation):
         return False, "myth_evidence_missing_refutation_anchor"
     topic = (topic_id or "").strip().lower()
     expected_family = MYTH_FACT_TOPIC_FAMILY.get(topic)
     if not expected_family:
         return False, "myth_topic_mismatch"
     if expected_family not in _myth_fact_families(evidence_text):
-        return False, "myth_topic_mismatch"
+        if not (topic == "early_communication" and _myth_fact_has_aac_talking_refutation(evidence_text)):
+            return False, "myth_topic_mismatch"
     return True, "ok"
 
 
@@ -501,7 +564,11 @@ def _validate_myth_fact_output(
     if introduced_sensitive:
         return False, "myth_unsupported_sensitive_claim"
 
-    if not (claim_families & evidence_families):
+    is_aac_talking_claim = bool(re.search(MYTH_FACT_AAC_TALKING_CLAIM_PATTERN, _normalize_scan_text(claim)))
+    aac_refuted = _myth_fact_has_aac_talking_refutation(evidence_text) if is_aac_talking_claim else False
+    if is_aac_talking_claim and not aac_refuted:
+        return False, "myth_claim_not_grounded"
+    if not (claim_families & evidence_families) and not (is_aac_talking_claim and aac_refuted):
         return False, "myth_claim_not_grounded"
 
     return True, "ok"

@@ -4669,6 +4669,25 @@ def build_image_prompt_prompt(
     )
 
 
+# Only fixed validator reason codes are eligible for logs. Never emit raw model
+# responses, post text, exception strings or unexpected validator messages.
+_VISUAL_BRIEF_LOG_REASONS = frozenset({
+    "invalid_json", "invalid_action", "invalid_setting", "invalid_props",
+    "empty", "too_short", "too_long", "non_english", "template_leak",
+    "visual_prompt_topic_mismatch", "invalid_visual_brief", "role_rule_not_first",
+    "missing_action", "invalid_parent_roles", "invalid_parent_child_descriptor",
+    "invalid_method_roles", "invalid_age_norm_roles", "contradictory_roles",
+    "action_role_mismatch", "visual_text_instruction", "risky_oral_tool",
+    "too_many_props", "action_unsupported_visual_prop", "unsupported_visual_prop",
+})
+
+
+def _visual_brief_log_reason(reason: object) -> str:
+    if isinstance(reason, str) and reason in _VISUAL_BRIEF_LOG_REASONS:
+        return reason
+    return "unclassified"
+
+
 async def generate_image_prompt_async(
     title: str,
     body_text: str,
@@ -4704,6 +4723,11 @@ async def generate_image_prompt_async(
         compiled, ok, reason = await _compile_raw(str(raw))
         if ok:
             return compiled, True, f"ok:{provider_name}"
+        print(
+            f"[VISUAL_BRIEF_REJECT] provider={provider_name} stage=initial "
+            f"reason={_visual_brief_log_reason(reason)}",
+            flush=True,
+        )
 
         repair_hint = {
             "action_role_mismatch": "Use only the actor named in Code-defined roles.",
@@ -4717,6 +4741,11 @@ async def generate_image_prompt_async(
         repaired, repaired_ok, repaired_reason = await _compile_raw(str(repaired_raw))
         if repaired_ok:
             return repaired, True, f"ok:{provider_name}_retry"
+        print(
+            f"[VISUAL_BRIEF_REJECT] provider={provider_name} stage=repair "
+            f"reason={_visual_brief_log_reason(repaired_reason)}",
+            flush=True,
+        )
         return "", False, f"invalid_{provider_name}_image_brief:{repaired_reason}"
 
     async def _try_groq() -> Tuple[str, bool, str]:

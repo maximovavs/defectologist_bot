@@ -15,6 +15,7 @@ ADDED_TIER1_SOURCE_IDS = {
     "asha_communication_milestones_4_to_5",
     "nationwide_birth_to_3_language_activities",
     "asha_school_readiness_language_activities",
+    "asha_written_language_intervention_targets",
 }
 LEGACY_NON_TIER1_DOMAINS = {
     "logopedy.ru",
@@ -151,6 +152,7 @@ class MethodPiggybankTier1SourceRoutingTest(unittest.TestCase):
             "asha_communication_milestones_4_to_5": "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/",
             "nationwide_birth_to_3_language_activities": "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/05/speech-and-communication-development-birth-to-3-years",
             "asha_school_readiness_language_activities": "https://www.asha.org/news/2023/how-to-build-back-to-school-readiness/",
+            "asha_written_language_intervention_targets": "https://www.asha.org/practice-portal/clinical-topics/written-language-disorders/intervention-target-areas/",
         }
         urls = [registry[source_id]["urls"][0] for source_id in expected]
         self.assertEqual(len(urls), len(set(urls)))

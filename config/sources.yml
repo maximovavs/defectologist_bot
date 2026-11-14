@@ -202,12 +202,6 @@ sources:
     urls:
       - "https://www.asha.org/news/2023/how-to-build-back-to-school-readiness/"
 
-  - id: asha_written_language_intervention_targets
-    name: "ASHA — Written Language Disorders: Intervention Target Areas"
-    type: static
-    urls:
-      - "https://www.asha.org/practice-portal/clinical-topics/written-language-disorders/intervention-target-areas/"
-
   - id: asha_practice_portal_multilingual_service_delivery
     name: "ASHA — Practice Portal (Multilingual Service Delivery)"
     type: static

@@ -813,6 +813,105 @@ PRO_OBSERVATION_UNSUPPORTED_CLAIM_RE = re.compile(
 )
 
 
+
+# Promise-only detector. Only explicit, unsupported outcome claims.
+_PRO_OUTCOME_DISEASE = r"(?:дислекс\w*|дисграф\w*)"
+_PRO_OUTCOME_RE = re.compile(
+    rf"\b(?:предотвращ\w*|предотврат\w*|предупрежд\w*|"
+    rf"избав\w*|устран\w*|вылеч\w*|излеч\w*)"
+    rf"(?:\s+[а-я]+){{0,3}}\s+{_PRO_OUTCOME_DISEASE}\b|"
+    rf"\bизбеж\w*\s+(?:развити\w*\s+)?{_PRO_OUTCOME_DISEASE}\b|"
+    rf"\b(?:сниж\w*|сниз\w*|уменьш\w*)\s+риск\w*"
+    rf"(?:\s+[а-я]+){{0,2}}\s+{_PRO_OUTCOME_DISEASE}\b|"
+    r"\bгарантир\w*,?\s+что\s+ребенок\s+"
+    r"(?:науч\w*\s+читать|осво\w*\s+чтени\w*|начн\w*\s+читать)\b|"
+    r"\bгарантир\w*(?:\s+[а-я]+){0,3}\s+"
+    r"(?:бегл\w*\s+)?(?:чтени\w*|читать|науч\w*\s+читать)\b|"
+    r"\b(?:за|через)\s+(?:\d+|[а-я]+)?\s*"
+    r"(?:д(?:ень|ня|ней)|недел\w*|месяц\w*|год\w*|лет|заняти\w*|урок\w*)"
+    r"(?:\s+[а-я]+){0,8}\s+(?:научится|научатся|освоит|освоят|начнет|начнут)"
+    r"(?:\s+[а-я]+){0,3}\s+(?:читать|чтени\w*)\b|"
+    r"\bпосле\s+(?:курс\w*|заняти\w*|упражнени\w*)"
+    r"(?:\s+[а-я]+){0,8}\s+(?:научится|научатся|освоит|освоят|начнет|начнут)"
+    r"(?:\s+[а-я]+){0,3}\s+(?:читать|чтени\w*)\b|"
+    r"\bбыстрее\s+науч\w*\s+читать\b",
+    re.IGNORECASE,
+)
+_PRO_OUTCOME_GOAL_RE = re.compile(
+    rf"^\s*🎯\s*цель\s*:\s*(?:для\s+)?профилактик\w*\s+{_PRO_OUTCOME_DISEASE}\b",
+    re.IGNORECASE,
+)
+_PRO_OUTCOME_WARNING_BEFORE_RE = re.compile(
+    r"(?:не\s+(?:обещай\w*|утверждай\w*|говор\w*|жд\w*|рассчитыва\w*)|"
+    r"не\s+стоит\s+(?:обеща\w*|утвержда\w*|ожида\w*|рассчитыва\w*)|"
+    r"нельзя\s+(?:обеща\w*|утвержда\w*)|"
+    r"не\s+следует\s+(?:обеща\w*|утвержда\w*|ожида\w*)|"
+    r"нет\s+(?:доказательств|данных)|не\s+доказано|это\s+миф|"
+    r"не\s+явля\w*\s+способом)"
+    r"[^.!?;\n]{0,100}\b(?:что|будто|как|для)\b",
+    re.IGNORECASE,
+)
+_PRO_OUTCOME_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:не(?:\s+(?:может|можем|могут|способен|способна|способно|"
+    r"всегда|обязательно))?|нельзя|никогда\s+не|вряд\s+ли|"
+    r"не\s+явля\w*\s+способом)\s*$",
+    re.IGNORECASE,
+)
+_PRO_OUTCOME_NEGATED_INSIDE_RE = re.compile(
+    r"\b(?:не|вряд\s+ли|не\s+обязательно|не\s+всегда)\b",
+    re.IGNORECASE,
+)
+_PRO_OUTCOME_NEGATED_AFTER_RE = re.compile(
+    r"^\s*(?:[а-я]+\s+){0,3}(?:нельзя|невозможно|не\s+(?:может|могут|"
+    r"доказан\w*|подтвержд\w*|гарантир\w*|получит\w*|получится)|"
+    r"вряд\s+ли|не\s+явля\w*\s+примером)\b",
+    re.IGNORECASE,
+)
+
+
+_PRO_OUTCOME_QUOTE_CAUTION_RE = re.compile(
+    r"\b(?:миф\w*|ложн\w*\s+обещани\w*|недоказан\w*|"
+    r"неверн\w*|ошибочн\w*|не\s+использу\w*|"
+    r"нельзя\s+(?:говор\w*|обеща\w*)|"
+    r"не\s+стоит\s+(?:утвержда\w*|писа\w*|обеща\w*)|"
+    r"неверно\s+обеща\w*|не\s+да\w*\s+гаранти\w*|"
+    r"не\s+подтвержд\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _pro_has_unsupported_outcome_promise(text: str) -> bool:
+    normalized = (text or "").lower().replace("ё", "е")
+    # A quoted false claim can be pedagogical criticism, not a promise.
+    # Suppress only quotations explicitly framed as incorrect or unproven.
+    def discard_disclaimed_quote(match):
+        before = normalized[max(0, match.start() - 110):match.start()]
+        after = normalized[match.end():match.end() + 110]
+        return " " if _PRO_OUTCOME_QUOTE_CAUTION_RE.search(before + " " + after) else match.group(0)
+    normalized = re.sub(r"«[^»\n]{0,180}»", discard_disclaimed_quote, normalized)
+    for clause in re.split(r"[.!?;\n]+|,\s*но\s+|\s+однако\s+", normalized):
+        candidates = list(_PRO_OUTCOME_RE.finditer(clause))
+        # Only an affirmative goal about prophylaxis is a claim; mentions in
+        # discussion, diagnostics and negated goals must remain permissible.
+        goal = _PRO_OUTCOME_GOAL_RE.search(clause)
+        if goal:
+            candidates.append(goal)
+        for match in candidates:
+            before = clause[max(0, match.start()-140):match.start()]
+            inside = match.group(0)
+            after = clause[match.end():match.end()+70]
+            if _PRO_OUTCOME_NEGATED_BEFORE_RE.search(before):
+                continue
+            if _PRO_OUTCOME_WARNING_BEFORE_RE.search(before):
+                continue
+            if _PRO_OUTCOME_NEGATED_INSIDE_RE.search(inside):
+                continue
+            if _PRO_OUTCOME_NEGATED_AFTER_RE.search(after):
+                continue
+            return True
+    return False
+
+
 def validate_pro_concrete_details(output_text: str, evidence_text: str) -> Tuple[bool, str]:
     out = _normalize_scan_text(output_text)
     if not out:
@@ -2534,6 +2633,9 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
     if not PRO_OBSERVATION_ALLOWED_RE.search(_normalize_scan_text(observation)):
         return False, "pro_missing_observation_criterion"
     if PRO_OBSERVATION_UNSUPPORTED_CLAIM_RE.search(_normalize_scan_text(observation)):
+        return False, "pro_unsupported_observation_claim"
+
+    if _pro_has_unsupported_outcome_promise(text):
         return False, "pro_unsupported_observation_claim"
 
     if not any(verb in blob for verb in PRO_ACTION_VERBS):

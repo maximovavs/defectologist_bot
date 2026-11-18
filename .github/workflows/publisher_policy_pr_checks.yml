@@ -218,3 +218,165 @@ jobs:
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() else 1)
           PY
+  source-http-probe:
+    name: Exact source HTTP probe (Nationwide + NAEYC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      STATE_SCOPE: "probe"
+      TARGET_CHANNEL: "test"
+      DRY_RUN: "1"
+      GROQ_API_KEY: ""
+      GEMINI_API_KEY: ""
+      GEMINI_VISUAL_QA_API_KEY: ""
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_CHAT_ID: ""
+      TELEGRAM_DRAFTS_CHAT_ID: ""
+      POLLINATIONS_TOKEN: ""
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal original-extractor dependencies
+        run: |
+          python -m pip install \
+            "requests>=2.31.0,<3" \
+            "beautifulsoup4>=4.12.2" \
+            "lxml>=5.1.0" \
+            "PyYAML>=6.0.1" \
+            "Pillow>=10.3.0" \
+            "python-dateutil>=2.9.0.post0" \
+            "feedparser>=6.0.11"
+
+      - name: Probe two exact URLs using unmodified production extractor and validator
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import sys
+          import types
+          from urllib.parse import urljoin, urlparse
+
+          import requests
+          from bs4 import BeautifulSoup
+
+          # Match the existing offline-policy import shim; no semantic model or LLM.
+          sentence_transformers = types.ModuleType("sentence_transformers")
+
+          class _UnavailableModel:
+              def __init__(self, *args, **kwargs):
+                  raise RuntimeError("semantic model disabled for HTTP source probe")
+
+          class _UnavailableUtil:
+              @staticmethod
+              def pytorch_cos_sim(*args, **kwargs):
+                  raise RuntimeError("semantic model disabled for HTTP source probe")
+
+          sentence_transformers.SentenceTransformer = _UnavailableModel
+          sentence_transformers.util = _UnavailableUtil()
+          sys.modules["sentence_transformers"] = sentence_transformers
+
+          from src.publisher.run_publisher import (
+              HEADERS,
+              _decode_response_text,
+              _verify_for_url,
+              extract_evidence_payload,
+          )
+          from src.services.llm_generator import (
+              PRO_EVIDENCE_ACTION_RE,
+              PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE,
+              PRO_EVIDENCE_CRITERION_RE,
+              _normalize_scan_text,
+              validate_pro_evidence_for_generation,
+          )
+
+          urls = (
+              "https://www.nationwidechildrens.org/family-resources-education/700childrens/2025/07/baby-talk-vs-parentese",
+              "https://www.naeyc.org/our-work/families/support-language-development-infants-and-toddlers/",
+          )
+          statuses = []
+          for url in urls:
+              result = {"url": url, "verdict": "NOT_VERIFIED"}
+              try:
+                  # A real HTTP fetch from the same runner with production headers.
+                  response = requests.get(
+                      url, headers=HEADERS, timeout=35, verify=_verify_for_url(url)
+                  )
+                  result["http_status"] = response.status_code
+                  result["final_url"] = response.url
+                  result["content_type"] = response.headers.get("Content-Type", "")
+                  result["html_bytes"] = len(response.content)
+                  result["html_sha256"] = hashlib.sha256(response.content).hexdigest()
+                  response.raise_for_status()
+                  ctype = result["content_type"].lower()
+                  if "text/html" not in ctype and "application/xhtml" not in ctype:
+                      raise ValueError("not_html")
+                  if urlparse(response.url).hostname != urlparse(url).hostname:
+                      raise ValueError("cross_host_redirect")
+
+                  soup = BeautifulSoup(_decode_response_text(response), "lxml")
+                  title = soup.title.get_text(" ", strip=True) if soup.title else ""
+                  result["html_title"] = title[:160]
+                  canonical = soup.find(
+                      "link", rel=lambda value: value and "canonical" in value.lower()
+                  )
+                  href = canonical.get("href", "").strip() if canonical else ""
+                  result["canonical_href"] = href or None
+                  result["canonical_resolved"] = urljoin(url, href) if href else None
+                  head_sample = _decode_response_text(response)[:25000].lower()
+                  if (
+                      "challenge-platform" in head_sample
+                      or "cf-chl" in head_sample
+                      or title.lower().startswith("just a moment")
+                  ):
+                      raise ValueError("cloudflare_challenge_not_article")
+
+                  # Invoke both original production functions with no modifications.
+                  payload = extract_evidence_payload(url, max_chars=3600)
+                  evidence = payload.evidence_text
+                  passed, reason = validate_pro_evidence_for_generation(evidence)
+                  scan = _normalize_scan_text(evidence)
+                  result.update(
+                      evidence_len=len(evidence),
+                      evidence_sha256=hashlib.sha256(
+                          evidence.encode("utf-8")
+                      ).hexdigest(),
+                      topic_detection_len=len(payload.topic_detection_text),
+                      action_anchor=bool(PRO_EVIDENCE_ACTION_RE.search(scan)),
+                      material_anchor=bool(
+                          PRO_EVIDENCE_ACTIVITY_OR_MATERIAL_RE.search(scan)
+                      ),
+                      observation_anchor=bool(PRO_EVIDENCE_CRITERION_RE.search(scan)),
+                      validator_ok=passed,
+                      validator_reason=reason,
+                      evidence_preview=evidence[:240].replace("\n", " "),
+                  )
+                  if len(evidence.strip()) < 260:
+                      result["verdict"] = "REJECT"
+                      result["reason"] = "no_evidence_short"
+                  elif passed:
+                      result["verdict"] = "PREVALIDATION_PASS"
+                  else:
+                      result["verdict"] = "REJECT"
+                      result["reason"] = reason
+              except Exception as exc:
+                  result["reason"] = type(exc).__name__ + ": " + str(exc)[:220]
+              print("SOURCE_PROBE " + json.dumps(
+                  result, ensure_ascii=False, sort_keys=True
+              ), flush=True)
+              statuses.append(result["verdict"])
+
+          print("SOURCE_PROBE_SUMMARY " + json.dumps(
+              {"verdicts": statuses, "all_prevalidation_pass":
+               all(s == "PREVALIDATION_PASS" for s in statuses)},
+              ensure_ascii=False,
+          ), flush=True)
+          raise SystemExit(
+              0 if all(s == "PREVALIDATION_PASS" for s in statuses) else 1
+          )
+          PY

@@ -39,6 +39,7 @@ import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -2650,6 +2651,329 @@ def _validate_pro_output(text: str, evidence_text: str = "") -> Tuple[bool, str]
     if not ok:
         return False, reason
 
+    return _validate_pro_age_hearing_output(text, evidence_text)
+
+
+_PRO_AGE_WORDS = {
+    **SIMPLE_NUMBER_WORDS,
+    "одного": "1", "одной": "1", "двух": "2", "двум": "2", "трех": "3", "трем": "3",
+    "четырех": "4", "четырем": "4", "пяти": "5", "шесть": "6", "шести": "6",
+    "семь": "7", "семи": "7", "восемь": "8", "восьми": "8", "девять": "9", "девяти": "9",
+    "десять": "10", "десяти": "10", "одиннадцать": "11", "одиннадцати": "11",
+    "двенадцать": "12", "двенадцати": "12", "полтора": "1.5", "полутора": "1.5",
+    "полторы": "1.5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12",
+}
+_PRO_AGE_NUMBER = rf"(?:\d{{1,3}}(?:[.,]\d{{1,2}})?|(?:{'|'.join(_PRO_AGE_WORDS)})\b)"
+_PRO_AGE_UNIT = rf"(?:летн\w*|месячн\w*|{PARENT_AGE_UNIT_PATTERN})(?!\w)"
+_PRO_AGE_ADJECTIVE_PREFIXES = {
+    "одно": "1", "двух": "2", "трех": "3", "четырех": "4", "пяти": "5",
+    "шести": "6", "семи": "7", "восьми": "8", "девяти": "9",
+    "десяти": "10", "одиннадцати": "11", "двенадцати": "12", "тринадцати": "13",
+    "четырнадцати": "14", "пятнадцати": "15", "шестнадцати": "16", "семнадцати": "17",
+    "восемнадцати": "18", "девятнадцати": "19", "полу": "0.5", "полутора": "1.5",
+}
+for _tens_stem, _tens_value in (("двадцати", 20), ("тридцати", 30), ("сорока", 40),
+                                 ("пятидесяти", 50), ("шестидесяти", 60), ("семидесяти", 70),
+                                 ("восьмидесяти", 80), ("девяноста", 90)):
+    _PRO_AGE_ADJECTIVE_PREFIXES[_tens_stem] = str(_tens_value)
+    for _unit_stem in ("одно", "двух", "трех", "четырех", "пяти", "шести", "семи", "восьми", "девяти"):
+        _PRO_AGE_ADJECTIVE_PREFIXES[_tens_stem + _unit_stem] = str(
+            _tens_value + int(_PRO_AGE_ADJECTIVE_PREFIXES[_unit_stem])
+        )
+_PRO_AGE_ADJECTIVE_NUMBER = "|".join(sorted(_PRO_AGE_ADJECTIVE_PREFIXES, key=len, reverse=True))
+_PRO_AGE_COMPOUND_NUMBER = rf"(?:\d{{1,3}}(?:[.,]\d{{1,2}})?|{_PRO_AGE_ADJECTIVE_NUMBER})"
+_PRO_AGE_ADJECTIVE_RE = re.compile(
+    rf"(?<!\w)(?:(?P<low>{_PRO_AGE_COMPOUND_NUMBER})\s*-\s*)?"
+    rf"(?P<number>{_PRO_AGE_COMPOUND_NUMBER})-?"
+    r"(?P<unit>летн\w*|лет(?:ок|к\w*)|месячн\w*|годовал\w*)\b"
+)
+_PRO_AGE_DURATION_NOUN_RE = re.compile(r"\s+(?:опыт|стаж|практик)\w*\b")
+
+
+def _normalize_pro_age_adjectives(text: str) -> str:
+    def replace_age(match: re.Match) -> str:
+        # A duration adjective modifies experience/tenure, not a child's age.
+        if _PRO_AGE_DURATION_NOUN_RE.match(text, match.end()):
+            return " " * len(match[0])
+        unit = "месяцев" if match["unit"].startswith("месячн") else "лет"
+        def number(token: str) -> str:
+            return _PRO_AGE_ADJECTIVE_PREFIXES.get(token, token)
+        low = number(match["low"]) + "-" if match["low"] else ""
+        return low + number(match["number"]) + " " + unit
+
+    text = _PRO_AGE_ADJECTIVE_RE.sub(replace_age, text)
+    return re.sub(r"\bгодовал\w*\b", "1 год", text)
+
+
+_PRO_LIFE_YEAR_ORDINALS = (
+    (1, r"перв\w*|first"), (2, r"втор\w*|second"),
+    (3, r"трет\w*|third"), (4, r"четверт\w*|fourth"),
+    (5, r"пят\w*|fifth"), (6, r"шест\w*|sixth"),
+    (7, r"седьм\w*|seventh"), (8, r"восьм\w*|eighth"),
+    (9, r"девят\w*|ninth"), (10, r"десят\w*|tenth"),
+    (11, r"одиннадцат\w*|eleventh"), (12, r"двенадцат\w*|twelfth"),
+    (13, r"тринадцат\w*|thirteenth"), (14, r"четырнадцат\w*|fourteenth"),
+    (15, r"пятнадцат\w*|fifteenth"), (16, r"шестнадцат\w*|sixteenth"),
+    (17, r"семнадцат\w*|seventeenth"), (18, r"восемнадцат\w*|eighteenth"),
+    (19, r"девятнадцат\w*|nineteenth"), (20, r"двадцат\w*|twentieth"),
+)
+_PRO_LIFE_YEAR_RE = re.compile(
+    r"\b(?:(?P<digit>\d{1,3})(?:-?(?:й|го|му|м|ый|ой|st|nd|rd|th))|"
+    + "|".join(f"(?P<year_{n}>{pattern})" for n, pattern in _PRO_LIFE_YEAR_ORDINALS)
+    + r")\s+(?:год(?:а|у|е|ом)?\s+жизни|year\s+of\s+life)\b"
+)
+
+
+
+_PRO_CLOSED_AGE_RE = re.compile(
+    rf"(?<![\w.,])(?:(?P<between>between)\s+|(?:от|from)\s+)?"
+    rf"(?P<low>{_PRO_AGE_NUMBER})(?:[ \t-]*(?P<low_unit>{_PRO_AGE_UNIT}))?"
+    rf"\s*(?(between)\band\b|(?:-|\b(?:до|to|through)\b))\s*"
+    rf"(?P<high>{_PRO_AGE_NUMBER})[ \t-]*(?P<unit>{_PRO_AGE_UNIT})"
+)
+_PRO_AGE_LIMIT_RE = re.compile(
+    rf"(?<![\w.,])(?:(?P<start>начиная\s+с|starting\s+at|не\s+младше|с|от|from|at\s+least)"
+    rf"|(?P<after>старше|после|older\s+than|over|after)"
+    rf"|(?P<until>до|младше|under|younger\s+than|before)"
+    rf"|(?P<through>не\s+старше|up\s+to|at\s+most))?\s*"
+    rf"(?P<number>{_PRO_AGE_NUMBER})\s*(?P<plus>\+)?[ \t-]*(?P<unit>{_PRO_AGE_UNIT})"
+    rf"(?:[ -]+old\b)?(?:\s*(?P<suffix>\+|(?:и|или|and|or)\s+"
+    r"(?:старше|младше|older|younger|more|less)\b|включительно\b|inclusive\b))?"
+)
+_PRO_AGE_CATEGORIES = {
+    "newborn": r"новорожден\w*|newborns?|neonates?",
+    # Education stages are not interchangeable with numeric age ranges.
+    "nursery": r"ясельн\w*\s+возраст\w*|ясельник\w*|nursery[- ]aged?",
+    "kindergarten": r"детсадов(?:ец|ц\w*)|kindergarteners?|kindergartners?",
+    "first_grade": r"первоклассник\w*|first[- ]graders?",
+    "one_year_group": r"годовасик\w*",
+    "infant": r"младен\w*|груднич\w*|грудн\w*\s+(?:возраст\w*|дет\w*|ребен\w*)|infants?|bab(?:y|ies)(?![- ]talk\b)",
+    "toddler": r"тоддлер\w*|(?:дет\w*|ребен\w*)\s+раннего\s+возраста|toddlers?",
+    "young_preschool": r"младш\w*\s+(?:дошкольник\w*|дошкольн\w*\s+возраст\w*)|younger\s+preschoolers?",
+    "older_preschool": r"старш\w*\s+(?:дошкольник\w*|дошкольн\w*\s+возраст\w*)|older\s+preschoolers?",
+    "preschool": r"дошкольник\w*|дошкольн\w*\s+возраст\w*|preschool(?:ers?|[- ]aged?)?",
+    "early_school": r"младш\w*\s+(?:школьник\w*|школьн\w*\s+возраст\w*)|"
+        r"early\s+(?:primary|elementary)[- ]school(?:[- ]aged?)?",
+    "school": r"школьник\w*|школьн\w*\s+возраст\w*|school[- ]aged?",
+    "teen": r"подрост\w*|teens?|teenagers?|adolescents?",
+}
+_PRO_AGE_CATEGORY_RE = re.compile(
+    r"\b(?:" + "|".join(f"(?P<{key}>{pattern})" for key, pattern in _PRO_AGE_CATEGORIES.items()) + r")\b"
+)
+_PRO_AGE_FROM_BIRTH_RE = re.compile(
+    r"\b(?:с\s+рождения|от\s+рождения|(?:from|since)\s+birth|"
+    r"from\s+the\s+time\s+(?:they\s+are|(?:he|she)\s+is)\s+born)\b"
+)
+
+
+def _pro_age_claims(text: str) -> set[tuple]:
+    """Keep exact age bounds and explicit age groups distinct."""
+    value = re.sub(r"[‐‑‒–—−]", "-", _normalize_scan_text(text))
+    value = _normalize_pro_age_adjectives(value)
+    value = _mask_professional_duration_years(value)
+    value = re.sub(r"\b(?:с|от)\s+рождения\s+(?:и\s+)?до\b", "от 0 до", value)
+    value = re.sub(r"\bfrom\s+birth\s+(?:to|through)\b", "from 0 to", value)
+    value = re.sub(r"(?<=\d)-?(?:х|ти)\b(?=\s+(?:лет|год|месяц|мес\b))", "", value)
+    value = re.sub(r"\b(до|от|с|младше|старше|после)\s+года\b", r"\1 1 год", value)
+    claims = {("category", match.lastgroup) for match in _PRO_AGE_CATEGORY_RE.finditer(value)}
+
+    def record_life_year(match: re.Match) -> str:
+        year = int(match["digit"]) if match["digit"] else next(
+            n for n, _ in _PRO_LIFE_YEAR_ORDINALS if match[f"year_{n}"]
+        )
+        # The second year of life is [12, 24) months, not "2 years old".
+        claims.add(("life_year", year))
+        return " " * len(match[0])
+
+    value = _PRO_LIFE_YEAR_RE.sub(record_life_year, value)
+    if _PRO_AGE_FROM_BIRTH_RE.search(value):
+        claims.add(("start", 0))
+
+    def months(number: str, unit: str) -> Decimal:
+        return Decimal(_PRO_AGE_WORDS.get(number, number).replace(",", ".")) * _age_value_to_months(1, unit)
+
+    def record_closed(match: re.Match) -> str:
+        unit = match["unit"]
+        low = months(match["low"], match["low_unit"] or unit)
+        high = months(match["high"], unit)
+        # Retain the established exact range policy and normalize equivalent units.
+        claims.add(("closed", min(low, high), max(low, high)))
+        return " " * len(match[0])
+
+    value = re.sub(
+        r"\b(\d{1,3})\s+(?:год(?:а)?|лет|years?)\s+(?:(?:и|and)\s+)?"
+        r"(\d{1,2})\s+(?:месяц(?:а|ев)?|months?)\b",
+        lambda match: f"{int(match[1]) * 12 + int(match[2])} месяцев",
+        value,
+    )
+    remaining = _PRO_CLOSED_AGE_RE.sub(record_closed, value)
+    for match in _PRO_AGE_LIMIT_RE.finditer(remaining):
+        age = months(match["number"], match["unit"])
+        suffix = match["suffix"] or ""
+        kind = next((name for name in ("start", "after", "until", "through") if match[name]), "")
+        inclusive_end = suffix in {"включительно", "inclusive"}
+        if kind == "until" and inclusive_end:
+            kind = "through"
+        if not kind:
+            if match["plus"] or suffix == "+" or suffix.endswith(("старше", "older", "more")):
+                kind = "start"
+            elif suffix and not inclusive_end:
+                kind = "through"
+        claims.add((kind, age) if kind else ("closed", age, age))
+    return claims
+
+
+_PRO_HEARING_REACTION_RE = re.compile(
+    r"\b(?:повтор\w*|произнос\w*|произнес\w*|ответ\w*|отвеч\w*|(?:с)?реагир\w*|реакци\w*|"
+    r"отклик\w*|поворачива\w*|поворот\w*|поверну\w*|различ\w*|выполня\w*|выполнил\w*|"
+    r"отозва\w*|замет\w*|имитир\w*|жестикулир\w*|кива\w*|(?:у)?слыш\w*)\b"
+)
+_PRO_HEARING_LOSS = (r"(?:(?:нарушен\w*|снижен\w*|потер\w*)\s+слух\w*|"
+                     r"слухов\w*\s+нарушен\w*|проблем\w*\s+со\s+слух\w*|тугоухост\w*|глухот\w*)")
+_PRO_HEARING_CHECK = r"(?:провер\w*|обследова\w*|тестирова\w*)"
+_PRO_HEARING_NO_NEED = r"(?:можно\s+не|не\s+(?:нужно|надо|обязательно|требуется|стоит)|нет\s+необходимости)"
+_PRO_HEARING_SUBJECT = r"(?:у\s+(?:него|нее|них|ребен\w*|дет\w*|малыш\w*)\s+)?"
+# A finite exclusion verb is itself a diagnostic conclusion, not merely a
+# referral to have the condition investigated (e.g. "исключить у сурдолога").
+_PRO_HEARING_EXCLUSION_RE = re.compile(r"^исключ(?:ает|ают|ал[аи]?|ил[аи]?|ит|ат)\b")
+_PRO_HEARING_EXCLUSION_INFINITIVE_RE = re.compile(r"^исключить\b")
+_PRO_HEARING_EXCLUSION_BASIS_RE = re.compile(r"\b(?:можно|позволя\w*)\s*$")
+_PRO_HEARING_SPECIALIST = r"(?:сурдолог\w*|аудиолог\w*)"
+_PRO_HEARING_CARE = (
+    rf"(?:(?:консультаци\w*|прием\w*|визит\w*|посещени\w*)\s+(?:(?:к|у)\s+)?{_PRO_HEARING_SPECIALIST}|"
+    rf"(?:к|у)\s+{_PRO_HEARING_SPECIALIST}(?:\s+(?:идти|ходить|обращаться|записываться|записаться))?|"
+    rf"{_PRO_HEARING_SPECIALIST}|аудиометри\w*|(?:аудиологическ\w*|сурдологическ\w*)\s+(?:обследован\w*|провер\w*|скрининг\w*)|"
+    rf"(?:проверк\w*|обследован\w*|скрининг\w*)\s+слух\w*(?:\s+у\s+{_PRO_HEARING_SPECIALIST})?)"
+)
+_PRO_HEARING_CARE_ACTION = r"(?:идти|ходить|обращаться|записываться|записаться|проходить|пройти|делать|сделать|проводить|провести)"
+_PRO_HEARING_CARE_DELAY = r"(?:отложить|откладывать|перенести|отсрочить|отсрочивать|отменить|отменять)"
+_PRO_HEARING_CARE_REFUSAL = (
+    rf"(?:{_PRO_HEARING_NO_NEED}|не\s+(?:нуж(?:ен|н\w*)|обязател\w*|требу\w*|целесообразн\w*)|излишн\w*)"
+)
+_PRO_HEARING_CARE_AVOIDANCE = (
+    rf"(?:{_PRO_HEARING_CARE}\s+(?:{_PRO_HEARING_CARE_REFUSAL}(?:\s+{_PRO_HEARING_CARE_ACTION})?|"
+    rf"можно\s+{_PRO_HEARING_CARE_DELAY})|"
+    rf"{_PRO_HEARING_CARE_REFUSAL}\s+(?:{_PRO_HEARING_CARE_ACTION}\s+)?{_PRO_HEARING_CARE}|"
+    rf"можно\s+{_PRO_HEARING_CARE_DELAY}\s+{_PRO_HEARING_CARE})"
+)
+_PRO_HEARING_STATUS_RE = re.compile(
+    rf"\b(?:{_PRO_HEARING_CARE_AVOIDANCE}|"
+    rf"слух\w*\s+(?:{_PRO_HEARING_SUBJECT}|ребенка\s+)(?:в\s+(?:норме|порядке)|нормальн\w*|сохранен\w*|хорош\w*|не\s+нарушен\w*)|"
+    rf"со\s+слух\w*\s+{_PRO_HEARING_SUBJECT}(?:проблем\w*|нарушен\w*)\s+нет|"
+    r"слухов\w*\s+функци\w*\s+сохран\w*|"
+    r"в\s+норме\s+(?:(?:его|ее)\s+)?слух\w*|"
+    r"(?:нормальн\w*|сохранн\w*|хорош\w*)\s+слух\w*|"
+    r"(?:хорошо|нормально)\s+слыш\w*|слыш\w*\s+(?:хорошо|нормально)|"
+    rf"{_PRO_HEARING_LOSS}\s+{_PRO_HEARING_SUBJECT}(?:нет|исключен\w*|отсутств\w*)|"
+    rf"{_PRO_HEARING_SUBJECT}(?:нет|отсутств\w*|исключ\w*)\s+{_PRO_HEARING_LOSS}|"
+    r"со\s+слух\w*\s+(?:все\s+)?в\s+порядке|"
+    # Checking is not necessary: a negative action is a positive reassurance.
+    rf"слух\w*\s+{_PRO_HEARING_NO_NEED}\s+{_PRO_HEARING_CHECK}|"
+    rf"{_PRO_HEARING_NO_NEED}\s+{_PRO_HEARING_CHECK}\s+слух\w*|"
+    rf"(?:слух\w*\s+{_PRO_HEARING_CHECK}|{_PRO_HEARING_CHECK}\s+слух\w*)\s+"
+    r"не\s+(?:нужно|надо|обязательно|требуется|стоит)|"
+    r"(?:проверка|обследование)\s+слух\w*\s+не\s+(?:нужн\w*|требуется|обязательн\w*)|"
+    r"(?P<bare_perception>(?:он|она|они|ребенок|малыш)\s+слыш(?:ит|ат))(?=\s*(?:$|[,–—:]))|"
+    r"(?:провер\w*|оцен\w*|определ\w*)\s+(?:состояние\s+)?слух\w*)\b"
+)
+_PRO_HEARING_CONCLUSION_RE = re.compile(
+    r"\b(?:значит|следовательно|поэтому|так\s+что|означа\w*|доказыва\w*|подтвержда\w*|"
+    r"свидетельству\w*|показыва\w*|говорит\s+о|указывает\s+на|делать\s+вывод|"
+    r"признак\w*|показател\w*|доказательств\w*|"
+    r"можно\s+(?:сделать\s+вывод|заключить|считать|определить|проверить|исключить))\b"
+)
+_PRO_HEARING_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:не\s+(?:значит|явля\w*|означа\w*|доказыва\w*|подтвержда\w*|свидетельству\w*|"
+    r"говорит\s+о|указывает\s+на|позволя\w*|да[ею]т\s+оснований|показыва\w*|исключа\w*|можно|следует|стоит|"
+    r"признак\w*|показател\w*|доказательств\w*)"
+    r"|нельзя|невозможно|нет\s+оснований)(?:\s*,?\s+[\w-]+){0,8}\s*,?\s*$"
+)
+_PRO_HEARING_NEGATED_AFTER_RE = re.compile(
+    r"^\s*(?:(?:судить|говорить|заключать|утверждать)\s+)?(?:нельзя|невозможно|"
+    r"не\s+(?:подтвержда\w*|следует|доказыва\w*))\b"
+)
+_PRO_HEARING_STATUS_BASIS_RE = re.compile(
+    r"^\s*[,–—]?\s*(?:если|поскольку|потому\s+что|так\s+как|ведь|судя\s+по|по\s+реакции)\b"
+)
+_PRO_HEARING_REFERRAL_AFTER_RE = re.compile(r"^\s+у\s+(?:аудиолог|сурдолог|врач|специалист)\w*\b")
+_PRO_HEARING_REFERRAL_RE = re.compile(
+    r"\b(?:обрат\w*|направ\w*|обсуд\w*)\b[^,.!?;]{0,65}"
+    r"\b(?:аудиолог\w*|сурдолог\w*|врач\w*|специалист\w*)\b[^,.!?;]{0,35}"
+    r"(?:,?\s*(?:чтобы|для)\s+)?$"
+)
+
+
+def _pro_infers_hearing_status(text: str) -> bool:
+    previous_reaction = False
+    clauses = re.split(r"[.!?;\n]+|,\s*(?:но|а|однако)\s+|\s+однако\s+", text)
+    for clause in clauses:
+        if not clause.strip():
+            continue
+        reaction = bool(_PRO_HEARING_REACTION_RE.search(clause))
+        parent_ok, _ = _validate_parent_hearing_inference_output(clause)
+        end_of_last_status = 0
+        for match in _PRO_HEARING_STATUS_RE.finditer(clause):
+            before = clause[end_of_last_status:match.start()]
+            after = clause[match.end():]
+            end_of_last_status = match.end()
+            if (_PRO_HEARING_NEGATED_BEFORE_RE.search(before)
+                    or PARENT_HEARING_NEGATED_INFERENCE_RE.search(before)
+                    or _PRO_HEARING_NEGATED_AFTER_RE.match(after)
+                    or _PRO_HEARING_REFERRAL_RE.search(before)
+                    or _PRO_HEARING_REFERRAL_AFTER_RE.match(after)):
+                continue
+            # Ignore an embedded question rather than treating it as a result.
+            if re.match(r"\s+ли\b", after):
+                continue
+            if reaction or previous_reaction:
+                explicit_conclusion = _PRO_HEARING_CONCLUSION_RE.search(before) or (
+                    reaction and (_PRO_HEARING_CONCLUSION_RE.match(after.strip())
+                                  or _PRO_HEARING_STATUS_BASIS_RE.match(after))
+                )
+                # Both directions of a causal assertion: response -> status,
+                # and status -> purported behavioral proof. A bare perception
+                # verb needs an explicit inference link, not mere proximity.
+                direct_link = _PRO_HEARING_REACTION_RE.search(before) and (
+                    re.search(r"[,–—:-]\s*$", before)
+                    or re.search(r"\bпо\s+(?:ответ|реакци|поворот|отклик|произнош|повтор)\w*", before)
+                )
+                reverse_link = (re.match(r"\s*[-–—:]\s*", after)
+                                and _PRO_HEARING_REACTION_RE.search(after))
+                if match["bare_perception"] and not (
+                    (previous_reaction or _PRO_HEARING_REACTION_RE.search(before + " " + after))
+                    and (explicit_conclusion or direct_link or reverse_link)
+                ):
+                    continue
+                # A standalone finite verb may refer back to the immediately
+                # preceding reaction; do not treat an unrelated subject as it.
+                refers_to_reaction = reaction or (
+                    previous_reaction and re.fullmatch(r"\s*(?:это|такое поведение)?\s*", before)
+                )
+                exclusion_conclusion = refers_to_reaction and (
+                    _PRO_HEARING_EXCLUSION_RE.match(match[0]) or (
+                        _PRO_HEARING_EXCLUSION_INFINITIVE_RE.match(match[0])
+                        and _PRO_HEARING_EXCLUSION_BASIS_RE.search(before)
+                    )
+                )
+                if explicit_conclusion or direct_link or reverse_link or exclusion_conclusion or not parent_ok or (
+                    previous_reaction and not before.strip()
+                ):
+                    return True
+        previous_reaction = reaction
+    return False
+
+
+def _validate_pro_age_hearing_output(text: str, evidence_text: str) -> Tuple[bool, str]:
+    lines = [
+        line for line in _normalize_scan_lines(text)
+        if not re.match(r"^(?:(?:источник|source)\s*[:：]|🔗|#)", line)
+    ]
+    content = "\n".join(lines)
+    if not _pro_age_claims(content).issubset(_pro_age_claims(evidence_text)):
+        return False, "pro_age_not_grounded"
+    if _pro_infers_hearing_status(content):
+        return False, "pro_false_hearing_inference"
     return True, "ok"
 
 

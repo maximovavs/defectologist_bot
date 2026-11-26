@@ -2839,20 +2839,20 @@ _PRO_HEARING_SUBJECT = r"(?:у\s+(?:него|нее|них|ребен\w*|дет\
 _PRO_HEARING_EXCLUSION_RE = re.compile(r"^исключ(?:ает|ают|ал[аи]?|ил[аи]?|ит|ат)\b")
 _PRO_HEARING_EXCLUSION_INFINITIVE_RE = re.compile(r"^исключить\b")
 _PRO_HEARING_EXCLUSION_BASIS_RE = re.compile(r"\b(?:можно|позволя\w*)\s*$")
-_PRO_HEARING_SPECIALIST = r"(?:сурдолог\w*|аудиолог\w*)"
+_PRO_HEARING_SPECIALIST = r"(?:сурдолог\w*|аудиолог\w*|лор(?:у|а|ом|е)?)"
 _PRO_HEARING_CARE = (
     rf"(?:(?:консультаци\w*|прием\w*|визит\w*|посещени\w*)\s+(?:(?:к|у)\s+)?{_PRO_HEARING_SPECIALIST}|"
     rf"(?:к|у)\s+{_PRO_HEARING_SPECIALIST}(?:\s+(?:идти|ходить|обращаться|записываться|записаться))?|"
-    rf"{_PRO_HEARING_SPECIALIST}|аудиометри\w*|(?:аудиологическ\w*|сурдологическ\w*)\s+(?:обследован\w*|провер\w*|скрининг\w*)|"
-    rf"(?:проверк\w*|обследован\w*|скрининг\w*)\s+слух\w*(?:\s+у\s+{_PRO_HEARING_SPECIALIST})?)"
+    rf"{_PRO_HEARING_SPECIALIST}|аудиометри\w*|аудиограмм\w*|(?:аудиологическ\w*|сурдологическ\w*)\s+(?:обследован\w*|провер\w*|скрининг\w*)|"
+    rf"(?:проверк\w*|проверять|проверить|обследован\w*|исследован\w*|скрининг\w*)\s+слух\w*(?:\s+у\s+(?:{_PRO_HEARING_SPECIALIST}|специалист\w*))?)"
 )
 _PRO_HEARING_CARE_ACTION = r"(?:идти|ходить|обращаться|записываться|записаться|проходить|пройти|делать|сделать|проводить|провести)"
 _PRO_HEARING_CARE_DELAY = r"(?:отложить|откладывать|перенести|отсрочить|отсрочивать|отменить|отменять)"
 _PRO_HEARING_CARE_REFUSAL = (
-    rf"(?:{_PRO_HEARING_NO_NEED}|не\s+(?:нуж(?:ен|н\w*)|обязател\w*|требу\w*|целесообразн\w*)|излишн\w*)"
+    rf"(?:{_PRO_HEARING_NO_NEED}|не\s+(?:нуж(?:ен|н\w*)|обязател\w*|требу\w*|целесообразн\w*)|излишн\w*|незачем)"
 )
 _PRO_HEARING_CARE_AVOIDANCE = (
-    rf"(?:{_PRO_HEARING_CARE}\s+(?:{_PRO_HEARING_CARE_REFUSAL}(?:\s+{_PRO_HEARING_CARE_ACTION})?|"
+    rf"(?:(?:{_PRO_HEARING_CARE_ACTION}\s+)?{_PRO_HEARING_CARE}\s+(?:(?:{_PRO_HEARING_CARE_ACTION}\s+)?{_PRO_HEARING_CARE_REFUSAL}(?:\s+{_PRO_HEARING_CARE_ACTION})?|"
     rf"можно\s+{_PRO_HEARING_CARE_DELAY})|"
     rf"{_PRO_HEARING_CARE_REFUSAL}\s+(?:{_PRO_HEARING_CARE_ACTION}\s+)?{_PRO_HEARING_CARE}|"
     rf"можно\s+{_PRO_HEARING_CARE_DELAY}\s+{_PRO_HEARING_CARE})"
@@ -2862,12 +2862,13 @@ _PRO_HEARING_STATUS_RE = re.compile(
     rf"слух\w*\s+(?:{_PRO_HEARING_SUBJECT}|ребенка\s+)(?:в\s+(?:норме|порядке)|нормальн\w*|сохранен\w*|хорош\w*|не\s+нарушен\w*)|"
     rf"со\s+слух\w*\s+{_PRO_HEARING_SUBJECT}(?:проблем\w*|нарушен\w*)\s+нет|"
     r"слухов\w*\s+функци\w*\s+сохран\w*|"
+    rf"слухов\w*\s+восприяти\w*\s+{_PRO_HEARING_SUBJECT}в\s+норме|"
     r"в\s+норме\s+(?:(?:его|ее)\s+)?слух\w*|"
     r"(?:нормальн\w*|сохранн\w*|хорош\w*)\s+слух\w*|"
     r"(?:хорошо|нормально)\s+слыш\w*|слыш\w*\s+(?:хорошо|нормально)|"
     rf"{_PRO_HEARING_LOSS}\s+{_PRO_HEARING_SUBJECT}(?:нет|исключен\w*|отсутств\w*)|"
     rf"{_PRO_HEARING_SUBJECT}(?:нет|отсутств\w*|исключ\w*)\s+{_PRO_HEARING_LOSS}|"
-    r"со\s+слух\w*\s+(?:все\s+)?в\s+порядке|"
+    rf"со\s+слух\w*\s+{_PRO_HEARING_SUBJECT}(?:все\s+)?(?:в\s+порядке|хорошо)|"
     # Checking is not necessary: a negative action is a positive reassurance.
     rf"слух\w*\s+{_PRO_HEARING_NO_NEED}\s+{_PRO_HEARING_CHECK}|"
     rf"{_PRO_HEARING_NO_NEED}\s+{_PRO_HEARING_CHECK}\s+слух\w*|"

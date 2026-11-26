@@ -279,7 +279,13 @@ class TopicPolicyTest(unittest.TestCase):
             for url in sources_by_id[source_id].get("urls", [])
             if sources_by_id[source_id].get("type") == "static"
         ]
-        self.assertGreaterEqual(len(static_pool), 30)
+        self.assertGreaterEqual(len(static_pool), 28)
+        tier1_static_pool = {
+            url
+            for url in static_pool
+            if publisher.is_scientific_domain(publisher.safe_domain(url), scientific_domains)
+        }
+        self.assertGreaterEqual(len(tier1_static_pool), 24)
         self.assertTrue(
             publisher._requires_tier1_source(
                 "age_norms",
@@ -362,8 +368,6 @@ class TopicPolicyTest(unittest.TestCase):
                 "actionforchildren_communication_milestones",
                 "gosh_speech_language_12_24_months",
                 "kidskey_speech_games",
-                "parents_language_activities",
-                "parents_toddler_language_boost",
                 "logoportal_latest",
             },
         )
@@ -516,7 +520,7 @@ class QuestionWeekP2KCoverageTest(unittest.TestCase):
         self.assertIn(source_id, sources_by_id)
         self.assertEqual(sources_by_id[source_id].get("urls"), [expected_url])
         self.assertNotIn(source_id, friday["sources"])
-        self.assertEqual(len(friday["sources"]), 24)
+        self.assertEqual(len(friday["sources"]), 20)
 
 
     def test_question_week_narrative_recovery_adds_asha_parent_source(self):

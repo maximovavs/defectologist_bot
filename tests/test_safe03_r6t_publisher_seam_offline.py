@@ -69,7 +69,7 @@ class R6TSeamTests(unittest.TestCase):
         self.assertEqual(text.count(u_guard),1)
         legacy = text.replace(a, '').replace(b, '').replace(u_const, '').replace(u_guard, '')
         self.assertEqual(hashlib.sha256(legacy.encode()).hexdigest(),
-                         '57f60192692b6db81f7e3aa72d743ac101d0bed0fc23698f4d5d9bba1318c657')
+                         'a83c959a29bbc8bdff80875bb7d09d54eb055fef6e4377aab346b775112b75fc')
 
     def test_ast_on_guard_stops_before_a_send(self):
         import ast

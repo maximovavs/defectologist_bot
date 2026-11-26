@@ -14,6 +14,7 @@ ADDED_TIER1_SOURCE_IDS = {
     "asha_communication_milestones_3_to_4",
     "asha_communication_milestones_4_to_5",
     "nationwide_birth_to_3_language_activities",
+    "nationwide_baby_talk_parentese",
     "asha_school_readiness_language_activities",
 }
 LEGACY_NON_TIER1_DOMAINS = {
@@ -150,6 +151,7 @@ class MethodPiggybankTier1SourceRoutingTest(unittest.TestCase):
             "asha_communication_milestones_3_to_4": "https://www.asha.org/public/developmental-milestones/communication-milestones-3-to-4-years/",
             "asha_communication_milestones_4_to_5": "https://www.asha.org/public/developmental-milestones/communication-milestones-4-to-5-years/",
             "nationwide_birth_to_3_language_activities": "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/05/speech-and-communication-development-birth-to-3-years",
+            "nationwide_baby_talk_parentese": "https://www.nationwidechildrens.org/family-resources-education/700childrens/2025/07/baby-talk-vs-parentese",
             "asha_school_readiness_language_activities": "https://www.asha.org/news/2023/how-to-build-back-to-school-readiness/",
         }
         urls = [registry[source_id]["urls"][0] for source_id in expected]
@@ -159,6 +161,106 @@ class MethodPiggybankTier1SourceRoutingTest(unittest.TestCase):
                 registry[source_id]["urls"],
                 [url],
             )
+
+
+class NationwideEarlyCommunicationRoutingTest(unittest.TestCase):
+    SOURCE = "nationwide_baby_talk_parentese"
+    # Synthetic routing fixtures, NOT quotations from the Nationwide article.
+    TITLE = "Baby Talk vs. Parentese"
+    BODY = "Parents can imitate their baby's sounds and take turns."
+    REJECT = ("", "rubric_topic_mismatch_source")
+
+    def route(self, evidence, rubric="method_piggybank", source=None,
+              preferred="speech_sounds", detected=None, window="", mapping=None):
+        from src.publisher.run_publisher import _resolve_effective_topic_id
+
+        return _resolve_effective_topic_id(
+            rubric, self.SOURCE if source is None else source, preferred,
+            evidence, mapping or {}, detected, topic_detection_text=window,
+        )
+
+    def test_positive_evidence_routes_only_to_early_communication(self):
+        from src.services.topic_policy import RUBRIC_TOPIC_ROTATION
+
+        expected_rotation = (
+            "speech_sounds", "phonemic_awareness", "vocabulary_phrase",
+            "grammar", "narrative_speech", "preliteracy",
+        )
+        self.assertEqual(RUBRIC_TOPIC_ROTATION["method_piggybank"], expected_rotation)
+        for preferred in (*expected_rotation, "", "early_communication"):
+            for body in (self.BODY, "Turn-taking with infants supports interaction.",
+                         "Show your baby gestures while playing."):
+                with self.subTest(preferred=preferred, body=body):
+                    self.assertEqual(self.route(self.TITLE + "\n" + body, preferred=preferred),
+                                     ("early_communication", ""))
+
+    def test_missing_or_unrelated_evidence_rejected(self):
+        for evidence in ("", self.TITLE, "Early communication with infants",
+                         self.TITLE + "\nThe article discusses vocabulary and grammar.",
+                         self.TITLE + "\nBabies sleep. Adults use gestures.",
+                         self.TITLE + "\nThe baby is sleeping. The other article discusses turn-taking."):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(self.route(evidence), self.REJECT)
+
+    def test_direct_infant_interaction_not_topic_cooccurrence(self):
+        # Synthetic negatives: topic words alone do not establish an activity.
+        for body in (
+            "Babies sleep while adults use gestures.",
+            "Babies sleep while adults take turns reading books.",
+            "Infants sleep while adults discuss joint attention.",
+            "Babies sleep while adults imitate bird sounds.",
+            "Babies sleep while adults discuss early communication.",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.route(self.TITLE + "\n" + body), self.REJECT)
+        # Synthetic sentence preserving the reported real-source action clause.
+        body = "When babies make sounds, you can take turns making sounds with them!"
+        self.assertEqual(self.route(self.TITLE + "\n" + body),
+                         ("early_communication", ""))
+
+    def test_metadata_and_wider_window_cannot_authorize_route(self):
+        evidence = self.TITLE + "\nBabies sleep."
+        self.assertEqual(self.route(evidence, preferred="early_communication",
+                                    detected={"early_communication"},
+                                    window=evidence + "\n" + self.BODY,
+                                    mapping={"early_communication": {self.SOURCE}}), self.REJECT)
+
+    def test_competing_detected_topic_cannot_override_or_rescue(self):
+        self.assertEqual(self.route(self.TITLE + "\n" + self.BODY,
+                                    detected={"grammar", "speech_sounds"}),
+                         ("early_communication", ""))
+        self.assertEqual(self.route(self.TITLE + "\nBabies sleep.",
+                                    detected={"speech_sounds"}), self.REJECT)
+
+    def test_other_rubrics_cannot_use_new_source(self):
+        from src.services.topic_policy import RUBRIC_TOPIC_ROTATION
+
+        for rubric in RUBRIC_TOPIC_ROTATION:
+            if rubric != "method_piggybank":
+                with self.subTest(rubric=rubric):
+                    self.assertEqual(self.route(self.TITLE + "\n" + self.BODY,
+                                                rubric=rubric), self.REJECT)
+
+    def test_existing_sources_keep_legacy_routing(self):
+        old = "nationwide_birth_to_3_language_activities"
+        evidence = self.TITLE + "\n" + self.BODY
+        self.assertEqual(self.route(evidence, source=old, detected={"early_communication"}),
+                         ("", ""))
+        self.assertEqual(self.route(evidence, source=old, detected={"grammar"}),
+                         ("grammar", ""))
+        self.assertEqual(self.route(evidence, source=old, preferred="grammar",
+                                    detected={"grammar", "speech_sounds"}), ("grammar", ""))
+        self.assertEqual(self.route(evidence, rubric="tip_of_day", source=old,
+                                    preferred="early_communication", detected={"early_communication"}),
+                         ("early_communication", ""))
+
+    def test_source_is_registered_only_for_method_piggybank(self):
+        cfg = _load_yaml(ROOT / "config" / "rubrics.yml")
+        owners = [(audience, rubric["id"]) for audience, entry in cfg["audiences"].items()
+                  for rubric in entry.get("rubrics", [])
+                  if self.SOURCE in (rubric.get("sources") or [])]
+        self.assertEqual(owners, [("pros", "method_piggybank")])
+        self.assertEqual(_method_piggybank()["sources"].count(self.SOURCE), 1)
 
 
 if __name__ == "__main__":

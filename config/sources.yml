@@ -196,6 +196,12 @@ sources:
     urls:
       - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2017/05/speech-and-communication-development-birth-to-3-years"
 
+  - id: nationwide_baby_talk_parentese
+    name: "Nationwide Children’s — Baby talk vs parentese"
+    type: static
+    urls:
+      - "https://www.nationwidechildrens.org/family-resources-education/700childrens/2025/07/baby-talk-vs-parentese"
+
   - id: asha_school_readiness_language_activities
     name: "ASHA — Back-to-school communication readiness"
     type: static

@@ -276,7 +276,9 @@ sources:
     name: "The Hanen Centre — Parent tips"
     type: static
     urls:
-      - "https://www.hanen.org/information-tips/tips"
+      - "https://www.hanen.org/information-tips/laying-the-foundation-for-first-words"
+      - "https://www.hanen.org/information-tips/three-keys-to-helping-your-child-learn-language"
+      - "https://www.hanen.org/information-tips/its-worth-the-wait"
 
   - id: hanen_bilingual_myths
     name: "The Hanen Centre — Bilingualism myths & facts"

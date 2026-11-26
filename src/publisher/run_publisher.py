@@ -1844,6 +1844,31 @@ def _resolve_effective_topic_id(
     preferred = (preferred_topic_id or "").strip().lower()
     allowed_topic_ids = RUBRIC_TOPIC_ROTATION.get(rubric, ())
 
+    # Source-local exception, not a new weekly rotation topic. Use only the
+    # factual evidence, never the wider detection window or source metadata.
+    if source == "nationwide_baby_talk_parentese":
+        if rubric != "method_piggybank":
+            return "", "rubric_topic_mismatch_source"
+        # Require a directed interaction, not merely infant and topic words
+        # in the same sentence. Keep the article title outside the scan.
+        infant = r"(?:bab(?:y|ies)|infants?)"
+        determiner = r"(?:(?:your|their|the|a|an)\s+)?"
+        interaction = (
+            rf"\b(?:turn[-\s]+taking|joint attention)\s+with\s+{determiner}{infant}\b"
+            rf"|\bshow\s+{determiner}{infant}\s+gestures?\b"
+            rf"|\b(?:imitat(?:e|es|ing)|repeat(?:s|ing)?|cop(?:y|ies|ying))\s+"
+            rf"{determiner}{infant}(?:['’]s|['’])\s+sounds?\b"
+            rf"|\btak(?:e|es|ing)\s+turns\s+making\s+sounds?\s+with\s+"
+            rf"{determiner}(?:{infant}|them|him|her)\b"
+        )
+        for paragraph in (evidence or "").splitlines()[1:]:
+            for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
+                if re.search(rf"\b{infant}\b", sentence, re.I) and re.search(
+                    interaction, sentence, re.I,
+                ):
+                    return "early_communication", ""
+        return "", "rubric_topic_mismatch_source"
+
     if rubric == "myth_fact" and source in MYTH_FACT_CANONICAL_SOURCE_IDS:
         mapped_topic_ids = tuple(
             topic_id

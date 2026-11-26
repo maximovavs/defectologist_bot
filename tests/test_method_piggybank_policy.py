@@ -21,6 +21,7 @@ EXPECTED_METHOD_SOURCES = {
     "asha_communication_milestones_3_to_4",
     "asha_communication_milestones_4_to_5",
     "nationwide_birth_to_3_language_activities",
+    "nationwide_baby_talk_parentese",
     "asha_school_readiness_language_activities",
 }
 
